@@ -46,6 +46,7 @@ class TransactionService:
     def sync_item(self, item: PlaidItem) -> dict[str, int]:
         plaid = self.plaid_service or PlaidService(self.settings)
         access_token = decrypt_secret(item.access_token_encrypted)
+        self._ensure_item_matches_plaid_environment(item, access_token)
         original_cursor = item.cursor
         cursor = item.cursor
         added_count = 0
@@ -77,11 +78,30 @@ class TransactionService:
         self.db.commit()
         return {"added": added_count, "modified": modified_count, "removed": removed_count}
 
-    def sync_all_items(self) -> dict[str, dict[str, int]]:
-        results: dict[str, dict[str, int]] = {}
+    def sync_all_items(self) -> dict[str, dict[str, int | str]]:
+        results: dict[str, dict[str, int | str]] = {}
         for item in self.db.execute(select(PlaidItem)).scalars():
-            results[item.item_id] = self.sync_item(item)
+            try:
+                results[item.item_id] = self.sync_item(item)
+            except TransactionError as exc:
+                results[item.item_id] = {
+                    "added": 0,
+                    "modified": 0,
+                    "removed": 0,
+                    "skipped": 1,
+                    "reason": str(exc),
+                }
         return results
+
+    def _ensure_item_matches_plaid_environment(self, item: PlaidItem, access_token: str) -> None:
+        token_env = _plaid_token_environment(access_token)
+        if token_env and token_env != self.settings.plaid_env:
+            institution = item.institution_name or item.item_id
+            raise TransactionError(
+                f"Skipped Plaid item {institution}: it was linked in {token_env}, "
+                f"but PLAID_ENV is {self.settings.plaid_env}. Re-link this institution "
+                "in the current Plaid environment."
+            )
 
     def upsert_transaction(self, item: PlaidItem, tx_data: dict[str, Any]) -> bool:
         plaid_transaction_id = str(tx_data["transaction_id"])
@@ -309,6 +329,16 @@ def _category_to_string(category: Any, personal_finance_category: Any) -> str | 
     if isinstance(category, list):
         return " / ".join(map(str, category))
     return str(category) if category else None
+
+
+def _plaid_token_environment(access_token: str) -> str | None:
+    if access_token.startswith("access-sandbox-"):
+        return "sandbox"
+    if access_token.startswith("access-production-"):
+        return "production"
+    if access_token.startswith("access-development-"):
+        return "development"
+    return None
 
 
 def transaction_amount_string(tx: ExpenseTransaction) -> str:

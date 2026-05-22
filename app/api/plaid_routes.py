@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
 from sqlalchemy import select
 
@@ -16,6 +18,7 @@ from app.services.plaid_service import PlaidConfigurationError, PlaidRequestErro
 from app.services.transaction_service import TransactionService
 
 router = APIRouter(prefix="/plaid", tags=["plaid"])
+logger = logging.getLogger(__name__)
 
 
 @router.post("/link-token", response_model=LinkTokenResponse)
@@ -55,6 +58,14 @@ def exchange_public_token(
         item.institution_name = payload.institution_name or item.institution_name
     db.commit()
     db.refresh(item)
+    try:
+        TransactionService(db).sync_item(item)
+    except Exception as exc:
+        logger.warning(
+            "Initial Plaid transactions sync failed for item %s: %s",
+            item.id,
+            type(exc).__name__,
+        )
     return PublicTokenExchangeResponse(item_id=item.item_id, plaid_item_db_id=item.id)
 
 
@@ -75,18 +86,21 @@ async def plaid_webhook(
     webhook_code = payload.get("webhook_code")
     item_id = payload.get("item_id")
 
-    # For local development this receiver is intentionally lightweight. For production,
-    # enable Plaid JWT webhook verification before calling TransactionService.
-    if webhook_type == "TRANSACTIONS" and item_id:
-        item = db.execute(
-            select(PlaidItem).where(PlaidItem.item_id == item_id)
-        ).scalar_one_or_none()
-        if item:
-            background_tasks.add_task(_sync_item_by_db_id, item.id)
-            return WebhookAck(ok=True, message=f"Queued sync for {webhook_code}")
+    if webhook_type != "TRANSACTIONS" or webhook_code != "SYNC_UPDATES_AVAILABLE":
+        logger.info("Ignored Plaid webhook: type=%s code=%s", webhook_type, webhook_code)
+        return WebhookAck(ok=True, message=f"Webhook ignored: {webhook_type}/{webhook_code}")
+
+    if not item_id:
+        logger.warning("Plaid transactions webhook missing item_id")
+        return WebhookAck(ok=True, message="Webhook accepted, but item_id is missing.")
+
+    item = db.execute(select(PlaidItem).where(PlaidItem.item_id == item_id)).scalar_one_or_none()
+    if item is None:
+        logger.warning("Plaid transactions webhook for unknown item_id")
         return WebhookAck(ok=True, message="Webhook accepted, but item is not linked in this app.")
 
-    return WebhookAck(ok=True, message=f"Webhook ignored: {webhook_type}/{webhook_code}")
+    background_tasks.add_task(_sync_item_by_db_id, item.id)
+    return WebhookAck(ok=True, message="Queued transactions sync")
 
 
 def _sync_item_by_db_id(item_db_id: int) -> None:
@@ -97,5 +111,13 @@ def _sync_item_by_db_id(item_db_id: int) -> None:
         item = db.get(PlaidItem, item_db_id)
         if item:
             TransactionService(db).sync_item(item)
+        else:
+            logger.warning("Plaid webhook sync skipped: item db id %s not found", item_db_id)
+    except Exception as exc:
+        logger.warning(
+            "Plaid webhook sync failed for item db id %s: %s",
+            item_db_id,
+            type(exc).__name__,
+        )
     finally:
         db.close()

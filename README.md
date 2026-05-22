@@ -74,6 +74,7 @@ Then fill in:
 PLAID_CLIENT_ID="..."
 PLAID_SECRET="..."
 PLAID_ENV="sandbox"
+PLAID_WEBHOOK_URL="https://YOUR-NGROK-DOMAIN.ngrok-free.app/plaid/webhook"
 SPLITWISE_API_KEY="..."
 TELEGRAM_BOT_TOKEN="..."
 TELEGRAM_CHAT_ID="..."
@@ -100,6 +101,19 @@ SPLITWISE_OAUTH_TOKEN_SECRET="..."
 ```
 
 The old bearer-token path still works if `SPLITWISE_ACCESS_TOKEN` is set.
+
+For Plaid Transactions webhooks in local development, expose the backend with
+ngrok and set `PLAID_WEBHOOK_URL` before creating a Plaid Link token:
+
+```bash
+ngrok http 8000
+PLAID_WEBHOOK_URL="https://YOUR-NGROK-DOMAIN.ngrok-free.app/plaid/webhook"
+```
+
+Plaid sends `TRANSACTIONS/SYNC_UPDATES_AVAILABLE` to `/plaid/webhook`. The app
+then syncs the matching linked item. After a new Item is created, the app also
+runs one initial transactions sync so future `SYNC_UPDATES_AVAILABLE` webhooks
+can fire.
 
 ## 3. Run locally
 
