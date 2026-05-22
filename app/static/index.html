@@ -1,0 +1,198 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>ExpenseOps Agent</title>
+  <script src="https://cdn.plaid.com/link/v2/stable/link-initialize.js"></script>
+  <style>
+    body { font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; margin: 2rem; max-width: 900px; }
+    button { padding: 0.55rem 0.8rem; margin: 0.2rem; cursor: pointer; }
+    input { padding: 0.5rem; margin: 0.2rem; min-width: 260px; }
+    pre { background: #f6f6f6; padding: 1rem; overflow: auto; }
+    .card { border: 1px solid #ddd; border-radius: 10px; padding: 1rem; margin: 1rem 0; }
+    .muted { color: #666; }
+    .friend-list button, .selected-friends button { display: block; margin: 0.25rem 0; }
+    .selected-friends span { display: inline-block; margin: 0.2rem 0.35rem 0.2rem 0; }
+  </style>
+</head>
+<body>
+  <h1>ExpenseOps Agent</h1>
+  <p class="muted">Personal approval-first workflow for Chase/Plaid transactions and Splitwise posting.</p>
+
+  <div class="card">
+    <h2>1. Connect Chase through Plaid</h2>
+    <button onclick="openPlaidLink()">Open Plaid Link</button>
+    <button onclick="syncTransactions()">Manual sync</button>
+  </div>
+
+  <div class="card">
+    <h2>2. Review transactions</h2>
+    <button onclick="loadTransactions()">Refresh pending reviews</button>
+    <div id="transactions"></div>
+  </div>
+
+  <div class="card">
+    <h2>3. Search Splitwise friends</h2>
+    <input id="friendQuery" placeholder="Search friend name" />
+    <button onclick="searchFriends()">Search</button>
+    <pre id="friends"></pre>
+  </div>
+
+  <div class="card">
+    <h2>Log</h2>
+    <pre id="log"></pre>
+  </div>
+
+<script>
+function log(obj) {
+  document.getElementById('log').textContent = JSON.stringify(obj, null, 2);
+}
+
+const selectedFriendsByTx = {};
+
+async function api(path, options = {}) {
+  const res = await fetch(path, { headers: { 'Content-Type': 'application/json' }, ...options });
+  const data = await res.json();
+  if (!res.ok) throw data;
+  return data;
+}
+
+async function openPlaidLink() {
+  try {
+    const tokenData = await api('/plaid/link-token', { method: 'POST', body: '{}' });
+    const handler = Plaid.create({
+      token: tokenData.link_token,
+      onSuccess: async (public_token, metadata) => {
+        const exchange = await api('/plaid/exchange-public-token', {
+          method: 'POST',
+          body: JSON.stringify({ public_token, institution_name: metadata.institution && metadata.institution.name })
+        });
+        log(exchange);
+        await syncTransactions();
+      },
+      onExit: (err, metadata) => log({ err, metadata })
+    });
+    handler.open();
+  } catch (err) { log(err); }
+}
+
+async function syncTransactions() {
+  try {
+    const data = await api('/plaid/sync', { method: 'POST', body: '{}' });
+    log(data);
+    await loadTransactions();
+  } catch (err) { log(err); }
+}
+
+async function loadTransactions() {
+  try {
+    const txs = await api('/transactions?status=ask_user');
+    const root = document.getElementById('transactions');
+    root.innerHTML = '';
+    if (!txs.length) {
+      root.textContent = 'No transactions waiting for review.';
+      return;
+    }
+    txs.forEach(tx => {
+      const div = document.createElement('div');
+      div.className = 'card';
+      div.innerHTML = `
+        <strong>${tx.merchant_name || tx.name}</strong><br />
+        ${tx.iso_currency_code} ${tx.amount} ${tx.pending ? '(pending)' : ''}<br />
+        <span class="muted">${tx.agent_question || ''}</span><br />
+        <input id="friend-search-${tx.id}" placeholder="Search friend name" />
+        <button onclick="searchFriendsForTx(${tx.id})">Search friend</button>
+        <div id="friend-results-${tx.id}" class="friend-list"></div>
+        <div id="selected-friends-${tx.id}" class="selected-friends muted"></div>
+        <button onclick="markPersonal(${tx.id})">Personal</button>
+        <button onclick="splitEqual(${tx.id})">Split equally</button>
+        <button onclick="draftSplit(${tx.id})">Create draft only</button>
+      `;
+      root.appendChild(div);
+      renderSelectedFriends(tx.id);
+    });
+  } catch (err) { log(err); }
+}
+
+async function markPersonal(id) {
+  try { log(await api(`/transactions/${id}/personal`, { method: 'POST', body: '{}' })); await loadTransactions(); }
+  catch (err) { log(err); }
+}
+
+function friendIdsFor(id) {
+  return (selectedFriendsByTx[id] || []).map(friend => friend.id);
+}
+
+async function searchFriendsForTx(id) {
+  try {
+    const q = encodeURIComponent(document.getElementById(`friend-search-${id}`).value);
+    const friends = await api(`/splitwise/friends?q=${q}`);
+    const root = document.getElementById(`friend-results-${id}`);
+    root.innerHTML = '';
+    friends.slice(0, 8).forEach(friend => {
+      const button = document.createElement('button');
+      button.textContent = `${friend.display_name} (${friend.id})`;
+      button.onclick = () => selectFriendForTx(id, friend);
+      root.appendChild(button);
+    });
+    if (!friends.length) root.textContent = 'No friends found.';
+  } catch (err) { log(err); }
+}
+
+function selectFriendForTx(id, friend) {
+  selectedFriendsByTx[id] = selectedFriendsByTx[id] || [];
+  if (!selectedFriendsByTx[id].some(item => item.id === friend.id)) {
+    selectedFriendsByTx[id].push(friend);
+  }
+  renderSelectedFriends(id);
+}
+
+function removeFriendForTx(id, friendId) {
+  selectedFriendsByTx[id] = (selectedFriendsByTx[id] || []).filter(friend => friend.id !== friendId);
+  renderSelectedFriends(id);
+}
+
+function renderSelectedFriends(id) {
+  const root = document.getElementById(`selected-friends-${id}`);
+  if (!root) return;
+  const friends = selectedFriendsByTx[id] || [];
+  root.innerHTML = friends.length ? 'Selected: ' : 'No friends selected.';
+  friends.forEach(friend => {
+    const item = document.createElement('span');
+    item.textContent = friend.display_name;
+    const button = document.createElement('button');
+    button.textContent = 'Remove';
+    button.onclick = () => removeFriendForTx(id, friend.id);
+    item.appendChild(button);
+    root.appendChild(item);
+  });
+}
+
+async function splitEqual(id) {
+  try {
+    log(await api(`/transactions/${id}/split/equal`, {
+      method: 'POST', body: JSON.stringify({ friend_user_ids: friendIdsFor(id), confirm: true })
+    }));
+    await loadTransactions();
+  } catch (err) { log(err); }
+}
+
+async function draftSplit(id) {
+  try {
+    log(await api(`/transactions/${id}/split/equal`, {
+      method: 'POST', body: JSON.stringify({ friend_user_ids: friendIdsFor(id), confirm: false })
+    }));
+    await loadTransactions();
+  } catch (err) { log(err); }
+}
+
+async function searchFriends() {
+  try {
+    const q = encodeURIComponent(document.getElementById('friendQuery').value);
+    document.getElementById('friends').textContent = JSON.stringify(await api(`/splitwise/friends?q=${q}`), null, 2);
+  } catch (err) { log(err); }
+}
+</script>
+</body>
+</html>
