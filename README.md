@@ -1,6 +1,6 @@
 # ExpenseOps Agent
 
-A personal approval-first agent for Gunjan/Janhavi-style shared expenses:
+A personal approval-first agent for shared expenses:
 
 ```text
 Chase credit card transaction appears
