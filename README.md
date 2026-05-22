@@ -43,6 +43,7 @@ app/
   models.py             SQLAlchemy models
   schemas.py            Pydantic API schemas
   security.py           Fernet token encryption
+frontend/               React + Vite + TypeScript dashboard
 docs/ARCHITECTURE.md    Design and safety notes
 tests/                  Unit tests
 ```
@@ -91,17 +92,37 @@ SPLITWISE_OAUTH_TOKEN_SECRET="..."
 
 The old bearer-token path still works if `SPLITWISE_ACCESS_TOKEN` is set.
 
-## 3. Run
+## 3. Run locally
+
+### Backend
 
 ```bash
-uvicorn app.main:app --reload
+make run
+```
+
+Backend API and fallback HTML UI:
+
+```text
+http://localhost:8000
+```
+
+### React frontend
+
+```bash
+cd frontend
+npm install
+npm run dev
 ```
 
 Open:
 
 ```text
-http://localhost:8000
+http://localhost:5173
 ```
+
+The Vite dev server proxies `/plaid`, `/transactions`, and `/splitwise` to
+`http://localhost:8000`, so the FastAPI APIs stay unchanged. The original
+`app/static/index.html` remains available as a fallback at the backend root.
 
 ## 4. Local workflow
 
@@ -109,7 +130,7 @@ http://localhost:8000
 2. Link a Plaid sandbox institution or your real Chase card once you are ready for development/production mode.
 3. Click **Manual sync** or wait for a Plaid webhook.
 4. Review transactions under **Review transactions**.
-5. Search Splitwise friends and copy friend IDs.
+5. Search and select Splitwise friends by name.
 6. Mark a transaction as personal, create a draft, or split equally.
 
 ## Useful API endpoints
@@ -202,7 +223,7 @@ The payer is the authenticated Splitwise user returned by `/get_current_user`.
 ## Tests
 
 ```bash
-pytest -q
+make test
 ```
 
 ## Security checklist before using real Chase data

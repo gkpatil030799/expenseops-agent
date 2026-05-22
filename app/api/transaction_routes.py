@@ -17,6 +17,7 @@ from app.schemas import (
     TransactionOut,
 )
 from app.services.agent_service import match_friends
+from app.services.recommendation_service import classify_transaction_recommendation
 from app.services.share_calculator import cents_to_decimal_string, decimal_to_cents
 from app.services.splitwise_service import SplitwiseAPIError, SplitwiseService
 from app.services.transaction_service import TransactionError, TransactionService
@@ -25,8 +26,18 @@ router = APIRouter(prefix="/transactions", tags=["transactions"])
 
 
 def _tx_out(tx: ExpenseTransaction) -> TransactionOut:
+    classification = classify_transaction_recommendation(
+        merchant_name=tx.merchant_name,
+        name=tx.name,
+        amount_cents=tx.amount_cents,
+        category=tx.category,
+    )
     return TransactionOut.model_validate(tx).model_copy(
-        update={"amount": cents_to_decimal_string(abs(tx.amount_cents))}
+        update={
+            "amount": cents_to_decimal_string(abs(tx.amount_cents)),
+            "classification_suggestion": classification.suggestion,
+            "classification_reason": classification.reason,
+        }
     )
 
 

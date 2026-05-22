@@ -9,3 +9,6 @@ expenseops.db
 *.sqlite3
 .DS_Store
 *.egg-info/
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/

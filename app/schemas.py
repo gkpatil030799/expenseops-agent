@@ -39,6 +39,8 @@ class TransactionOut(BaseModel):
     agent_question: str | None
     splitwise_expense_id: str | None
     last_error: str | None
+    classification_suggestion: Literal["likely_personal", "likely_shared", "unsure"] | None = None
+    classification_reason: str | None = None
     created_at: datetime
     updated_at: datetime
 
