@@ -29,8 +29,10 @@ This scaffold uses **Plaid + Splitwise API directly**, not a Splitwise MCP. The 
 - Splitwise custom-share `create_expense` posting
 - Equal and custom split endpoints
 - Human approval-first workflow
+- Rule-based personal/shared/unsure recommendations
+- Telegram notifications with inline review buttons
 - Duplicate posting guard
-- Simple local web UI at `/`
+- React + Vite dashboard, with the old HTML UI kept as fallback
 - Unit tests for split calculations and rule-based parsing
 
 ## Project structure
@@ -73,10 +75,17 @@ PLAID_CLIENT_ID="..."
 PLAID_SECRET="..."
 PLAID_ENV="sandbox"
 SPLITWISE_API_KEY="..."
+TELEGRAM_BOT_TOKEN="..."
+TELEGRAM_CHAT_ID="..."
+TELEGRAM_WEBHOOK_SECRET="..."
 ```
 
 For Splitwise, generate an API key from your Splitwise app page and paste it into
 `SPLITWISE_API_KEY`. The app sends it as `Authorization: Bearer <api key>`.
+
+Telegram is optional. Leave the Telegram fields blank if you only want console
+logging. Fill them in when you want review notifications and inline button
+actions from the bot.
 
 Optional OAuth 1.0 fallback:
 
@@ -126,9 +135,19 @@ The Vite dev server proxies `/plaid`, `/transactions`, and `/splitwise` to
 
 ### Telegram webhook with ngrok
 
-Set a local webhook secret in `.env`:
+Create a Telegram bot with BotFather, paste the bot token into `.env`, and send
+at least one message to the bot from the Telegram chat you want to use. Then get
+the chat id:
 
 ```bash
+curl "https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/getUpdates"
+```
+
+Paste the chat id into `.env` and set a local webhook secret:
+
+```bash
+TELEGRAM_BOT_TOKEN="..."
+TELEGRAM_CHAT_ID="..."
 TELEGRAM_WEBHOOK_SECRET="choose-a-long-random-string"
 ```
 
@@ -153,6 +172,18 @@ curl "https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/setWebhook?url=https://YOU
 If `TELEGRAM_WEBHOOK_SECRET` is blank, `/telegram/webhook` remains open for local
 backward compatibility. Use a secret when exposing the app through ngrok.
 
+Telegram review messages include inline buttons:
+
+- **Personal** marks the transaction as personal.
+- **Create Draft** replies that friend selection is still required in the dashboard.
+- **Split Equal** replies that selected friends are still required in the dashboard.
+- **Split with people** starts a Telegram split flow.
+
+For **Split with people**, send Splitwise friend names separated by commas, for
+example `Rahul, Akash`. The bot searches Splitwise friends by name, asks you to
+choose if a name has multiple matches, and posts the equal split once every name
+is resolved. The **Cancel** button clears the pending Telegram split flow.
+
 ## 4. Local workflow
 
 1. Click **Open Plaid Link**.
@@ -161,6 +192,10 @@ backward compatibility. Use a secret when exposing the app through ngrok.
 4. Review transactions under **Review transactions**.
 5. Search and select Splitwise friends by name.
 6. Mark a transaction as personal, create a draft, or split equally.
+
+Each transaction card shows a recommendation-only classification:
+`likely_personal`, `likely_shared`, or `unsure`. The app never auto-posts based
+on this suggestion.
 
 ## Useful API endpoints
 
