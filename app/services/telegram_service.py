@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from typing import Any
 
 import httpx
 
 from app.config import Settings, get_settings
 from app.models import ExpenseTransaction
-from app.services.agent_service import transaction_display_name
+from app.services.agent_service import friend_display_name, transaction_display_name
 from app.services.recommendation_service import classify_transaction_recommendation
 from app.services.share_calculator import cents_to_decimal_string
 
@@ -23,9 +24,17 @@ class TelegramService:
         return bool(self.settings.telegram_bot_token and self.settings.telegram_chat_id)
 
     def send_ask_user_transaction(self, tx: ExpenseTransaction) -> None:
-        self.send_message(format_ask_user_transaction_message(tx))
+        self.send_message(
+            format_ask_user_transaction_message(tx),
+            reply_markup=build_review_inline_keyboard(tx.id),
+        )
 
-    def send_message(self, message: str) -> None:
+    def send_message(
+        self,
+        message: str,
+        reply_markup: dict[str, Any] | None = None,
+        chat_id: str | None = None,
+    ) -> None:
         if not self.is_configured:
             logger.info(
                 "Telegram notification skipped: TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID missing."
@@ -34,16 +43,39 @@ class TelegramService:
 
         url = f"https://api.telegram.org/bot{self.settings.telegram_bot_token}/sendMessage"
         payload: dict[str, Any] = {
-            "chat_id": self.settings.telegram_chat_id,
+            "chat_id": chat_id or self.settings.telegram_chat_id,
             "text": message,
             "disable_web_page_preview": True,
         }
+        if reply_markup:
+            payload["reply_markup"] = reply_markup
         try:
             with httpx.Client(timeout=10.0) as client:
                 response = client.post(url, json=payload)
                 response.raise_for_status()
         except Exception as exc:
             logger.warning("Telegram notification failed: %s", self._safe_error(exc))
+
+    def answer_callback_query(self, callback_query_id: str, text: str) -> None:
+        if not self.is_configured:
+            logger.info("Telegram callback answer skipped: Telegram is not configured.")
+            return
+
+        url = (
+            f"https://api.telegram.org/bot{self.settings.telegram_bot_token}"
+            "/answerCallbackQuery"
+        )
+        payload = {
+            "callback_query_id": callback_query_id,
+            "text": text,
+            "show_alert": False,
+        }
+        try:
+            with httpx.Client(timeout=10.0) as client:
+                response = client.post(url, json=payload)
+                response.raise_for_status()
+        except Exception as exc:
+            logger.warning("Telegram callback answer failed: %s", self._safe_error(exc))
 
     def _safe_error(self, exc: Exception) -> str:
         message = str(exc)
@@ -73,3 +105,95 @@ def format_ask_user_transaction_message(tx: ExpenseTransaction) -> str:
             f"Question: {question}",
         ]
     )
+
+
+@dataclass(frozen=True)
+class TelegramReviewCallback:
+    action: str
+    transaction_id: int
+
+
+def build_review_callback_data(action: str, transaction_id: int) -> str:
+    if action not in {"personal", "draft", "split_equal", "split_people"}:
+        raise ValueError("Unsupported Telegram review action")
+    if transaction_id <= 0:
+        raise ValueError("Invalid Telegram transaction id")
+    return f"review:{action}:{transaction_id}"
+
+
+def parse_review_callback_data(data: str) -> TelegramReviewCallback:
+    parts = data.split(":")
+    if len(parts) != 3 or parts[0] != "review":
+        raise ValueError("Invalid Telegram callback payload")
+    action = parts[1]
+    if action not in {"personal", "draft", "split_equal", "split_people"}:
+        raise ValueError("Unsupported Telegram review action")
+    try:
+        transaction_id = int(parts[2])
+    except ValueError as exc:
+        raise ValueError("Invalid Telegram transaction id") from exc
+    if transaction_id <= 0:
+        raise ValueError("Invalid Telegram transaction id")
+    return TelegramReviewCallback(action=action, transaction_id=transaction_id)
+
+
+def build_review_inline_keyboard(transaction_id: int) -> dict[str, Any]:
+    return {
+        "inline_keyboard": [
+            [
+                {
+                    "text": "Personal",
+                    "callback_data": build_review_callback_data("personal", transaction_id),
+                },
+                {
+                    "text": "Create Draft",
+                    "callback_data": build_review_callback_data("draft", transaction_id),
+                },
+                {
+                    "text": "Split Equal",
+                    "callback_data": build_review_callback_data("split_equal", transaction_id),
+                },
+                {
+                    "text": "Split with people",
+                    "callback_data": build_review_callback_data("split_people", transaction_id),
+                },
+            ]
+        ]
+    }
+
+
+def build_friend_choice_callback_data(transaction_id: int, friend_id: int) -> str:
+    if transaction_id <= 0 or friend_id <= 0:
+        raise ValueError("Invalid Telegram friend choice payload")
+    return f"friend:{transaction_id}:{friend_id}"
+
+
+def parse_friend_choice_callback_data(data: str) -> tuple[int, int]:
+    parts = data.split(":")
+    if len(parts) != 3 or parts[0] != "friend":
+        raise ValueError("Invalid Telegram friend choice payload")
+    try:
+        transaction_id = int(parts[1])
+        friend_id = int(parts[2])
+    except ValueError as exc:
+        raise ValueError("Invalid Telegram friend choice payload") from exc
+    if transaction_id <= 0 or friend_id <= 0:
+        raise ValueError("Invalid Telegram friend choice payload")
+    return transaction_id, friend_id
+
+
+def build_friend_choice_keyboard(transaction_id: int, friends: list[dict]) -> dict[str, Any]:
+    return {
+        "inline_keyboard": [
+            [
+                {
+                    "text": friend_display_name(friend),
+                    "callback_data": build_friend_choice_callback_data(
+                        transaction_id,
+                        int(friend["id"]),
+                    ),
+                }
+            ]
+            for friend in friends[:8]
+        ]
+    }

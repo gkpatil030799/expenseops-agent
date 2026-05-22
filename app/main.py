@@ -4,7 +4,7 @@ from fastapi import FastAPI
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from app.api import plaid_routes, splitwise_routes, transaction_routes
+from app.api import plaid_routes, splitwise_routes, telegram_routes, transaction_routes
 from app.config import get_settings
 from app.db import init_db
 
@@ -19,6 +19,7 @@ def startup() -> None:
 
 app.include_router(plaid_routes.router)
 app.include_router(splitwise_routes.router)
+app.include_router(telegram_routes.router)
 app.include_router(transaction_routes.router)
 app.mount("/static", StaticFiles(directory="app/static"), name="static")
 
