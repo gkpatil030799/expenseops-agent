@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import logging
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, HTTPException, Query, Request
 
 from app.api.deps import DbSession
+from app.config import get_settings
 from app.services.splitwise_service import SplitwiseAPIError, SplitwiseService
 from app.services.telegram_service import (
     TelegramService,
@@ -25,7 +26,12 @@ router = APIRouter(prefix="/telegram", tags=["telegram"])
 
 
 @router.post("/webhook")
-async def telegram_webhook(request: Request, db: DbSession) -> dict[str, bool]:
+async def telegram_webhook(
+    request: Request,
+    db: DbSession,
+    secret: str | None = Query(default=None),
+) -> dict[str, bool]:
+    _verify_webhook_secret(secret)
     update = await request.json()
     callback_query = update.get("callback_query")
     if callback_query:
@@ -35,6 +41,12 @@ async def telegram_webhook(request: Request, db: DbSession) -> dict[str, bool]:
     if message:
         _handle_text_message(message, db)
     return {"ok": True}
+
+
+def _verify_webhook_secret(incoming_secret: str | None) -> None:
+    expected_secret = get_settings().telegram_webhook_secret
+    if expected_secret and incoming_secret != expected_secret:
+        raise HTTPException(status_code=403, detail="Invalid Telegram webhook secret")
 
 
 def _handle_callback_query(callback_query: dict, db: DbSession) -> dict[str, bool]:

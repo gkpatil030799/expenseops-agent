@@ -1,7 +1,48 @@
 from fastapi.testclient import TestClient
 
 from app.api import telegram_routes
+from app.config import Settings
 from app.main import app
+
+
+def test_telegram_webhook_allows_request_when_no_secret_configured(monkeypatch):
+    monkeypatch.setattr(
+        telegram_routes,
+        "get_settings",
+        lambda: Settings(telegram_webhook_secret=""),
+    )
+
+    response = TestClient(app).post("/telegram/webhook", json={})
+
+    assert response.status_code == 200
+    assert response.json() == {"ok": True}
+
+
+def test_telegram_webhook_allows_correct_secret(monkeypatch):
+    monkeypatch.setattr(
+        telegram_routes,
+        "get_settings",
+        lambda: Settings(telegram_webhook_secret="expected-secret"),
+    )
+
+    response = TestClient(app).post("/telegram/webhook?secret=expected-secret", json={})
+
+    assert response.status_code == 200
+    assert response.json() == {"ok": True}
+
+
+def test_telegram_webhook_rejects_missing_or_incorrect_secret(monkeypatch):
+    monkeypatch.setattr(
+        telegram_routes,
+        "get_settings",
+        lambda: Settings(telegram_webhook_secret="expected-secret"),
+    )
+
+    missing = TestClient(app).post("/telegram/webhook", json={})
+    incorrect = TestClient(app).post("/telegram/webhook?secret=wrong-secret", json={})
+
+    assert missing.status_code == 403
+    assert incorrect.status_code == 403
 
 
 def test_telegram_callback_personal_routes_to_transaction_service(monkeypatch):

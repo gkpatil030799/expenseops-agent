@@ -124,6 +124,35 @@ The Vite dev server proxies `/plaid`, `/transactions`, and `/splitwise` to
 `http://localhost:8000`, so the FastAPI APIs stay unchanged. The original
 `app/static/index.html` remains available as a fallback at the backend root.
 
+### Telegram webhook with ngrok
+
+Set a local webhook secret in `.env`:
+
+```bash
+TELEGRAM_WEBHOOK_SECRET="choose-a-long-random-string"
+```
+
+Start the backend:
+
+```bash
+make run
+```
+
+Expose the backend with ngrok:
+
+```bash
+ngrok http 8000
+```
+
+Register the Telegram webhook using your ngrok URL and the same secret:
+
+```bash
+curl "https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/setWebhook?url=https://YOUR-NGROK-DOMAIN.ngrok-free.app/telegram/webhook?secret=$TELEGRAM_WEBHOOK_SECRET"
+```
+
+If `TELEGRAM_WEBHOOK_SECRET` is blank, `/telegram/webhook` remains open for local
+backward compatibility. Use a secret when exposing the app through ngrok.
+
 ## 4. Local workflow
 
 1. Click **Open Plaid Link**.

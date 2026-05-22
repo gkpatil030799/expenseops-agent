@@ -44,6 +44,7 @@ class Settings(BaseSettings):
 
     telegram_bot_token: str = ""
     telegram_chat_id: str = ""
+    telegram_webhook_secret: str = ""
 
     @field_validator("plaid_country_codes", "plaid_products", mode="before")
     @classmethod
