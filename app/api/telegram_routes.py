@@ -6,10 +6,17 @@ from fastapi import APIRouter, HTTPException, Query, Request
 
 from app.api.deps import DbSession
 from app.config import get_settings
+from app.services.agent_service import friend_display_name, transaction_display_name
+from app.services.share_calculator import cents_to_decimal_string
 from app.services.splitwise_service import SplitwiseAPIError, SplitwiseService
 from app.services.telegram_service import (
     TelegramService,
+    approximate_equal_share_display,
     build_friend_choice_keyboard,
+    build_split_flow_keyboard,
+    format_ambiguity_message,
+    format_split_started_message,
+    format_split_success_message,
     parse_friend_choice_callback_data,
     parse_review_callback_data,
 )
@@ -96,10 +103,16 @@ def _route_review_callback(
         if chat_id and user_id:
             telegram_split_state_store.set_pending(chat_id, user_id, transaction_id)
             telegram.send_message(
-                "Send Splitwise friend names separated by commas. Example: Rahul, Akash",
+                format_split_started_message(),
+                reply_markup=build_split_flow_keyboard(transaction_id),
                 chat_id=chat_id,
             )
         return "Send friend names in this chat."
+    if action == "cancel":
+        if chat_id and user_id:
+            telegram_split_state_store.clear(chat_id, user_id)
+            telegram.send_message("✅ Split flow cancelled.", chat_id=chat_id)
+        return "Split flow cancelled."
     return "Unsupported action."
 
 
@@ -115,7 +128,8 @@ def _handle_text_message(message: dict, db: DbSession) -> None:
     names = parse_split_names(text)
     if not names:
         telegram.send_message(
-            "Send Splitwise friend names separated by commas. Example: Rahul, Akash",
+            format_split_started_message(_selected_friend_names(pending)),
+            reply_markup=build_split_flow_keyboard(pending.transaction_id),
             chat_id=chat_id,
         )
         return
@@ -142,7 +156,7 @@ def _handle_text_message(message: dict, db: DbSession) -> None:
             )
             return
         if len(matches) == 1:
-            pending.add_friend_id(int(matches[0]["id"]))
+            pending.add_friend(int(matches[0]["id"]), friend_display_name(matches[0]))
             continue
         pending.remaining_unresolved_names.append(name)
         pending.ambiguous_matches_by_name[name] = matches
@@ -166,7 +180,7 @@ def _try_route_friend_choice(
     if not pending or pending.transaction_id != transaction_id:
         return "No pending split found. Start again from the latest transaction message."
 
-    pending.add_friend_id(friend_id)
+    pending.add_friend(friend_id, _friend_name_from_pending_choice(pending, friend_id))
     if pending.remaining_unresolved_names:
         resolved_name = pending.remaining_unresolved_names.pop(0)
         pending.ambiguous_matches_by_name.pop(resolved_name, None)
@@ -185,7 +199,7 @@ def _continue_or_finish_pending_split(
     next_name = pending.next_ambiguous_name()
     if next_name:
         telegram.send_message(
-            f"Multiple matches for '{next_name}'. Choose one:",
+            format_ambiguity_message(next_name, _selected_friend_names(pending)),
             reply_markup=build_friend_choice_keyboard(
                 pending.transaction_id,
                 pending.ambiguous_matches_by_name[next_name],
@@ -197,6 +211,7 @@ def _continue_or_finish_pending_split(
     _split_equal_from_telegram(
         pending.transaction_id,
         pending.selected_friend_ids,
+        _selected_friend_names(pending),
         chat_id,
         user_id,
         db,
@@ -207,6 +222,7 @@ def _continue_or_finish_pending_split(
 def _split_equal_from_telegram(
     transaction_id: int,
     friend_user_ids: list[int],
+    friend_names: list[str],
     chat_id: str,
     user_id: str,
     db: DbSession,
@@ -221,7 +237,7 @@ def _split_equal_from_telegram(
             )
             telegram_split_state_store.clear(chat_id, user_id)
             return
-        TransactionService(db).create_equal_split_expense(
+        tx, _response = TransactionService(db).create_equal_split_expense(
             tx_id=transaction_id,
             friend_user_ids=friend_user_ids,
             group_id=None,
@@ -237,8 +253,35 @@ def _split_equal_from_telegram(
             chat_id=chat_id,
         )
         return
+    participant_names = ["You", *friend_names]
     telegram_split_state_store.clear(chat_id, user_id)
-    telegram.send_message("Split posted to Splitwise.", chat_id=chat_id)
+    amount = cents_to_decimal_string(abs(tx.amount_cents))
+    approx_share = approximate_equal_share_display(tx.amount_cents, len(friend_user_ids) + 1)
+    telegram.send_message(
+        format_split_success_message(
+            merchant=transaction_display_name(tx),
+            amount=amount,
+            currency_code=tx.iso_currency_code,
+            participant_names=participant_names,
+            approx_share=approx_share,
+        ),
+        chat_id=chat_id,
+    )
+
+
+def _selected_friend_names(pending: PendingTelegramSplit) -> list[str]:
+    return [
+        pending.selected_friend_names_by_id.get(friend_id, str(friend_id))
+        for friend_id in pending.selected_friend_ids
+    ]
+
+
+def _friend_name_from_pending_choice(pending: PendingTelegramSplit, friend_id: int) -> str:
+    for matches in pending.ambiguous_matches_by_name.values():
+        for friend in matches:
+            if int(friend["id"]) == friend_id:
+                return friend_display_name(friend)
+    return str(friend_id)
 
 
 def _mark_personal(transaction_id: int, db: DbSession) -> str:

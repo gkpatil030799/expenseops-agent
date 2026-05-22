@@ -6,9 +6,11 @@ from app.config import Settings
 from app.models import ExpenseTransaction, TransactionStatus
 from app.services.telegram_service import (
     TelegramService,
+    approximate_equal_share_display,
     build_review_callback_data,
     build_review_inline_keyboard,
     format_ask_user_transaction_message,
+    format_split_success_message,
     parse_review_callback_data,
 )
 
@@ -37,6 +39,16 @@ def test_format_ask_user_transaction_message_includes_required_fields():
     assert "ask_user" in message
     assert "likely_shared" in message
     assert "Is this shared?" in message
+    assert "<b>ExpenseOps review needed</b>" in message
+
+
+def test_formatting_escapes_html():
+    tx = make_tx()
+    tx.merchant_name = "Coffee & <Bagels>"
+
+    message = format_ask_user_transaction_message(tx)
+
+    assert "Coffee &amp; &lt;Bagels&gt;" in message
 
 
 def test_build_review_inline_keyboard_has_safe_callback_data():
@@ -108,3 +120,21 @@ def test_send_message_accepts_chat_id_override(monkeypatch):
     service.send_message("hello", chat_id="override-chat")
 
     assert captured["json"]["chat_id"] == "override-chat"
+
+
+def test_approximate_equal_share_display_uses_decimal_rounding():
+    assert approximate_equal_share_display(1000, 3) == "3.33"
+    assert approximate_equal_share_display(1001, 3) == "3.34"
+
+
+def test_split_success_message_labels_share_as_approximate():
+    message = format_split_success_message(
+        merchant="Costco",
+        amount="10.01",
+        currency_code="USD",
+        participant_names=["You", "Rahul"],
+        approx_share="5.01",
+    )
+
+    assert "Approx. share" in message
+    assert "Equal share" not in message

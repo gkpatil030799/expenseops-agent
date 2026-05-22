@@ -1,8 +1,18 @@
+import pytest
 from fastapi.testclient import TestClient
 
 from app.api import telegram_routes
 from app.config import Settings
 from app.main import app
+
+
+@pytest.fixture(autouse=True)
+def allow_telegram_webhook_without_secret(monkeypatch):
+    monkeypatch.setattr(
+        telegram_routes,
+        "get_settings",
+        lambda: Settings(telegram_webhook_secret=""),
+    )
 
 
 def test_telegram_webhook_allows_request_when_no_secret_configured(monkeypatch):
@@ -141,13 +151,41 @@ def test_telegram_callback_split_with_people_starts_pending_state(monkeypatch):
     assert pending is not None
     assert pending.transaction_id == 123
     assert answers == [("callback-4", "Send friend names in this chat.")]
-    assert messages == [
-        (
-            "chat-1",
-            "Send Splitwise friend names separated by commas. Example: Rahul, Akash",
-            None,
-        )
-    ]
+    assert "Split with people" in messages[0][1]
+    assert "Selected participants" in messages[0][1]
+    assert messages[0][2]["inline_keyboard"][0][0]["callback_data"] == "review:cancel:123"
+
+
+def test_telegram_callback_cancel_clears_pending_state(monkeypatch):
+    messages = []
+    answers = []
+
+    class FakeTelegramService:
+        def answer_callback_query(self, callback_query_id, text):
+            answers.append((callback_query_id, text))
+
+        def send_message(self, message, reply_markup=None, chat_id=None):
+            messages.append((chat_id, message, reply_markup))
+
+    monkeypatch.setattr(telegram_routes, "TelegramService", FakeTelegramService)
+    telegram_routes.telegram_split_state_store.set_pending("chat-1", "user-1", 123)
+
+    response = TestClient(app).post(
+        "/telegram/webhook",
+        json={
+            "callback_query": {
+                "id": "callback-cancel",
+                "data": "review:cancel:123",
+                "message": {"chat": {"id": "chat-1"}},
+                "from": {"id": "user-1"},
+            }
+        },
+    )
+
+    assert response.status_code == 200
+    assert telegram_routes.telegram_split_state_store.get_pending("chat-1", "user-1") is None
+    assert answers == [("callback-cancel", "Split flow cancelled.")]
+    assert messages == [("chat-1", "✅ Split flow cancelled.", None)]
 
 
 def test_telegram_text_successful_equal_split_path(monkeypatch):
@@ -167,6 +205,19 @@ def test_telegram_text_successful_equal_split_path(monkeypatch):
 
         def create_equal_split_expense(self, **kwargs):
             calls.update(kwargs)
+            tx = type(
+                "Tx",
+                (),
+                {
+                    "id": kwargs["tx_id"],
+                    "splitwise_expense_id": "expense-1",
+                    "amount_cents": 1200,
+                    "iso_currency_code": "USD",
+                    "merchant_name": "Costco",
+                    "name": "Costco",
+                },
+            )()
+            return tx, {"expenses": [{"id": "expense-1"}]}
 
     class FakeTelegramService:
         def send_message(self, message, reply_markup=None, chat_id=None):
@@ -186,7 +237,9 @@ def test_telegram_text_successful_equal_split_path(monkeypatch):
     assert calls["tx_id"] == 123
     assert calls["friend_user_ids"] == [7]
     assert calls["confirm"] is True
-    assert messages == [("chat-1", "Split posted to Splitwise.", None)]
+    assert "Split posted to Splitwise" in messages[0][1]
+    assert "Rahul Shah" in messages[0][1]
+    assert "Approx. share" in messages[0][1]
 
 
 def test_telegram_text_multiple_match_sends_disambiguation(monkeypatch):
@@ -213,8 +266,10 @@ def test_telegram_text_multiple_match_sends_disambiguation(monkeypatch):
     )
 
     assert response.status_code == 200
-    assert messages[0][1] == "Multiple matches for 'Rahul'. Choose one:"
+    assert "Multiple matches found" in messages[0][1]
+    assert "Rahul" in messages[0][1]
     assert messages[0][2]["inline_keyboard"][0][0]["callback_data"] == "friend:123:7"
+    assert messages[0][2]["inline_keyboard"][-1][0]["callback_data"] == "review:cancel:123"
 
 
 def test_telegram_text_no_match_asks_user_to_try_again(monkeypatch):
@@ -264,6 +319,19 @@ def test_telegram_ambiguous_name_preserves_resolved_friend_and_finishes_after_ch
 
         def create_equal_split_expense(self, **kwargs):
             calls.update(kwargs)
+            tx = type(
+                "Tx",
+                (),
+                {
+                    "id": kwargs["tx_id"],
+                    "splitwise_expense_id": "expense-1",
+                    "amount_cents": 1200,
+                    "iso_currency_code": "USD",
+                    "merchant_name": "Costco",
+                    "name": "Costco",
+                },
+            )()
+            return tx, {"expenses": [{"id": "expense-1"}]}
 
     class FakeTelegramService:
         def answer_callback_query(self, callback_query_id, text):
@@ -292,7 +360,8 @@ def test_telegram_ambiguous_name_preserves_resolved_friend_and_finishes_after_ch
     assert response.status_code == 200
     assert pending is not None
     assert pending.selected_friend_ids == [9]
-    assert messages[0][1] == "Multiple matches for 'Rahul'. Choose one:"
+    assert "Multiple matches found" in messages[0][1]
+    assert "Akash Rao" in messages[0][1]
 
     response = TestClient(app).post(
         "/telegram/webhook",
@@ -309,4 +378,6 @@ def test_telegram_ambiguous_name_preserves_resolved_friend_and_finishes_after_ch
     assert response.status_code == 200
     assert calls["friend_user_ids"] == [9, 7]
     assert calls["confirm"] is True
-    assert ("chat-1", "Split posted to Splitwise.", None) in messages
+    assert any("Split posted to Splitwise" in str(message[1]) for message in messages)
+    assert any("Akash Rao" in str(message[1]) for message in messages)
+    assert any("Rahul Shah" in str(message[1]) for message in messages)

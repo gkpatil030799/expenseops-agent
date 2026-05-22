@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from decimal import ROUND_HALF_UP, Decimal
+from html import escape
 from typing import Any
 
 import httpx
@@ -45,6 +47,7 @@ class TelegramService:
         payload: dict[str, Any] = {
             "chat_id": chat_id or self.settings.telegram_chat_id,
             "text": message,
+            "parse_mode": "HTML",
             "disable_web_page_preview": True,
         }
         if reply_markup:
@@ -96,13 +99,15 @@ def format_ask_user_transaction_message(tx: ExpenseTransaction) -> str:
 
     return "\n".join(
         [
-            "ExpenseOps review needed",
-            f"Merchant: {transaction_display_name(tx)}",
-            f"Amount: {tx.iso_currency_code} {amount}",
-            f"Status: {tx.status}",
-            f"Recommendation: {classification.suggestion}",
-            f"Reason: {classification.reason}",
-            f"Question: {question}",
+            "🧾 <b>ExpenseOps review needed</b>",
+            "",
+            f"🏪 <b>Merchant</b>: {html(transaction_display_name(tx))}",
+            f"💳 <b>Amount</b>: {html(tx.iso_currency_code)} {html(amount)}",
+            f"📌 <b>Status</b>: {html(tx.status)}",
+            f"🧠 <b>Recommendation</b>: {html(classification.suggestion)}",
+            f"ℹ️ <b>Reason</b>: {html(classification.reason)}",
+            "",
+            f"❓ <b>Question</b>: {html(question)}",
         ]
     )
 
@@ -114,7 +119,7 @@ class TelegramReviewCallback:
 
 
 def build_review_callback_data(action: str, transaction_id: int) -> str:
-    if action not in {"personal", "draft", "split_equal", "split_people"}:
+    if action not in {"personal", "draft", "split_equal", "split_people", "cancel"}:
         raise ValueError("Unsupported Telegram review action")
     if transaction_id <= 0:
         raise ValueError("Invalid Telegram transaction id")
@@ -126,7 +131,7 @@ def parse_review_callback_data(data: str) -> TelegramReviewCallback:
     if len(parts) != 3 or parts[0] != "review":
         raise ValueError("Invalid Telegram callback payload")
     action = parts[1]
-    if action not in {"personal", "draft", "split_equal", "split_people"}:
+    if action not in {"personal", "draft", "split_equal", "split_people", "cancel"}:
         raise ValueError("Unsupported Telegram review action")
     try:
         transaction_id = int(parts[2])
@@ -196,4 +201,92 @@ def build_friend_choice_keyboard(transaction_id: int, friends: list[dict]) -> di
             ]
             for friend in friends[:8]
         ]
+        + [
+            [
+                {
+                    "text": "Cancel",
+                    "callback_data": build_review_callback_data("cancel", transaction_id),
+                }
+            ]
+        ]
     }
+
+
+def build_split_flow_keyboard(transaction_id: int) -> dict[str, Any]:
+    return {
+        "inline_keyboard": [
+            [
+                {
+                    "text": "Cancel",
+                    "callback_data": build_review_callback_data("cancel", transaction_id),
+                }
+            ]
+        ]
+    }
+
+
+def format_split_started_message(selected_names: list[str] | None = None) -> str:
+    selected = selected_names or []
+    participants = ", ".join(html(name) for name in selected) if selected else "None yet"
+    return "\n".join(
+        [
+            "👥 <b>Split with people</b>",
+            "",
+            "Send Splitwise friend names separated by commas.",
+            "<i>Example: Rahul, Akash</i>",
+            "",
+            f"✅ <b>Selected participants</b>: {participants}",
+        ]
+    )
+
+
+def format_ambiguity_message(name: str, selected_names: list[str]) -> str:
+    participants = (
+        ", ".join(html(friend) for friend in selected_names) if selected_names else "None yet"
+    )
+    return "\n".join(
+        [
+            "🔎 <b>Multiple matches found</b>",
+            "",
+            f"I found more than one Splitwise friend for <b>{html(name)}</b>.",
+            "Choose the correct person below.",
+            "",
+            f"✅ <b>Already selected</b>: {participants}",
+        ]
+    )
+
+
+def format_split_success_message(
+    *,
+    merchant: str,
+    amount: str,
+    currency_code: str,
+    participant_names: list[str],
+    approx_share: str,
+) -> str:
+    participants = ", ".join(html(name) for name in participant_names)
+    return "\n".join(
+        [
+            "✅ <b>Split posted to Splitwise</b>",
+            "",
+            f"🏪 <b>Merchant</b>: {html(merchant)}",
+            f"💳 <b>Amount</b>: {html(currency_code)} {html(amount)}",
+            f"👥 <b>Participants</b>: {participants}",
+            f"🧾 <b>Approx. share</b>: {html(currency_code)} {html(approx_share)} each",
+        ]
+    )
+
+
+def approximate_equal_share_display(amount_cents: int, participant_count: int) -> str:
+    if participant_count <= 0:
+        return "0.00"
+    amount = Decimal(abs(amount_cents)) / Decimal("100")
+    share = (amount / Decimal(participant_count)).quantize(
+        Decimal("0.01"),
+        rounding=ROUND_HALF_UP,
+    )
+    return f"{share:.2f}"
+
+
+def html(value: object) -> str:
+    return escape(str(value), quote=False)

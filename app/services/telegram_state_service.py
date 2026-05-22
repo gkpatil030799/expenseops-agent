@@ -9,12 +9,14 @@ from app.services.agent_service import friend_display_name
 class PendingTelegramSplit:
     transaction_id: int
     selected_friend_ids: list[int] = field(default_factory=list)
+    selected_friend_names_by_id: dict[int, str] = field(default_factory=dict)
     remaining_unresolved_names: list[str] = field(default_factory=list)
     ambiguous_matches_by_name: dict[str, list[dict]] = field(default_factory=dict)
 
-    def add_friend_id(self, friend_id: int) -> None:
+    def add_friend(self, friend_id: int, display_name: str) -> None:
         if friend_id not in self.selected_friend_ids:
             self.selected_friend_ids.append(friend_id)
+        self.selected_friend_names_by_id[friend_id] = display_name
 
     def next_ambiguous_name(self) -> str | None:
         return self.remaining_unresolved_names[0] if self.remaining_unresolved_names else None
