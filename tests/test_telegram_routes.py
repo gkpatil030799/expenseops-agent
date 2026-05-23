@@ -203,6 +203,70 @@ def test_telegram_callback_split_equal_requires_dashboard_selection(monkeypatch)
     assert answers == [("callback-3", "Select friends in the dashboard before splitting equally.")]
 
 
+def test_telegram_callback_button_mode_opens_existing_actions(monkeypatch):
+    messages = []
+    answers = []
+
+    class FakeTelegramService:
+        def answer_callback_query(self, callback_query_id, text):
+            answers.append((callback_query_id, text))
+
+        def send_message(self, message, reply_markup=None, chat_id=None):
+            messages.append((chat_id, message, reply_markup))
+
+    monkeypatch.setattr(telegram_routes, "TelegramService", FakeTelegramService)
+
+    response = TestClient(app).post(
+        "/telegram/webhook",
+        json={
+            "callback_query": {
+                "id": "button-mode",
+                "data": "review:button_mode:123",
+                "message": {"chat": {"id": "chat-1"}},
+                "from": {"id": "user-1"},
+            }
+        },
+    )
+
+    assert response.status_code == 200
+    assert answers == [("button-mode", "Button mode selected.")]
+    assert "Choose action" in messages[0][1]
+    assert messages[0][2]["inline_keyboard"][0][0]["callback_data"] == "review:personal:123"
+
+
+def test_telegram_callback_ai_chat_starts_pending_state(monkeypatch):
+    messages = []
+    answers = []
+
+    class FakeTelegramService:
+        def answer_callback_query(self, callback_query_id, text):
+            answers.append((callback_query_id, text))
+
+        def send_message(self, message, reply_markup=None, chat_id=None):
+            messages.append((chat_id, message, reply_markup))
+
+    monkeypatch.setattr(telegram_routes, "TelegramService", FakeTelegramService)
+
+    response = TestClient(app).post(
+        "/telegram/webhook",
+        json={
+            "callback_query": {
+                "id": "ai-mode",
+                "data": "review:ai_chat:123",
+                "message": {"chat": {"id": "chat-1"}},
+                "from": {"id": "user-1"},
+            }
+        },
+    )
+
+    pending = telegram_routes.telegram_split_state_store.get_pending("chat-1", "user-1")
+    assert response.status_code == 200
+    assert pending is not None
+    assert pending.mode == "ai_chat"
+    assert answers == [("ai-mode", "AI chat mode selected.")]
+    assert "Tell me what to do" in messages[0][1]
+
+
 def test_telegram_review_queue_sends_next_transaction_with_progress(monkeypatch):
     messages = []
     tx = type(
@@ -650,6 +714,282 @@ def test_telegram_text_no_match_asks_user_to_try_again(monkeypatch):
 
     assert response.status_code == 200
     assert messages == [("chat-1", "No Splitwise friend matched 'Rahul'. Try again.", None)]
+
+
+def test_ai_chat_personal_marks_transaction_personal(monkeypatch):
+    calls = {}
+
+    class FakeTransactionService:
+        def __init__(self, db):
+            pass
+
+        def mark_personal(self, transaction_id):
+            calls["transaction_id"] = transaction_id
+            return type(
+                "Tx",
+                (),
+                {
+                    "id": transaction_id,
+                    "amount_cents": 633,
+                    "iso_currency_code": "USD",
+                    "merchant_name": "Uber",
+                    "name": "Uber",
+                },
+            )()
+
+    class FakeTelegramService:
+        def send_message(self, message, reply_markup=None, chat_id=None):
+            pass
+
+    monkeypatch.setattr(telegram_routes, "TransactionService", FakeTransactionService)
+    monkeypatch.setattr(telegram_routes, "TelegramService", FakeTelegramService)
+    telegram_routes.telegram_split_state_store.set_pending(
+        "chat-1", "user-1", 123, mode="ai_chat"
+    )
+
+    response = TestClient(app).post(
+        "/telegram/webhook",
+        json={
+            "message": {
+                "chat": {"id": "chat-1"},
+                "from": {"id": "user-1"},
+                "text": "mark personal",
+            }
+        },
+    )
+
+    assert response.status_code == 200
+    assert calls["transaction_id"] == 123
+
+
+def test_ai_chat_split_only_posts_after_confirm(monkeypatch):
+    calls = {}
+    messages = []
+
+    class FakeSplitwiseService:
+        def get_friends(self):
+            return [{"id": 7, "first_name": "Rahul", "last_name": "Shah"}]
+
+    class FakeTransactionService:
+        def __init__(self, db):
+            pass
+
+        def get_transaction(self, transaction_id):
+            return type(
+                "Tx",
+                (),
+                {
+                    "id": transaction_id,
+                    "amount_cents": 1200,
+                    "iso_currency_code": "USD",
+                    "merchant_name": "Costco",
+                    "name": "Costco",
+                    "splitwise_expense_id": None,
+                },
+            )()
+
+        def create_equal_split_expense(self, **kwargs):
+            calls.update(kwargs)
+            return self.get_transaction(kwargs["tx_id"]), {"expenses": [{"id": "expense-1"}]}
+
+    class FakeTelegramService:
+        def answer_callback_query(self, callback_query_id, text):
+            pass
+
+        def send_message(self, message, reply_markup=None, chat_id=None):
+            messages.append((chat_id, message, reply_markup))
+
+    monkeypatch.setattr(telegram_routes, "SplitwiseService", FakeSplitwiseService)
+    monkeypatch.setattr(telegram_routes, "TransactionService", FakeTransactionService)
+    monkeypatch.setattr(telegram_routes, "TelegramService", FakeTelegramService)
+    telegram_routes.telegram_split_state_store.set_pending(
+        "chat-1", "user-1", 123, mode="ai_chat"
+    )
+
+    response = TestClient(app).post(
+        "/telegram/webhook",
+        json={
+            "message": {
+                "chat": {"id": "chat-1"},
+                "from": {"id": "user-1"},
+                "text": "split with Rahul",
+            }
+        },
+    )
+
+    assert response.status_code == 200
+    assert calls == {}
+    assert "Confirm split" in messages[0][1]
+    assert messages[0][2]["inline_keyboard"][0][0]["text"] == "Confirm split"
+
+    confirm_response = TestClient(app).post(
+        "/telegram/webhook",
+        json={
+            "callback_query": {
+                "id": "confirm-ai",
+                "data": "review:confirm:123",
+                "message": {"chat": {"id": "chat-1"}},
+                "from": {"id": "user-1"},
+            }
+        },
+    )
+
+    assert confirm_response.status_code == 200
+    assert calls["tx_id"] == 123
+    assert calls["friend_user_ids"] == [7]
+    assert calls["confirm"] is True
+
+
+def test_ai_chat_cancel_clears_pending_state(monkeypatch):
+    answers = []
+
+    class FakeTelegramService:
+        def answer_callback_query(self, callback_query_id, text):
+            answers.append((callback_query_id, text))
+
+        def send_message(self, message, reply_markup=None, chat_id=None):
+            pass
+
+    monkeypatch.setattr(telegram_routes, "TelegramService", FakeTelegramService)
+    telegram_routes.telegram_split_state_store.set_pending(
+        "chat-1", "user-1", 123, mode="ai_chat"
+    )
+
+    response = TestClient(app).post(
+        "/telegram/webhook",
+        json={
+            "callback_query": {
+                "id": "cancel-ai",
+                "data": "review:cancel:123",
+                "message": {"chat": {"id": "chat-1"}},
+                "from": {"id": "user-1"},
+            }
+        },
+    )
+
+    assert response.status_code == 200
+    assert answers == [("cancel-ai", "Split flow cancelled.")]
+    assert telegram_routes.telegram_split_state_store.get_pending("chat-1", "user-1") is None
+
+
+def test_ai_chat_group_split_only_posts_after_confirm(monkeypatch):
+    calls = {}
+    messages = []
+
+    class FakeSplitwiseService:
+        def get_groups(self):
+            return [
+                {
+                    "id": 44,
+                    "name": "Apartment group",
+                    "members": [
+                        {"id": 7, "first_name": "Rahul", "last_name": "Shah"},
+                        {"id": 9, "first_name": "Akash", "last_name": "Rao"},
+                    ],
+                }
+            ]
+
+    class FakeTransactionService:
+        def __init__(self, db):
+            pass
+
+        def get_transaction(self, transaction_id):
+            return type(
+                "Tx",
+                (),
+                {
+                    "id": transaction_id,
+                    "amount_cents": 2400,
+                    "iso_currency_code": "USD",
+                    "merchant_name": "Costco",
+                    "name": "Costco",
+                    "splitwise_expense_id": None,
+                },
+            )()
+
+        def create_equal_split_expense(self, **kwargs):
+            calls.update(kwargs)
+            return self.get_transaction(kwargs["tx_id"]), {"expenses": [{"id": "expense-1"}]}
+
+    class FakeTelegramService:
+        def answer_callback_query(self, callback_query_id, text):
+            pass
+
+        def send_message(self, message, reply_markup=None, chat_id=None):
+            messages.append((chat_id, message, reply_markup))
+
+    monkeypatch.setattr(telegram_routes, "SplitwiseService", FakeSplitwiseService)
+    monkeypatch.setattr(telegram_routes, "TransactionService", FakeTransactionService)
+    monkeypatch.setattr(telegram_routes, "TelegramService", FakeTelegramService)
+    telegram_routes.telegram_split_state_store.set_pending(
+        "chat-1", "user-1", 123, mode="ai_chat"
+    )
+
+    response = TestClient(app).post(
+        "/telegram/webhook",
+        json={
+            "message": {
+                "chat": {"id": "chat-1"},
+                "from": {"id": "user-1"},
+                "text": "split in Apartment group with Rahul and Akash",
+            }
+        },
+    )
+
+    assert response.status_code == 200
+    assert calls == {}
+    assert "Confirm split" in messages[0][1]
+
+    TestClient(app).post(
+        "/telegram/webhook",
+        json={
+            "callback_query": {
+                "id": "confirm-ai-group",
+                "data": "review:confirm:123",
+                "message": {"chat": {"id": "chat-1"}},
+                "from": {"id": "user-1"},
+            }
+        },
+    )
+
+    assert calls["group_id"] == 44
+    assert calls["friend_user_ids"] == [7, 9]
+
+
+def test_ai_chat_ambiguous_names_ask_for_button_selection(monkeypatch):
+    messages = []
+
+    class FakeSplitwiseService:
+        def get_friends(self):
+            return [
+                {"id": 7, "first_name": "Rahul", "last_name": "Shah"},
+                {"id": 8, "first_name": "Rahul", "last_name": "Patel"},
+            ]
+
+    class FakeTelegramService:
+        def send_message(self, message, reply_markup=None, chat_id=None):
+            messages.append((chat_id, message, reply_markup))
+
+    monkeypatch.setattr(telegram_routes, "SplitwiseService", FakeSplitwiseService)
+    monkeypatch.setattr(telegram_routes, "TelegramService", FakeTelegramService)
+    telegram_routes.telegram_split_state_store.set_pending(
+        "chat-1", "user-1", 123, mode="ai_chat"
+    )
+
+    response = TestClient(app).post(
+        "/telegram/webhook",
+        json={
+            "message": {
+                "chat": {"id": "chat-1"},
+                "from": {"id": "user-1"},
+                "text": "split with Rahul",
+            }
+        },
+    )
+
+    assert response.status_code == 200
+    assert "Multiple matches found" in messages[0][1]
+    assert messages[0][2]["inline_keyboard"][0][0]["callback_data"] == "friend:123:7"
 
 
 def test_telegram_ambiguous_name_preserves_resolved_friend_and_finishes_after_choice(

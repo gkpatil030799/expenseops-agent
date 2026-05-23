@@ -23,6 +23,9 @@ class PendingTelegramSplit:
     remaining_unresolved_names: list[str] = field(default_factory=list)
     ambiguous_matches_by_name: dict[str, list[dict]] = field(default_factory=dict)
     ambiguous_groups_by_name: dict[str, list[dict]] = field(default_factory=dict)
+    ai_group_name: str | None = None
+    ai_participant_names: list[str] = field(default_factory=list)
+    ai_intent_action: str | None = None
 
     def add_friend(self, friend_id: int, display_name: str) -> None:
         if friend_id not in self.selected_friend_ids:

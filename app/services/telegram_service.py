@@ -147,6 +147,8 @@ class TelegramReviewCallback:
 def build_review_callback_data(action: str, transaction_id: int) -> str:
     if action not in {
         "personal",
+        "button_mode",
+        "ai_chat",
         "draft",
         "split_equal",
         "split_people",
@@ -171,6 +173,8 @@ def parse_review_callback_data(data: str) -> TelegramReviewCallback:
     action = parts[1]
     if action not in {
         "personal",
+        "button_mode",
+        "ai_chat",
         "draft",
         "split_equal",
         "split_people",
@@ -193,6 +197,23 @@ def parse_review_callback_data(data: str) -> TelegramReviewCallback:
 
 
 def build_review_inline_keyboard(transaction_id: int) -> dict[str, Any]:
+    return {
+        "inline_keyboard": [
+            [
+                {
+                    "text": "Button mode",
+                    "callback_data": build_review_callback_data("button_mode", transaction_id),
+                },
+                {
+                    "text": "AI chat mode",
+                    "callback_data": build_review_callback_data("ai_chat", transaction_id),
+                },
+            ]
+        ]
+    }
+
+
+def build_button_mode_keyboard(transaction_id: int) -> dict[str, Any]:
     return {
         "inline_keyboard": [
             [
@@ -434,7 +455,7 @@ def build_split_confirmation_keyboard(transaction_id: int) -> dict[str, Any]:
         "inline_keyboard": [
             [
                 {
-                    "text": "Confirm",
+                    "text": "Confirm split",
                     "callback_data": build_review_callback_data("confirm", transaction_id),
                 },
                 {
@@ -469,6 +490,27 @@ def format_undo_success_message(tx: ExpenseTransaction) -> str:
     currency_code = tx.iso_currency_code or "USD"
     header = f"{merchant} — {currency_code} {amount}"
     return f"↩️ <b>{html(header)}</b> moved back to review."
+
+
+def format_button_mode_message(transaction_title: str) -> str:
+    return "\n".join(
+        [
+            f"<b>{html(transaction_title)}</b>",
+            "Choose action:",
+        ]
+    )
+
+
+def format_ai_chat_prompt(transaction_title: str) -> str:
+    return "\n".join(
+        [
+            f"<b>{html(transaction_title)}</b>",
+            "Tell me what to do. Examples:",
+            "- mark personal",
+            "- split with Rahul and Akash",
+            "- split in Apartment group with Rahul and Akash",
+        ]
+    )
 
 
 def format_split_started_message(

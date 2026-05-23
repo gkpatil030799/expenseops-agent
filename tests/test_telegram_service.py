@@ -56,13 +56,10 @@ def test_build_review_inline_keyboard_has_safe_callback_data():
     keyboard = build_review_inline_keyboard(12)
     buttons = keyboard["inline_keyboard"][0]
 
-    assert buttons[0]["callback_data"] == "review:personal:12"
-    assert buttons[1]["callback_data"] == "review:draft:12"
-    split_buttons = keyboard["inline_keyboard"][1]
-    assert split_buttons[0]["text"] == "People"
-    assert split_buttons[0]["callback_data"] == "review:split_people:12"
-    assert split_buttons[1]["text"] == "Group"
-    assert split_buttons[1]["callback_data"] == "review:split_group:12"
+    assert buttons[0]["text"] == "Button mode"
+    assert buttons[0]["callback_data"] == "review:button_mode:12"
+    assert buttons[1]["text"] == "AI chat mode"
+    assert buttons[1]["callback_data"] == "review:ai_chat:12"
 
 
 def test_group_select_keyboard_skips_invalid_group_ids():

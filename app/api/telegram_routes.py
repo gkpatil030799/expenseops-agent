@@ -9,11 +9,13 @@ from app.api.deps import DbSession
 from app.config import get_settings
 from app.models import ExpenseTransaction, TransactionStatus
 from app.services.agent_service import friend_display_name
+from app.services.conversational_split_parser import parse_conversational_split
 from app.services.share_calculator import cents_to_decimal_string
 from app.services.splitwise_service import SplitwiseAPIError, SplitwiseService
 from app.services.telegram_service import (
     TelegramService,
     approximate_equal_share_display,
+    build_button_mode_keyboard,
     build_friend_choice_keyboard,
     build_friend_select_keyboard,
     build_group_choice_keyboard,
@@ -24,7 +26,9 @@ from app.services.telegram_service import (
     build_split_flow_keyboard,
     build_undo_keyboard,
     compact_transaction_title,
+    format_ai_chat_prompt,
     format_ambiguity_message,
+    format_button_mode_message,
     format_completion_summary,
     format_group_ambiguity_message,
     format_group_members_prompt,
@@ -100,7 +104,7 @@ def _handle_callback_query(callback_query: dict, db: DbSession) -> dict[str, boo
             answer = str(exc)
         else:
             answer = (
-                _try_route_group_choice(callback_data, chat_id, user_id, telegram)
+                _try_route_group_choice(callback_data, chat_id, user_id, db, telegram)
                 or _try_route_friend_choice(callback_data, chat_id, user_id, db, telegram)
                 or str(exc)
             )
@@ -127,6 +131,29 @@ def _route_review_callback(
     db: DbSession,
     telegram: TelegramService,
 ) -> str:
+    if action == "button_mode":
+        title = _compact_title_for_transaction(transaction_id, db)
+        telegram.send_message(
+            format_button_mode_message(title),
+            reply_markup=build_button_mode_keyboard(transaction_id),
+            chat_id=chat_id,
+        )
+        return "Button mode selected."
+    if action == "ai_chat":
+        if chat_id and user_id:
+            pending = telegram_split_state_store.set_pending(
+                chat_id,
+                user_id,
+                transaction_id,
+                mode="ai_chat",
+            )
+            pending.transaction_title = _compact_title_for_transaction(transaction_id, db)
+            telegram.send_message(
+                format_ai_chat_prompt(pending.transaction_title),
+                reply_markup=build_split_flow_keyboard(transaction_id),
+                chat_id=chat_id,
+            )
+        return "AI chat mode selected."
     if action == "personal":
         return _mark_personal(transaction_id, chat_id, user_id, db, telegram)
     if action == "undo":
@@ -248,6 +275,9 @@ def _handle_text_message(message: dict, db: DbSession) -> None:
     if not pending or not text:
         return
 
+    if pending.mode == "ai_chat":
+        _handle_ai_chat_message(pending, text, chat_id, user_id, db, telegram)
+        return
     if pending.mode in {"group_name", "group_search"}:
         _handle_group_name_message(pending, text, chat_id, telegram)
         return
@@ -334,6 +364,146 @@ def _handle_group_name_message(
     _select_group_for_pending_split(pending, matches[0], chat_id, telegram)
 
 
+def _handle_ai_chat_message(
+    pending: PendingTelegramSplit,
+    text: str,
+    chat_id: str,
+    user_id: str,
+    db: DbSession,
+    telegram: TelegramService,
+) -> None:
+    parsed = parse_conversational_split(text)
+    pending.ai_intent_action = parsed.action
+    if parsed.action == "personal":
+        _mark_personal(pending.transaction_id, chat_id, user_id, db, telegram)
+        return
+    if parsed.action == "split_people":
+        pending.mode = "ai_chat"
+        pending.ai_participant_names = parsed.participant_names
+        _resolve_ai_people_split(pending, parsed.participant_names, chat_id, user_id, db, telegram)
+        return
+    if parsed.action == "split_group":
+        pending.mode = "ai_chat"
+        pending.ai_group_name = parsed.group_name
+        pending.ai_participant_names = parsed.participant_names
+        _resolve_ai_group_split(pending, chat_id, user_id, db, telegram)
+        return
+    telegram.send_message(
+        "I could not understand that yet. Try: split with Rahul and Akash.",
+        reply_markup=build_split_flow_keyboard(pending.transaction_id),
+        chat_id=chat_id,
+    )
+
+
+def _resolve_ai_people_split(
+    pending: PendingTelegramSplit,
+    names: list[str],
+    chat_id: str,
+    user_id: str,
+    db: DbSession,
+    telegram: TelegramService,
+) -> None:
+    try:
+        friends = SplitwiseService().get_friends()
+    except SplitwiseAPIError:
+        telegram.send_message(
+            "Could not search Splitwise friends. Try again from the dashboard.",
+            chat_id=chat_id,
+        )
+        return
+    pending.remember_friends(friends)
+    if not _resolve_friend_names_from_pool(pending, names, friends, chat_id, telegram):
+        return
+    _continue_or_finish_pending_split(pending, chat_id, user_id, db, telegram)
+
+
+def _resolve_ai_group_split(
+    pending: PendingTelegramSplit,
+    chat_id: str,
+    user_id: str,
+    db: DbSession,
+    telegram: TelegramService,
+) -> None:
+    if not pending.ai_group_name:
+        telegram.send_message("Which Splitwise group should I use?", chat_id=chat_id)
+        return
+    try:
+        groups = SplitwiseService().get_groups()
+    except SplitwiseAPIError:
+        telegram.send_message(
+            "Could not search Splitwise groups. Try again from the dashboard.",
+            chat_id=chat_id,
+        )
+        return
+    matches = find_group_matches(pending.ai_group_name, groups)
+    if not matches:
+        telegram.send_message(
+            f"No Splitwise group matched '{pending.ai_group_name}'. Try again.",
+            chat_id=chat_id,
+        )
+        return
+    if len(matches) > 1:
+        pending.mode = "ai_group_choice"
+        pending.ambiguous_groups_by_name[pending.ai_group_name] = matches
+        telegram.send_message(
+            format_group_ambiguity_message(pending.ai_group_name),
+            reply_markup=build_group_choice_keyboard(pending.transaction_id, matches),
+            chat_id=chat_id,
+        )
+        return
+    _select_group_for_pending_split(pending, matches[0], chat_id, telegram, prompt=False)
+    _resolve_ai_group_members(pending, chat_id, user_id, db, telegram)
+
+
+def _resolve_ai_group_members(
+    pending: PendingTelegramSplit,
+    chat_id: str,
+    user_id: str,
+    db: DbSession,
+    telegram: TelegramService,
+) -> None:
+    if not _resolve_friend_names_from_pool(
+        pending,
+        pending.ai_participant_names,
+        pending.group_members,
+        chat_id,
+        telegram,
+        no_match_label="group member",
+    ):
+        return
+    _continue_or_finish_pending_split(pending, chat_id, user_id, db, telegram)
+
+
+def _resolve_friend_names_from_pool(
+    pending: PendingTelegramSplit,
+    names: list[str],
+    friends: list[dict],
+    chat_id: str,
+    telegram: TelegramService,
+    no_match_label: str = "Splitwise friend",
+) -> bool:
+    pending.selected_friend_ids = []
+    pending.selected_friend_names_by_id = {}
+    pending.remaining_unresolved_names = []
+    pending.ambiguous_matches_by_name = {}
+
+    for name in names:
+        matches = find_friend_matches(name, friends)
+        if not matches:
+            telegram.send_message(
+                f"No {no_match_label} matched '{name}'. Try again.",
+                chat_id=chat_id,
+            )
+            return False
+        if len(matches) == 1:
+            pending.add_friend(int(matches[0]["id"]), friend_display_name(matches[0]))
+            continue
+        pending.remember_friends(matches)
+        pending.remaining_unresolved_names.append(name)
+        pending.ambiguous_matches_by_name[name] = matches
+    return True
+
+
 def _handle_friend_search_message(
     pending: PendingTelegramSplit,
     text: str,
@@ -417,6 +587,7 @@ def _select_group_for_pending_split(
     group: dict,
     chat_id: str,
     telegram: TelegramService,
+    prompt: bool = True,
 ) -> None:
     pending.selected_group_id = int(group["id"])
     pending.selected_group_name = str(group.get("name") or group["id"])
@@ -427,6 +598,8 @@ def _select_group_for_pending_split(
     except (AttributeError, SplitwiseAPIError, KeyError, TypeError, ValueError):
         pending.payer_user_id = None
     pending.mode = "group_members"
+    if not prompt:
+        return
     telegram.send_message(
         format_group_members_prompt(
             pending.selected_group_name,
@@ -447,6 +620,7 @@ def _try_route_group_choice(
     callback_data: str,
     chat_id: str,
     user_id: str,
+    db: DbSession,
     telegram: TelegramService,
 ) -> str | None:
     try:
@@ -461,7 +635,16 @@ def _try_route_group_choice(
     for groups in pending.ambiguous_groups_by_name.values():
         for group in groups:
             if int(group["id"]) == group_id:
-                _select_group_for_pending_split(pending, group, chat_id, telegram)
+                ai_group_choice = pending.mode == "ai_group_choice"
+                _select_group_for_pending_split(
+                    pending,
+                    group,
+                    chat_id,
+                    telegram,
+                    prompt=not ai_group_choice,
+                )
+                if ai_group_choice:
+                    _resolve_ai_group_members(pending, chat_id, user_id, db, telegram)
                 return "Group selected."
     for group in pending.group_options:
         if int(group["id"]) == group_id:
