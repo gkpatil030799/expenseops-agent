@@ -45,6 +45,10 @@ class Settings(BaseSettings):
     telegram_bot_token: str = ""
     telegram_chat_id: str = ""
     telegram_webhook_secret: str = ""
+    telegram_allowed_user_id: str = ""
+
+    openai_api_key: str = ""
+    openai_model: str = "gpt-4.1-mini"
 
     @field_validator("plaid_country_codes", "plaid_products", mode="before")
     @classmethod

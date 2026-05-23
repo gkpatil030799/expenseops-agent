@@ -1562,3 +1562,176 @@ def test_telegram_group_quick_select_and_done_posts_group_split(monkeypatch):
     ]
     assert split_messages
     assert split_messages[0][2]["inline_keyboard"][0][0]["callback_data"] == "review:undo:123"
+
+
+def test_telegram_custom_values_deterministic_parse_does_not_call_llm(monkeypatch):
+    messages = []
+    pending = telegram_routes.telegram_split_state_store.set_pending(
+        "chat-1",
+        "user-1",
+        123,
+        mode="custom_values",
+    )
+    pending.split_value_mode = "exact_amounts"
+    pending.custom_payer_included = False
+    pending.add_friend(7, "Rahul")
+
+    class FakeLLMParser:
+        def parse(self, **kwargs):
+            raise AssertionError("LLM should not be called when deterministic parsing works")
+
+    class FakeTransactionService:
+        def __init__(self, db):
+            pass
+
+        def get_transaction(self, transaction_id):
+            return type(
+                "Tx",
+                (),
+                {
+                    "id": transaction_id,
+                    "amount_cents": 2000,
+                    "iso_currency_code": "USD",
+                    "merchant_name": "Costco",
+                    "name": "Costco",
+                },
+            )()
+
+    class FakeSplitwiseService:
+        def get_current_user(self):
+            return {"id": 1, "first_name": "Gunjan", "last_name": "Patil"}
+
+    class FakeTelegramService:
+        def send_message(self, message, reply_markup=None, chat_id=None):
+            messages.append((chat_id, message, reply_markup))
+
+    monkeypatch.setattr(telegram_routes, "LLMSplitParser", FakeLLMParser)
+    monkeypatch.setattr(telegram_routes, "TransactionService", FakeTransactionService)
+    monkeypatch.setattr(telegram_routes, "SplitwiseService", FakeSplitwiseService)
+    monkeypatch.setattr(telegram_routes, "TelegramService", FakeTelegramService)
+
+    response = TestClient(app).post(
+        "/telegram/webhook",
+        json={
+            "message": {
+                "chat": {"id": "chat-1"},
+                "from": {"id": "user-1"},
+                "text": "Rahul=20",
+            }
+        },
+    )
+
+    assert response.status_code == 200
+    assert pending.mode == "awaiting_custom_confirmation"
+    assert "Confirm before posting to Splitwise." in messages[0][1]
+
+
+def test_telegram_custom_values_llm_fallback_requires_confirmation_before_posting(
+    monkeypatch,
+):
+    messages = []
+    calls = {"posted": 0}
+    pending = telegram_routes.telegram_split_state_store.set_pending(
+        "chat-1",
+        "user-1",
+        123,
+        mode="custom_values",
+    )
+    pending.split_value_mode = "percentages"
+    pending.custom_payer_included = False
+    pending.add_friend(7, "Janhavi")
+    pending.add_friend(9, "Akash")
+
+    class FakeLLMParser:
+        def parse(self, **kwargs):
+            assert kwargs["selected_participants"] == [
+                {"user_id": 7, "display_name": "Janhavi"},
+                {"user_id": 9, "display_name": "Akash"},
+            ]
+            return type(
+                "LLMResult",
+                (),
+                {
+                    "ok": True,
+                    "participant_splits": [
+                        type(
+                            "Split",
+                            (),
+                            {
+                                "user_id": 7,
+                                "display_name": "Janhavi",
+                                "amount_cents": None,
+                                "percentage": 50,
+                                "shares": None,
+                            },
+                        )(),
+                        type(
+                            "Split",
+                            (),
+                            {
+                                "user_id": 9,
+                                "display_name": "Akash",
+                                "amount_cents": None,
+                                "percentage": 50,
+                                "shares": None,
+                            },
+                        )(),
+                    ],
+                    "clarification_question": None,
+                },
+            )()
+
+    class FakeTransactionService:
+        def __init__(self, db):
+            pass
+
+        def get_transaction(self, transaction_id):
+            return type(
+                "Tx",
+                (),
+                {
+                    "id": transaction_id,
+                    "amount_cents": 10000,
+                    "iso_currency_code": "USD",
+                    "merchant_name": "Costco",
+                    "name": "Costco",
+                },
+            )()
+
+        def create_custom_split_expense(self, *args, **kwargs):
+            calls["posted"] += 1
+            raise AssertionError("Custom split must not post before confirmation")
+
+    class FakeSplitwiseService:
+        def get_current_user(self):
+            return {"id": 1, "first_name": "Gunjan", "last_name": "Patil"}
+
+    class FakeTelegramService:
+        def send_message(self, message, reply_markup=None, chat_id=None):
+            messages.append((chat_id, message, reply_markup))
+
+    monkeypatch.setattr(telegram_routes, "LLMSplitParser", FakeLLMParser)
+    monkeypatch.setattr(telegram_routes, "TransactionService", FakeTransactionService)
+    monkeypatch.setattr(telegram_routes, "SplitwiseService", FakeSplitwiseService)
+    monkeypatch.setattr(telegram_routes, "TelegramService", FakeTelegramService)
+
+    response = TestClient(app).post(
+        "/telegram/webhook",
+        json={
+            "message": {
+                "chat": {"id": "chat-1"},
+                "from": {"id": "user-1"},
+                "text": "Janhavi gets half, remaining split equally",
+            }
+        },
+    )
+
+    assert response.status_code == 200
+    assert calls["posted"] == 0
+    assert pending.mode == "awaiting_custom_confirmation"
+    assert pending.custom_participant_splits[0]["user_id"] == 7
+    assert pending.custom_participant_splits[1]["user_id"] == 9
+    assert "Confirm before posting to Splitwise." in messages[0][1]
+    assert messages[0][2]["inline_keyboard"][0][0]["callback_data"] == (
+        "review:confirm_custom:123"
+    )

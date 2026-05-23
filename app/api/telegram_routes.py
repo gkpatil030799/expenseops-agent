@@ -13,6 +13,7 @@ from app.models import ExpenseTransaction, TransactionStatus
 from app.services.agent_service import friend_display_name
 from app.services.conversational_split_parser import parse_conversational_split
 from app.services.custom_split_parser import ParsedCustomSplit, parse_custom_split_text
+from app.services.llm_split_parser import LLMSplitParser
 from app.services.share_calculator import (
     CustomSplitInput,
     build_custom_split_shares_by_mode,
@@ -662,14 +663,84 @@ def _handle_button_custom_values_message(
 
     parsed = _parse_selected_custom_values(pending, text)
     if not parsed:
-        telegram.send_message(
-            "I could not parse those values. Try the example format, or use the dashboard.",
-            chat_id=chat_id,
-        )
-        return
+        parsed = _parse_custom_values_with_llm(pending, text, chat_id, db, telegram)
+        if not parsed:
+            return
     pending.custom_split_mode = pending.split_value_mode
     pending.custom_participant_splits = parsed
     _send_custom_split_confirmation(pending, chat_id, db, telegram)
+
+
+def _parse_custom_values_with_llm(
+    pending: PendingTelegramSplit,
+    text: str,
+    chat_id: str,
+    db: DbSession,
+    telegram: TelegramService,
+) -> list[dict] | None:
+    try:
+        tx = TransactionService(db).get_transaction(pending.transaction_id)
+    except TransactionError:
+        telegram.send_message(
+            "I could not load this transaction. Use the dashboard to review it.",
+            chat_id=chat_id,
+        )
+        return None
+
+    selected_participants = [
+        {
+            "user_id": friend_id,
+            "display_name": pending.selected_friend_names_by_id.get(friend_id)
+            or pending.friend_lookup_by_id.get(friend_id)
+            or str(friend_id),
+        }
+        for friend_id in pending.selected_friend_ids
+    ]
+    payer = None
+    if pending.custom_payer_included and pending.payer_user_id:
+        payer = {
+            "user_id": pending.payer_user_id,
+            "display_name": "You",
+        }
+
+    result = LLMSplitParser().parse(
+        user_message=text,
+        total_amount_cents=abs(tx.amount_cents),
+        currency_code=tx.iso_currency_code or "USD",
+        split_mode=pending.split_value_mode,
+        payer_included=pending.custom_payer_included,
+        selected_participants=selected_participants,
+        payer=payer,
+    )
+    if not result.ok:
+        telegram.send_message(
+            result.clarification_question
+            or "I could not parse that split. Try Rahul=20, Akash=35, or use the dashboard.",
+            chat_id=chat_id,
+        )
+        return None
+
+    participant_splits: list[dict] = []
+    for split in result.participant_splits:
+        split_data: dict = {
+            "user_id": split.user_id,
+            "display_name": split.display_name,
+        }
+        if pending.split_value_mode == "exact_amounts":
+            split_data["amount_cents"] = split.amount_cents
+        elif pending.split_value_mode == "percentages":
+            split_data["percentage"] = split.percentage
+        elif pending.split_value_mode == "shares":
+            split_data["shares"] = split.shares
+        else:
+            telegram.send_message(
+                "I could not parse that split mode. Use the dashboard to review it.",
+                chat_id=chat_id,
+            )
+            return None
+        participant_splits.append(split_data)
+
+    return participant_splits
 
 
 def _parse_selected_custom_values(
