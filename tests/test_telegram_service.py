@@ -7,9 +7,12 @@ from app.models import ExpenseTransaction, TransactionStatus
 from app.services.telegram_service import (
     TelegramService,
     approximate_equal_share_display,
+    build_button_mode_keyboard,
     build_group_select_keyboard,
     build_review_callback_data,
     build_review_inline_keyboard,
+    build_split_target_keyboard,
+    build_split_value_mode_keyboard,
     format_ask_user_transaction_message,
     format_split_success_message,
     parse_review_callback_data,
@@ -77,6 +80,28 @@ def test_group_select_keyboard_skips_invalid_group_ids():
 
     assert {"text": "Apartment group", "callback_data": "group:12:44"} in flattened
     assert all(button["callback_data"] != "group:12:0" for button in flattened)
+
+
+def test_button_mode_keyboard_shows_initial_action_hierarchy():
+    keyboard = build_button_mode_keyboard(12)
+    labels = [button["text"] for row in keyboard["inline_keyboard"] for button in row]
+
+    assert labels == ["Personal", "Draft", "Split"]
+
+
+def test_split_target_keyboard_shows_people_and_group():
+    keyboard = build_split_target_keyboard(12)
+    labels = [button["text"] for row in keyboard["inline_keyboard"] for button in row]
+
+    assert "People" in labels
+    assert "Group" in labels
+
+
+def test_split_value_mode_keyboard_shows_modes():
+    keyboard = build_split_value_mode_keyboard(12)
+    labels = [button["text"] for row in keyboard["inline_keyboard"] for button in row]
+
+    assert {"Equal", "Amounts", "Percentages", "Shares"}.issubset(set(labels))
 
 
 def test_parse_review_callback_data():

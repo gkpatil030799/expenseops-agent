@@ -59,6 +59,35 @@ class TelegramService:
         except Exception as exc:
             logger.warning("Telegram notification failed: %s", self._safe_error(exc))
 
+    def edit_message(
+        self,
+        message: str,
+        *,
+        chat_id: str,
+        message_id: int,
+        reply_markup: dict[str, Any] | None = None,
+    ) -> None:
+        if not self.is_configured:
+            logger.info("Telegram edit skipped: Telegram is not configured.")
+            return
+
+        url = f"https://api.telegram.org/bot{self.settings.telegram_bot_token}/editMessageText"
+        payload: dict[str, Any] = {
+            "chat_id": chat_id,
+            "message_id": message_id,
+            "text": message,
+            "parse_mode": "HTML",
+            "disable_web_page_preview": True,
+        }
+        if reply_markup:
+            payload["reply_markup"] = reply_markup
+        try:
+            with httpx.Client(timeout=10.0) as client:
+                response = client.post(url, json=payload)
+                response.raise_for_status()
+        except Exception as exc:
+            logger.warning("Telegram edit failed: %s", self._safe_error(exc))
+
     def answer_callback_query(self, callback_query_id: str, text: str) -> None:
         if not self.is_configured:
             logger.info("Telegram callback answer skipped: Telegram is not configured.")
@@ -150,13 +179,21 @@ def build_review_callback_data(action: str, transaction_id: int) -> str:
         "button_mode",
         "ai_chat",
         "draft",
+        "split",
         "split_equal",
         "split_people",
         "split_group",
+        "custom_split",
+        "split_mode_equal",
+        "split_mode_amounts",
+        "split_mode_percentages",
+        "split_mode_shares",
+        "toggle_payer_included",
         "search_friend",
         "search_group",
         "done",
         "confirm",
+        "confirm_custom",
         "undo",
         "cancel",
     }:
@@ -176,13 +213,21 @@ def parse_review_callback_data(data: str) -> TelegramReviewCallback:
         "button_mode",
         "ai_chat",
         "draft",
+        "split",
         "split_equal",
         "split_people",
         "split_group",
+        "custom_split",
+        "split_mode_equal",
+        "split_mode_amounts",
+        "split_mode_percentages",
+        "split_mode_shares",
+        "toggle_payer_included",
         "search_friend",
         "search_group",
         "done",
         "confirm",
+        "confirm_custom",
         "undo",
         "cancel",
     }:
@@ -222,10 +267,23 @@ def build_button_mode_keyboard(transaction_id: int) -> dict[str, Any]:
                     "callback_data": build_review_callback_data("personal", transaction_id),
                 },
                 {
-                    "text": "Create draft only",
+                    "text": "Draft",
                     "callback_data": build_review_callback_data("draft", transaction_id),
                 },
             ],
+            [
+                {
+                    "text": "Split",
+                    "callback_data": build_review_callback_data("split", transaction_id),
+                },
+            ],
+        ]
+    }
+
+
+def build_split_target_keyboard(transaction_id: int) -> dict[str, Any]:
+    return {
+        "inline_keyboard": [
             [
                 {
                     "text": "People",
@@ -235,7 +293,70 @@ def build_button_mode_keyboard(transaction_id: int) -> dict[str, Any]:
                     "text": "Group",
                     "callback_data": build_review_callback_data("split_group", transaction_id),
                 },
-            ]
+            ],
+            [
+                {
+                    "text": "Cancel",
+                    "callback_data": build_review_callback_data("cancel", transaction_id),
+                }
+            ],
+        ]
+    }
+
+
+def build_split_value_mode_keyboard(
+    transaction_id: int,
+    payer_included: bool = True,
+) -> dict[str, Any]:
+    return {
+        "inline_keyboard": [
+            [
+                {
+                    "text": "Equal",
+                    "callback_data": build_review_callback_data(
+                        "split_mode_equal",
+                        transaction_id,
+                    ),
+                },
+                {
+                    "text": "Amounts",
+                    "callback_data": build_review_callback_data(
+                        "split_mode_amounts",
+                        transaction_id,
+                    ),
+                },
+            ],
+            [
+                {
+                    "text": "Percentages",
+                    "callback_data": build_review_callback_data(
+                        "split_mode_percentages",
+                        transaction_id,
+                    ),
+                },
+                {
+                    "text": "Shares",
+                    "callback_data": build_review_callback_data(
+                        "split_mode_shares",
+                        transaction_id,
+                    ),
+                },
+            ],
+            [
+                {
+                    "text": "Include me ✅" if payer_included else "Include me",
+                    "callback_data": build_review_callback_data(
+                        "toggle_payer_included",
+                        transaction_id,
+                    ),
+                }
+            ],
+            [
+                {
+                    "text": "Cancel",
+                    "callback_data": build_review_callback_data("cancel", transaction_id),
+                }
+            ],
         ]
     }
 
@@ -467,6 +588,20 @@ def build_split_confirmation_keyboard(transaction_id: int) -> dict[str, Any]:
     }
 
 
+def build_custom_split_confirmation_keyboard(transaction_id: int) -> dict[str, Any]:
+    return {
+        "inline_keyboard": [
+            [
+                {
+                    "text": "Confirm custom split",
+                    "callback_data": build_review_callback_data("confirm_custom", transaction_id),
+                }
+            ],
+            _done_cancel_row(transaction_id)[1:],
+        ]
+    }
+
+
 def build_undo_keyboard(transaction_id: int) -> dict[str, Any]:
     return {
         "inline_keyboard": [
@@ -496,7 +631,46 @@ def format_button_mode_message(transaction_title: str) -> str:
     return "\n".join(
         [
             f"<b>{html(transaction_title)}</b>",
-            "Choose action:",
+            "What do you want to do?",
+        ]
+    )
+
+
+def format_split_target_prompt(transaction_title: str) -> str:
+    return "\n".join([f"<b>{html(transaction_title)}</b>", "Who is involved?"])
+
+
+def format_split_mode_prompt(
+    transaction_title: str,
+    target: str,
+    payer_included: bool,
+) -> str:
+    return "\n".join(
+        [
+            f"<b>{html(transaction_title)}</b>",
+            f"Target: <b>{html(target.title())}</b>",
+            f"Payer included: {'yes' if payer_included else 'no'}",
+            "How should the split work?",
+        ]
+    )
+
+
+def format_custom_values_prompt(
+    transaction_title: str,
+    mode: str,
+    selected_names: list[str],
+) -> str:
+    examples = {
+        "exact_amounts": "Rahul=20, Akash=35",
+        "percentages": "Rahul=60%, Akash=40%",
+        "shares": "Rahul=2, Akash=1, me=1",
+    }
+    return "\n".join(
+        [
+            f"<b>{html(transaction_title)}</b>",
+            f"Selected: {', '.join(html(name) for name in selected_names) or 'None'}",
+            f"Send {html(mode.replace('_', ' '))} values.",
+            f"Example: {html(examples[mode])}",
         ]
     )
 
@@ -609,6 +783,47 @@ def format_split_success_message(
             f"💳 <b>Amount</b>: {html(currency_code)} {html(amount)}",
             f"👥 <b>Participants</b>: {participants}",
             f"🧾 <b>Approx. share</b>: {html(currency_code)} {html(approx_share)} each",
+        ]
+    )
+
+
+def format_custom_split_confirmation_message(
+    *,
+    merchant: str,
+    amount: str,
+    currency_code: str,
+    payer_name: str,
+    payer_included: bool,
+    participant_lines: list[str],
+) -> str:
+    return "\n".join(
+        [
+            f"🧮 <b>{html(merchant)}</b>",
+            f"Total: <b>{html(currency_code)} {html(amount)}</b>",
+            f"Payer: {html(payer_name)}",
+            f"Payer included: {'yes' if payer_included else 'no'}",
+            "",
+            "<b>Owed shares</b>",
+            *[html(line) for line in participant_lines],
+            "",
+            "Confirm before posting to Splitwise.",
+        ]
+    )
+
+
+def format_custom_split_success_message(
+    *,
+    merchant: str,
+    amount: str,
+    currency_code: str,
+    participant_lines: list[str],
+) -> str:
+    return "\n".join(
+        [
+            "✅ <b>Custom split posted</b>",
+            f"{html(merchant)} · {html(currency_code)} {html(amount)}",
+            "",
+            *[html(line) for line in participant_lines],
         ]
     )
 

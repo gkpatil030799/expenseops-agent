@@ -185,3 +185,28 @@ def test_undo_ask_user_is_rejected():
 def test_undo_unknown_transaction_raises_error():
     with pytest.raises(TransactionError, match="not found"):
         TransactionService(FakeDb(None), splitwise_service=object()).undo_transaction(999)
+
+
+def test_custom_split_duplicate_post_is_rejected():
+    tx = make_tx(TransactionStatus.POSTED.value, splitwise_expense_id="expense-1")
+
+    class FakeSplitwise:
+        def get_current_user(self):
+            return {"id": 111}
+
+    service = TransactionService(FakeDb(tx), splitwise_service=FakeSplitwise())
+    with pytest.raises(TransactionError, match="already posted"):
+        service.create_custom_split_expense(
+            tx_id=1,
+            participant_splits=[],
+            split_mode="equal",
+            payer_included=False,
+            payer_user_id=111,
+            owed_by_user_id={222: 633},
+            group_id=None,
+            description=None,
+            details=None,
+            currency_code=None,
+            confirm=True,
+            post_pending=False,
+        )

@@ -8,14 +8,14 @@
     --foreground: 222 47% 11%;
     --card: 0 0% 100%;
     --card-foreground: 222 47% 11%;
-    --primary: 174 84% 32%;
+    --primary: 160 84% 32%;
     --primary-foreground: 0 0% 100%;
     --secondary: 214 32% 91%;
     --secondary-foreground: 222 47% 11%;
     --muted: 210 40% 96%;
     --muted-foreground: 215 16% 47%;
     --border: 214 32% 91%;
-    --ring: 174 84% 32%;
+    --ring: 160 84% 32%;
     --radius: 0.5rem;
   }
 

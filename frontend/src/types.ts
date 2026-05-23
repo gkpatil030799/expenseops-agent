@@ -12,6 +12,7 @@ export type Transaction = {
   status: string;
   agent_question: string | null;
   splitwise_expense_id: string | null;
+  splitwise_payload_json: string | null;
   last_error: string | null;
   classification_suggestion: "likely_personal" | "likely_shared" | "unsure" | null;
   classification_reason: string | null;
@@ -38,4 +39,42 @@ export type SplitwiseUser = {
   first_name: string | null;
   last_name: string | null;
   email: string | null;
+};
+
+export type CustomSplitMode = "equal" | "exact_amounts" | "percentages" | "shares";
+
+export type DashboardEventType =
+  | "transaction_detected"
+  | "telegram_sent"
+  | "recommendation_generated"
+  | "split_confirmed"
+  | "split_posted"
+  | "undo_completed";
+
+export type DashboardEvent = {
+  id: string;
+  transaction_id: number;
+  type: DashboardEventType;
+  merchant: string;
+  amount: string;
+  currency: string;
+  participants: string[];
+  group_name: string | null;
+  status: string;
+  timestamp: string;
+  details: Record<string, unknown>;
+};
+
+export type DashboardFilters = {
+  merchant: string;
+  group: string;
+  status: string;
+  dateFrom: string;
+  dateTo: string;
+};
+
+export type MemoryEntry = {
+  id: string;
+  name: string;
+  count: number;
 };

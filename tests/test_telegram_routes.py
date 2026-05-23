@@ -230,7 +230,7 @@ def test_telegram_callback_button_mode_opens_existing_actions(monkeypatch):
 
     assert response.status_code == 200
     assert answers == [("button-mode", "Button mode selected.")]
-    assert "Choose action" in messages[0][1]
+    assert "What do you want to do" in messages[0][1]
     assert messages[0][2]["inline_keyboard"][0][0]["callback_data"] == "review:personal:123"
 
 
@@ -356,11 +356,11 @@ def test_telegram_callback_split_with_people_starts_pending_state(monkeypatch):
     assert response.status_code == 200
     assert pending is not None
     assert pending.transaction_id == 123
-    assert answers == [("callback-4", "Type a person name or select friends.")]
-    assert "Type person name" in messages[0][1]
-    assert "Selected participants" in messages[0][1]
-    assert messages[0][2]["inline_keyboard"][-1][0]["callback_data"] == "review:done:123"
-    assert messages[0][2]["inline_keyboard"][-1][1]["callback_data"] == "review:cancel:123"
+    assert pending.mode == "split_mode"
+    assert pending.split_target_mode == "people"
+    assert answers == [("callback-4", "Choose split mode.")]
+    assert "How should the split work" in messages[0][1]
+    assert messages[0][2]["inline_keyboard"][0][0]["callback_data"] == "review:split_mode_equal:123"
 
 
 def test_telegram_callback_split_in_group_starts_group_state(monkeypatch):
@@ -398,9 +398,38 @@ def test_telegram_callback_split_in_group_starts_group_state(monkeypatch):
     assert response.status_code == 200
     assert pending is not None
     assert pending.transaction_id == 123
-    assert pending.mode == "group_select"
-    assert answers == [("callback-group", "Type a group name or choose a group.")]
-    assert "Type group name" in messages[0][1]
+    assert pending.mode == "split_mode"
+    assert pending.split_target_mode == "group"
+    assert answers == [("callback-group", "Choose split mode.")]
+    assert "How should the split work" in messages[0][1]
+
+
+def test_telegram_missing_pending_for_split_mode_returns_expired_message(monkeypatch):
+    answers = []
+
+    class FakeTelegramService:
+        def answer_callback_query(self, callback_query_id, text):
+            answers.append((callback_query_id, text))
+
+    monkeypatch.setattr(telegram_routes, "TelegramService", FakeTelegramService)
+    telegram_routes.telegram_split_state_store.clear("chat-1", "user-1")
+
+    response = TestClient(app).post(
+        "/telegram/webhook",
+        json={
+            "callback_query": {
+                "id": "expired-mode",
+                "data": "review:split_mode_equal:123",
+                "message": {"chat": {"id": "chat-1"}},
+                "from": {"id": "user-1"},
+            }
+        },
+    )
+
+    assert response.status_code == 200
+    assert answers == [
+        ("expired-mode", "This split session expired. Please start again from the transaction.")
+    ]
 
 
 def test_telegram_callback_cancel_clears_pending_state(monkeypatch):
@@ -460,6 +489,17 @@ def test_telegram_selecting_and_deselecting_friend_updates_state(monkeypatch):
             "callback_query": {
                 "id": "start",
                 "data": "review:split_people:123",
+                "message": {"chat": {"id": "chat-1"}},
+                "from": {"id": "user-1"},
+            }
+        },
+    )
+    TestClient(app).post(
+        "/telegram/webhook",
+        json={
+            "callback_query": {
+                "id": "mode",
+                "data": "review:split_mode_equal:123",
                 "message": {"chat": {"id": "chat-1"}},
                 "from": {"id": "user-1"},
             }
@@ -1417,6 +1457,17 @@ def test_telegram_group_quick_select_and_done_posts_group_split(monkeypatch):
             "callback_query": {
                 "id": "start-group",
                 "data": "review:split_group:123",
+                "message": {"chat": {"id": "chat-1"}},
+                "from": {"id": "user-1"},
+            }
+        },
+    )
+    TestClient(app).post(
+        "/telegram/webhook",
+        json={
+            "callback_query": {
+                "id": "mode-group",
+                "data": "review:split_mode_equal:123",
                 "message": {"chat": {"id": "chat-1"}},
                 "from": {"id": "user-1"},
             }

@@ -18,7 +18,11 @@ from app.schemas import (
 )
 from app.services.agent_service import match_friends
 from app.services.recommendation_service import classify_transaction_recommendation
-from app.services.share_calculator import cents_to_decimal_string, decimal_to_cents
+from app.services.share_calculator import (
+    CustomSplitInput,
+    cents_to_decimal_string,
+    decimal_to_cents,
+)
 from app.services.splitwise_service import SplitwiseAPIError, SplitwiseService
 from app.services.transaction_service import (
     TransactionError,
@@ -115,13 +119,34 @@ def split_custom(
     tx_id: int, payload: CustomSplitRequest, db: DbSession
 ) -> SplitwisePostResponse:
     try:
-        owed_by_user_id = {
-            share.user_id: decimal_to_cents(Decimal(str(share.owed_share)))
-            for share in payload.shares
-        }
+        legacy_owed_by_user_id = None
+        participant_splits = None
+        if payload.participant_splits:
+            participant_splits = [
+                CustomSplitInput(
+                    user_id=share.user_id,
+                    amount_cents=(
+                        decimal_to_cents(Decimal(str(share.amount)))
+                        if share.amount is not None
+                        else None
+                    ),
+                    percentage=share.percentage,
+                    shares=share.shares,
+                )
+                for share in payload.participant_splits
+            ]
+        elif payload.shares:
+            legacy_owed_by_user_id = {
+                share.user_id: decimal_to_cents(Decimal(str(share.owed_share)))
+                for share in payload.shares
+            }
         tx, splitwise_response = TransactionService(db).create_custom_split_expense(
             tx_id=tx_id,
-            owed_by_user_id=owed_by_user_id,
+            participant_splits=participant_splits,
+            split_mode=payload.split_mode,
+            payer_included=payload.payer_included,
+            payer_user_id=payload.payer_user_id,
+            owed_by_user_id=legacy_owed_by_user_id,
             group_id=payload.group_id,
             description=payload.description,
             details=payload.details,

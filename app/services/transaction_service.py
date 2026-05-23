@@ -15,7 +15,10 @@ from app.services.agent_service import classify_transaction, transaction_display
 from app.services.notification_service import NotificationService
 from app.services.plaid_service import PlaidService
 from app.services.share_calculator import (
+    CustomSplitInput,
+    SplitMode,
     build_custom_split_shares,
+    build_custom_split_shares_by_mode,
     build_equal_split_shares,
     build_splitwise_by_shares_payload,
     cents_to_decimal_string,
@@ -247,7 +250,11 @@ class TransactionService:
         self,
         *,
         tx_id: int,
-        owed_by_user_id: dict[int, int],
+        participant_splits: list[CustomSplitInput] | None = None,
+        split_mode: SplitMode = "exact_amounts",
+        payer_included: bool = True,
+        payer_user_id: int | None = None,
+        owed_by_user_id: dict[int, int] | None = None,
         group_id: int | None,
         description: str | None,
         details: str | None,
@@ -257,12 +264,23 @@ class TransactionService:
     ) -> tuple[ExpenseTransaction, dict[str, Any]]:
         tx = self.get_transaction(tx_id)
         self._ensure_can_post(tx, post_pending=post_pending)
-        payer_user_id = int(self.splitwise_service.get_current_user()["id"])
-        shares = build_custom_split_shares(
-            total_cents=abs(tx.amount_cents),
-            payer_user_id=payer_user_id,
-            owed_by_user_id=owed_by_user_id,
+        resolved_payer_user_id = payer_user_id or int(
+            self.splitwise_service.get_current_user()["id"]
         )
+        if owed_by_user_id is not None:
+            shares = build_custom_split_shares(
+                total_cents=abs(tx.amount_cents),
+                payer_user_id=resolved_payer_user_id,
+                owed_by_user_id=owed_by_user_id,
+            )
+        else:
+            shares = build_custom_split_shares_by_mode(
+                total_cents=abs(tx.amount_cents),
+                payer_user_id=resolved_payer_user_id,
+                payer_included=payer_included,
+                split_mode=split_mode,
+                participant_splits=participant_splits or [],
+            )
         payload = self._base_splitwise_payload(
             tx=tx,
             shares=shares,

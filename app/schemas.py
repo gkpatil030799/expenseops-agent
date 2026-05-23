@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import date, datetime
 from decimal import Decimal
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -38,6 +38,7 @@ class TransactionOut(BaseModel):
     status: str
     agent_question: str | None
     splitwise_expense_id: str | None
+    splitwise_payload_json: str | None
     last_error: str | None
     classification_suggestion: Literal["likely_personal", "likely_shared", "unsure"] | None = None
     classification_reason: str | None = None
@@ -106,19 +107,44 @@ class EqualSplitRequest(BaseModel):
         return output
 
 
-class CustomShare(BaseModel):
+class LegacyCustomShare(BaseModel):
     user_id: int
     owed_share: Decimal = Field(..., gt=Decimal("0"))
 
 
+class CustomParticipantSplit(BaseModel):
+    user_id: int
+    display_name: str | None = None
+    amount: Decimal | None = Field(default=None, ge=Decimal("0"))
+    percentage: Decimal | None = Field(default=None, ge=Decimal("0"))
+    shares: Decimal | None = Field(default=None, ge=Decimal("0"))
+
+
 class CustomSplitRequest(BaseModel):
-    shares: list[CustomShare]
     group_id: int | None = None
+    payer_user_id: int | None = None
+    payer_included: bool = True
+    split_mode: Literal["equal", "exact_amounts", "percentages", "shares"] = "equal"
+    participant_splits: list[CustomParticipantSplit] = Field(default_factory=list)
+    shares: list[LegacyCustomShare] = Field(default_factory=list)
     description: str | None = None
     details: str | None = None
+    metadata: dict[str, Any] | None = None
     currency_code: str | None = None
     confirm: bool = True
     post_pending: bool = False
+
+    @field_validator("participant_splits")
+    @classmethod
+    def unique_participant_ids(
+        cls, value: list[CustomParticipantSplit]
+    ) -> list[CustomParticipantSplit]:
+        seen: set[int] = set()
+        for split in value:
+            if split.user_id in seen:
+                raise ValueError("participant user IDs must be unique")
+            seen.add(split.user_id)
+        return value
 
 
 class SplitwisePostResponse(BaseModel):

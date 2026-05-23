@@ -26,6 +26,11 @@ class PendingTelegramSplit:
     ai_group_name: str | None = None
     ai_participant_names: list[str] = field(default_factory=list)
     ai_intent_action: str | None = None
+    custom_split_mode: str | None = None
+    custom_payer_included: bool = True
+    custom_participant_splits: list[dict] = field(default_factory=list)
+    split_target_mode: str | None = None
+    split_value_mode: str = "equal"
 
     def add_friend(self, friend_id: int, display_name: str) -> None:
         if friend_id not in self.selected_friend_ids:
