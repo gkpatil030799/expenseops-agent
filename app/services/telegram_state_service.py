@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 
 from app.services.agent_service import friend_display_name
 
@@ -26,6 +27,15 @@ class PendingTelegramSplit:
     ai_group_name: str | None = None
     ai_participant_names: list[str] = field(default_factory=list)
     ai_intent_action: str | None = None
+    ai_target_type: str | None = None
+    ai_split_mode: str = "equal"
+    ai_custom_values_text: str | None = None
+    ai_waiting_for: str | None = None
+    last_ai_message: str | None = None
+    failed_ai_message: str | None = None
+    failed_ai_reason: str | None = None
+    failed_ai_created_at: datetime | None = None
+    button_fallback_active: bool = False
     custom_split_mode: str | None = None
     custom_payer_included: bool = True
     custom_participant_splits: list[dict] = field(default_factory=list)
@@ -54,6 +64,11 @@ class PendingTelegramSplit:
 
     def next_ambiguous_name(self) -> str | None:
         return self.remaining_unresolved_names[0] if self.remaining_unresolved_names else None
+
+    def remember_failed_ai_attempt(self, original_message: str, failure_reason: str) -> None:
+        self.failed_ai_message = original_message.strip()[:500]
+        self.failed_ai_reason = failure_reason
+        self.failed_ai_created_at = datetime.now(UTC)
 
 
 class TelegramSplitStateStore:

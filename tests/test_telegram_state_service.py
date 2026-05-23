@@ -32,3 +32,13 @@ def test_multiple_match_needs_disambiguation():
     ]
 
     assert len(find_friend_matches("Rahul", friends)) == 2
+
+
+def test_pending_state_remembers_failed_ai_attempt_with_length_cap():
+    state = TelegramSplitStateStore().set_pending("chat-1", "user-1", 123)
+
+    state.remember_failed_ai_attempt("x" * 700, "low_confidence")
+
+    assert len(state.failed_ai_message) == 500
+    assert state.failed_ai_reason == "low_confidence"
+    assert state.failed_ai_created_at is not None

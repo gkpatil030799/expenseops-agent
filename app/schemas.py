@@ -168,3 +168,22 @@ class InterpretResponse(BaseModel):
 class WebhookAck(BaseModel):
     ok: bool
     message: str
+
+
+class AIMemoryOut(BaseModel):
+    id: int
+    original_message: str
+    failure_reason: str
+    final_action: str
+    final_group_name: str | None
+    final_participants: list[str]
+    final_split_mode: str | None
+    payer_included: bool
+    custom_values: list[dict[str, Any]] | None
+    correction_type: str
+    merchant: str | None
+    amount_cents: int | None
+    currency: str | None
+    usage_count: int
+    last_used_at: datetime | None
+    created_at: datetime

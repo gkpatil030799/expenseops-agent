@@ -39,6 +39,7 @@ import { api } from "@/lib/api";
 import type {
   DashboardEvent,
   DashboardFilters,
+  AIMemory,
   CustomSplitMode,
   Friend,
   Group,
@@ -68,6 +69,7 @@ function App() {
   const [transactions, setTransactions] = useState<Transaction[]>([]);
   const [recentTransactions, setRecentTransactions] = useState<Transaction[]>([]);
   const [allTransactions, setAllTransactions] = useState<Transaction[]>([]);
+  const [aiMemories, setAiMemories] = useState<AIMemory[]>([]);
   const [filters, setFilters] = useState<DashboardFilters>({
     merchant: "",
     group: "",
@@ -122,6 +124,7 @@ function App() {
     void loadTransactions();
     void loadRecentActivity();
     void loadCurrentSplitwiseUser();
+    void loadAIMemories();
   }, []);
 
   useEffect(() => {
@@ -171,6 +174,7 @@ function App() {
       setTransactions(pending);
       setRecentTransactions(recent);
       setAllTransactions((current) => mergeTransactions(current, [...pending, ...recent]));
+      setAiMemories(await api<AIMemory[]>("/ai/memory"));
     } catch {
       // Quiet polling should not interrupt the active workflow or overwrite the log panel.
     }
@@ -208,6 +212,26 @@ function App() {
     } catch {
       setCurrentSplitwiseUser(null);
     }
+  }
+
+  async function loadAIMemories() {
+    try {
+      setAiMemories(await api<AIMemory[]>("/ai/memory"));
+    } catch {
+      setAiMemories([]);
+    }
+  }
+
+  async function deleteAIMemory(id: number) {
+    await run(
+      `delete-ai-memory-${id}`,
+      async () => {
+        await api(`/ai/memory/${id}`, { method: "DELETE" });
+        await loadAIMemories();
+        return { deleted_ai_memory: id };
+      },
+      false,
+    );
   }
 
   async function openPlaidLink() {
@@ -566,6 +590,7 @@ function App() {
               onSelectFriend={selectMemoryFriend}
               onSelectGroup={selectMemoryGroup}
             />
+            <AIFallbackMemoryPanel memories={aiMemories} onDelete={deleteAIMemory} />
             <ActivityTimeline events={timelineEvents} />
             <ActivityLog log={log} />
           </aside>
@@ -853,6 +878,77 @@ function AgentMemoryPanel({
       <CardContent className="space-y-3">
         <MemoryList title="Friends" items={friends} onSelect={onSelectFriend} />
         <MemoryList title="Groups" items={groups} onSelect={onSelectGroup} />
+      </CardContent>
+    </Card>
+  );
+}
+
+function AIFallbackMemoryPanel({
+  memories,
+  onDelete,
+}: {
+  memories: AIMemory[];
+  onDelete: (id: number) => void;
+}) {
+  return (
+    <Card className="bg-white/90">
+      <CardHeader>
+        <div className="flex items-center gap-2">
+          <Sparkles className="h-4 w-4 text-indigo-600" />
+          <CardTitle>AI learned corrections</CardTitle>
+        </div>
+        <CardDescription>Fallback examples learned from Button mode completions</CardDescription>
+      </CardHeader>
+      <CardContent className="space-y-3">
+        {memories.length ? (
+          memories.map((memory) => (
+            <div
+              key={memory.id}
+              className="rounded-lg border border-slate-200 bg-slate-50/60 p-3"
+            >
+              <div className="flex items-start justify-between gap-2">
+                <div className="min-w-0">
+                  <p className="truncate text-sm font-medium text-slate-900">
+                    “{memory.original_message}”
+                  </p>
+                  <p className="mt-1 text-xs text-slate-500">
+                    {memory.final_action}
+                    {memory.final_split_mode ? ` · ${memory.final_split_mode}` : ""}
+                    {memory.final_group_name ? ` · ${memory.final_group_name}` : ""}
+                  </p>
+                </div>
+                <Button
+                  size="icon"
+                  variant="ghost"
+                  className="h-7 w-7 shrink-0 text-slate-400 hover:text-red-600"
+                  onClick={() => onDelete(memory.id)}
+                >
+                  <X className="h-3.5 w-3.5" />
+                </Button>
+              </div>
+              {memory.final_participants.length ? (
+                <div className="mt-2 flex flex-wrap gap-1.5">
+                  {memory.final_participants.map((participant) => (
+                    <span
+                      key={`${memory.id}-${participant}`}
+                      className="rounded-full bg-emerald-50 px-2 py-1 text-xs text-emerald-800"
+                    >
+                      {participant}
+                    </span>
+                  ))}
+                </div>
+              ) : null}
+              <p className="mt-2 text-xs text-slate-400">
+                Used {memory.usage_count} times
+                {memory.last_used_at
+                  ? ` · last used ${new Date(memory.last_used_at).toLocaleDateString()}`
+                  : ""}
+              </p>
+            </div>
+          ))
+        ) : (
+          <p className="text-sm text-slate-500">No learned AI fallbacks yet.</p>
+        )}
       </CardContent>
     </Card>
   );

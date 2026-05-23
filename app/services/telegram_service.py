@@ -258,6 +258,23 @@ def build_review_inline_keyboard(transaction_id: int) -> dict[str, Any]:
     }
 
 
+def build_ai_fallback_keyboard(transaction_id: int) -> dict[str, Any]:
+    return {
+        "inline_keyboard": [
+            [
+                {
+                    "text": "Open Button mode",
+                    "callback_data": build_review_callback_data("button_mode", transaction_id),
+                },
+                {
+                    "text": "Cancel",
+                    "callback_data": build_review_callback_data("cancel", transaction_id),
+                },
+            ]
+        ]
+    }
+
+
 def build_button_mode_keyboard(transaction_id: int) -> dict[str, Any]:
     return {
         "inline_keyboard": [
@@ -542,7 +559,16 @@ def _participant_rows(
         friend_id = int(friend["id"])
         name = friend_display_name(friend)
         if payer_user_id and friend_id == payer_user_id:
-            rows.append([{"text": f"{name} · You / payer", "callback_data": "noop:payer"}])
+            rows.append(
+                [
+                    {
+                        "text": (
+                            f"{'✅ ' if friend_id in selected_ids else ''}{name} · You / payer"
+                        ),
+                        "callback_data": "noop:payer",
+                    }
+                ]
+            )
             continue
         rows.append(
             [
@@ -683,6 +709,16 @@ def format_ai_chat_prompt(transaction_title: str) -> str:
             "- mark personal",
             "- split with Rahul and Akash",
             "- split in Apartment group with Rahul and Akash",
+        ]
+    )
+
+
+def format_ai_fallback_message(transaction_title: str) -> str:
+    return "\n".join(
+        [
+            f"<b>{html(transaction_title)}</b>",
+            "I’m not confident about this one. Use Button mode for this one; "
+            "I’ll remember the final result.",
         ]
     )
 

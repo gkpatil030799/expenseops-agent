@@ -78,3 +78,27 @@ export type MemoryEntry = {
   name: string;
   count: number;
 };
+
+export type AIMemory = {
+  id: number;
+  original_message: string;
+  failure_reason: string;
+  final_action: string;
+  final_group_name: string | null;
+  final_participants: string[];
+  final_split_mode: string | null;
+  payer_included: boolean;
+  custom_values: Array<{
+    display_name?: string | null;
+    amount_cents?: number | null;
+    percentage?: string | number | null;
+    shares?: string | number | null;
+  }> | null;
+  correction_type: string;
+  merchant: string | null;
+  amount_cents: number | null;
+  currency: string | null;
+  usage_count: number;
+  last_used_at: string | null;
+  created_at: string;
+};
