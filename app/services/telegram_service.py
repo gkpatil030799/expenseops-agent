@@ -112,6 +112,32 @@ def format_ask_user_transaction_message(tx: ExpenseTransaction) -> str:
     )
 
 
+def compact_transaction_title(tx: ExpenseTransaction) -> str:
+    amount = cents_to_decimal_string(abs(tx.amount_cents))
+    name = transaction_display_name(tx)
+    if (tx.iso_currency_code or "USD").upper() == "USD":
+        return f"${amount} {name}"
+    return f"{tx.iso_currency_code} {amount} {name}"
+
+
+def format_transaction_review_prompt(
+    tx: ExpenseTransaction,
+    *,
+    completed_count: int,
+    total_count: int,
+) -> str:
+    current = min(completed_count + 1, max(total_count, 1))
+    return "\n".join(
+        [
+            f"<b>Transaction {current} of {max(total_count, 1)}</b>",
+            f"Done: {completed_count} / {max(total_count, 1)}",
+            "",
+            f"<b>{html(compact_transaction_title(tx))}</b>",
+            "Choose action:",
+        ]
+    )
+
+
 @dataclass(frozen=True)
 class TelegramReviewCallback:
     action: str
@@ -119,7 +145,19 @@ class TelegramReviewCallback:
 
 
 def build_review_callback_data(action: str, transaction_id: int) -> str:
-    if action not in {"personal", "draft", "split_equal", "split_people", "cancel"}:
+    if action not in {
+        "personal",
+        "draft",
+        "split_equal",
+        "split_people",
+        "split_group",
+        "search_friend",
+        "search_group",
+        "done",
+        "confirm",
+        "undo",
+        "cancel",
+    }:
         raise ValueError("Unsupported Telegram review action")
     if transaction_id <= 0:
         raise ValueError("Invalid Telegram transaction id")
@@ -131,7 +169,19 @@ def parse_review_callback_data(data: str) -> TelegramReviewCallback:
     if len(parts) != 3 or parts[0] != "review":
         raise ValueError("Invalid Telegram callback payload")
     action = parts[1]
-    if action not in {"personal", "draft", "split_equal", "split_people", "cancel"}:
+    if action not in {
+        "personal",
+        "draft",
+        "split_equal",
+        "split_people",
+        "split_group",
+        "search_friend",
+        "search_group",
+        "done",
+        "confirm",
+        "undo",
+        "cancel",
+    }:
         raise ValueError("Unsupported Telegram review action")
     try:
         transaction_id = int(parts[2])
@@ -151,16 +201,18 @@ def build_review_inline_keyboard(transaction_id: int) -> dict[str, Any]:
                     "callback_data": build_review_callback_data("personal", transaction_id),
                 },
                 {
-                    "text": "Create Draft",
+                    "text": "Create draft only",
                     "callback_data": build_review_callback_data("draft", transaction_id),
                 },
+            ],
+            [
                 {
-                    "text": "Split Equal",
-                    "callback_data": build_review_callback_data("split_equal", transaction_id),
+                    "text": "People",
+                    "callback_data": build_review_callback_data("split_people", transaction_id),
                 },
                 {
-                    "text": "Split with people",
-                    "callback_data": build_review_callback_data("split_people", transaction_id),
+                    "text": "Group",
+                    "callback_data": build_review_callback_data("split_group", transaction_id),
                 },
             ]
         ]
@@ -212,6 +264,117 @@ def build_friend_choice_keyboard(transaction_id: int, friends: list[dict]) -> di
     }
 
 
+def build_friend_select_keyboard(
+    transaction_id: int,
+    friends: list[dict],
+    selected_friend_ids: list[int],
+) -> dict[str, Any]:
+    return {
+        "inline_keyboard": _participant_rows(
+            transaction_id,
+            friends,
+            selected_friend_ids,
+        )
+        + [
+            [
+                {
+                    "text": "Search by name",
+                    "callback_data": build_review_callback_data("search_friend", transaction_id),
+                }
+            ],
+            _done_cancel_row(transaction_id),
+        ]
+    }
+
+
+def build_group_choice_callback_data(transaction_id: int, group_id: int) -> str:
+    if transaction_id <= 0 or group_id <= 0:
+        raise ValueError("Invalid Telegram group choice payload")
+    return f"group:{transaction_id}:{group_id}"
+
+
+def parse_group_choice_callback_data(data: str) -> tuple[int, int]:
+    parts = data.split(":")
+    if len(parts) != 3 or parts[0] != "group":
+        raise ValueError("Invalid Telegram group choice payload")
+    try:
+        transaction_id = int(parts[1])
+        group_id = int(parts[2])
+    except ValueError as exc:
+        raise ValueError("Invalid Telegram group choice payload") from exc
+    if transaction_id <= 0 or group_id <= 0:
+        raise ValueError("Invalid Telegram group choice payload")
+    return transaction_id, group_id
+
+
+def build_group_choice_keyboard(transaction_id: int, groups: list[dict]) -> dict[str, Any]:
+    return {
+        "inline_keyboard": _group_rows(transaction_id, groups)
+        + [
+            [
+                {
+                    "text": "Cancel",
+                    "callback_data": build_review_callback_data("cancel", transaction_id),
+                }
+            ]
+        ]
+    }
+
+
+def build_group_select_keyboard(transaction_id: int, groups: list[dict]) -> dict[str, Any]:
+    return {
+        "inline_keyboard": _group_rows(transaction_id, groups)
+        + [
+            [
+                {
+                    "text": "Search group by name",
+                    "callback_data": build_review_callback_data("search_group", transaction_id),
+                }
+            ],
+            _done_cancel_row(transaction_id),
+        ]
+    }
+
+
+def _group_rows(transaction_id: int, groups: list[dict]) -> list[list[dict[str, str]]]:
+    rows: list[list[dict[str, str]]] = []
+    for group in groups:
+        try:
+            group_id = int(group["id"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if group_id <= 0:
+            continue
+        rows.append(
+            [
+                {
+                    "text": str(group.get("name") or group_id),
+                    "callback_data": build_group_choice_callback_data(transaction_id, group_id),
+                }
+            ]
+        )
+        if len(rows) == 8:
+            break
+    return rows
+
+
+def build_group_member_select_keyboard(
+    transaction_id: int,
+    members: list[dict],
+    selected_friend_ids: list[int],
+    payer_user_id: int | None = None,
+) -> dict[str, Any]:
+    return {
+        "inline_keyboard": _participant_rows(
+            transaction_id,
+            members,
+            selected_friend_ids,
+            payer_user_id=payer_user_id,
+        )
+        + [_done_cancel_row(transaction_id)]
+    }
+
+
 def build_split_flow_keyboard(transaction_id: int) -> dict[str, Any]:
     return {
         "inline_keyboard": [
@@ -225,14 +388,145 @@ def build_split_flow_keyboard(transaction_id: int) -> dict[str, Any]:
     }
 
 
-def format_split_started_message(selected_names: list[str] | None = None) -> str:
+def _participant_rows(
+    transaction_id: int,
+    friends: list[dict],
+    selected_friend_ids: list[int],
+    payer_user_id: int | None = None,
+) -> list[list[dict[str, str]]]:
+    selected_ids = set(selected_friend_ids)
+    rows = []
+    for friend in friends[:8]:
+        friend_id = int(friend["id"])
+        name = friend_display_name(friend)
+        if payer_user_id and friend_id == payer_user_id:
+            rows.append([{"text": f"{name} · You / payer", "callback_data": "noop:payer"}])
+            continue
+        rows.append(
+            [
+                {
+                    "text": f"✅ {name}" if friend_id in selected_ids else name,
+                    "callback_data": build_friend_choice_callback_data(
+                        transaction_id,
+                        friend_id,
+                    ),
+                }
+            ]
+        )
+    return rows
+
+
+def _done_cancel_row(transaction_id: int) -> list[dict[str, str]]:
+    return [
+        {
+            "text": "Done",
+            "callback_data": build_review_callback_data("done", transaction_id),
+        },
+        {
+            "text": "Cancel",
+            "callback_data": build_review_callback_data("cancel", transaction_id),
+        },
+    ]
+
+
+def build_split_confirmation_keyboard(transaction_id: int) -> dict[str, Any]:
+    return {
+        "inline_keyboard": [
+            [
+                {
+                    "text": "Confirm",
+                    "callback_data": build_review_callback_data("confirm", transaction_id),
+                },
+                {
+                    "text": "Cancel",
+                    "callback_data": build_review_callback_data("cancel", transaction_id),
+                },
+            ]
+        ]
+    }
+
+
+def build_undo_keyboard(transaction_id: int) -> dict[str, Any]:
+    return {
+        "inline_keyboard": [
+            [
+                {
+                    "text": "Undo",
+                    "callback_data": build_review_callback_data("undo", transaction_id),
+                }
+            ]
+        ]
+    }
+
+
+def format_personal_success_message(tx: ExpenseTransaction) -> str:
+    return f"✅ <b>{html(compact_transaction_title(tx))}</b>\nMarked personal."
+
+
+def format_undo_success_message(tx: ExpenseTransaction) -> str:
+    merchant = transaction_display_name(tx)
+    amount = cents_to_decimal_string(abs(tx.amount_cents))
+    currency_code = tx.iso_currency_code or "USD"
+    header = f"{merchant} — {currency_code} {amount}"
+    return f"↩️ <b>{html(header)}</b> moved back to review."
+
+
+def format_split_started_message(
+    selected_names: list[str] | None = None,
+    transaction_title: str | None = None,
+) -> str:
     selected = selected_names or []
     participants = ", ".join(html(name) for name in selected) if selected else "None yet"
     return "\n".join(
         [
-            "👥 <b>Split with people</b>",
+            f"<b>{html(transaction_title)}</b>" if transaction_title else "👥 <b>People</b>",
             "",
-            "Send Splitwise friend names separated by commas.",
+            "Type person name or select friends below.",
+            "<i>Example: Rahul, Akash</i>",
+            "",
+            f"✅ <b>Selected participants</b>: {participants}",
+        ]
+    )
+
+
+def format_group_started_message(transaction_title: str | None = None) -> str:
+    return "\n".join(
+        [
+            f"<b>{html(transaction_title)}</b>" if transaction_title else "🏘️ <b>Group</b>",
+            "",
+            "Type group name or choose a recent group.",
+        ]
+    )
+
+
+def format_group_ambiguity_message(name: str) -> str:
+    return "\n".join(
+        [
+            "🔎 <b>Multiple groups found</b>",
+            "",
+            f"I found more than one Splitwise group for <b>{html(name)}</b>.",
+            "Choose the correct group below.",
+        ]
+    )
+
+
+def format_group_members_prompt(
+    group_name: str,
+    selected_names: list[str] | None = None,
+    transaction_title: str | None = None,
+) -> str:
+    selected = selected_names or []
+    participants = ", ".join(html(name) for name in selected) if selected else "None yet"
+    return "\n".join(
+        [
+            (
+                f"<b>{html(transaction_title)}</b>"
+                if transaction_title
+                else f"🏘️ <b>{html(group_name)}</b>"
+            ),
+            "",
+            f"Group: <b>{html(group_name)}</b>",
+            "Select group members below or send names separated by commas.",
             "<i>Example: Rahul, Akash</i>",
             "",
             f"✅ <b>Selected participants</b>: {participants}",
@@ -275,6 +569,35 @@ def format_split_success_message(
             f"🧾 <b>Approx. share</b>: {html(currency_code)} {html(approx_share)} each",
         ]
     )
+
+
+def format_split_confirmation_message(
+    *,
+    merchant: str,
+    amount: str,
+    currency_code: str,
+    payer_name: str,
+    participant_names: list[str],
+    approx_share: str,
+) -> str:
+    participants = ", ".join(html(name) for name in participant_names)
+    return "\n".join(
+        [
+            "🧾 <b>Confirm split</b>",
+            "",
+            f"<b>{html(currency_code)} {html(amount)} {html(merchant)}</b>",
+            f"Payer: {html(payer_name)}",
+            f"Participants: {participants}",
+            f"Equal split: approx. {html(currency_code)} {html(approx_share)} each",
+        ]
+    )
+
+
+def format_completion_summary(completed_titles: list[str]) -> str:
+    lines = ["✅ <b>All caught up</b>"]
+    if completed_titles:
+        lines.extend(["", *[f"✅ {html(title)}" for title in completed_titles]])
+    return "\n".join(lines)
 
 
 def approximate_equal_share_display(amount_cents: int, participant_count: int) -> str:

@@ -15,6 +15,7 @@ export type Transaction = {
   last_error: string | null;
   classification_suggestion: "likely_personal" | "likely_shared" | "unsure" | null;
   classification_reason: string | null;
+  can_undo_transaction: boolean;
   created_at: string;
   updated_at: string;
 };
@@ -25,4 +26,16 @@ export type Friend = {
   last_name: string | null;
   email: string | null;
   display_name: string;
+};
+
+export type Group = {
+  id: number;
+  name: string;
+};
+
+export type SplitwiseUser = {
+  id: number;
+  first_name: string | null;
+  last_name: string | null;
+  email: string | null;
 };

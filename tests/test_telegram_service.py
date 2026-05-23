@@ -7,6 +7,7 @@ from app.models import ExpenseTransaction, TransactionStatus
 from app.services.telegram_service import (
     TelegramService,
     approximate_equal_share_display,
+    build_group_select_keyboard,
     build_review_callback_data,
     build_review_inline_keyboard,
     format_ask_user_transaction_message,
@@ -57,8 +58,28 @@ def test_build_review_inline_keyboard_has_safe_callback_data():
 
     assert buttons[0]["callback_data"] == "review:personal:12"
     assert buttons[1]["callback_data"] == "review:draft:12"
-    assert buttons[2]["callback_data"] == "review:split_equal:12"
-    assert buttons[3]["callback_data"] == "review:split_people:12"
+    split_buttons = keyboard["inline_keyboard"][1]
+    assert split_buttons[0]["text"] == "People"
+    assert split_buttons[0]["callback_data"] == "review:split_people:12"
+    assert split_buttons[1]["text"] == "Group"
+    assert split_buttons[1]["callback_data"] == "review:split_group:12"
+
+
+def test_group_select_keyboard_skips_invalid_group_ids():
+    keyboard = build_group_select_keyboard(
+        12,
+        [
+            {"id": 0, "name": "Invalid zero"},
+            {"id": None, "name": "Invalid none"},
+            {"id": "bad", "name": "Invalid text"},
+            {"id": 44, "name": "Apartment group"},
+        ],
+    )
+
+    flattened = [button for row in keyboard["inline_keyboard"] for button in row]
+
+    assert {"text": "Apartment group", "callback_data": "group:12:44"} in flattened
+    assert all(button["callback_data"] != "group:12:0" for button in flattened)
 
 
 def test_parse_review_callback_data():

@@ -28,6 +28,14 @@ class TransactionError(RuntimeError):
     pass
 
 
+def can_undo_transaction(tx: ExpenseTransaction) -> bool:
+    return tx.status in {
+        TransactionStatus.PERSONAL.value,
+        TransactionStatus.POSTED.value,
+        TransactionStatus.SHARED_DRAFT.value,
+    }
+
+
 class TransactionService:
     def __init__(
         self,
@@ -167,6 +175,38 @@ class TransactionService:
         if tx.splitwise_expense_id:
             raise TransactionError("Transaction already posted to Splitwise; cannot mark personal.")
         tx.status = TransactionStatus.PERSONAL.value
+        tx.last_error = None
+        tx.updated_at = utc_now()
+        self.db.commit()
+        self.db.refresh(tx)
+        return tx
+
+    def mark_shared_draft(self, tx_id: int) -> ExpenseTransaction:
+        tx = self.get_transaction(tx_id)
+        if tx.splitwise_expense_id:
+            raise TransactionError("Transaction already posted to Splitwise; cannot draft.")
+        tx.status = TransactionStatus.SHARED_DRAFT.value
+        tx.last_error = None
+        tx.updated_at = utc_now()
+        self.db.commit()
+        self.db.refresh(tx)
+        return tx
+
+    def undo_transaction(self, tx_id: int) -> ExpenseTransaction:
+        tx = self.get_transaction(tx_id)
+        if not can_undo_transaction(tx):
+            raise TransactionError("This transaction cannot be undone.")
+
+        if tx.splitwise_expense_id:
+            try:
+                self.splitwise_service.delete_expense(tx.splitwise_expense_id)
+            except SplitwiseAPIError as exc:
+                raise TransactionError(
+                    "Could not delete the Splitwise expense. Transaction was not reverted."
+                ) from exc
+            tx.splitwise_expense_id = None
+
+        tx.status = TransactionStatus.ASK_USER.value
         tx.last_error = None
         tx.updated_at = utc_now()
         self.db.commit()

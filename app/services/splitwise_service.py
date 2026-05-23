@@ -176,6 +176,19 @@ class SplitwiseService:
         data = self._request("GET", "/get_groups")
         return data.get("groups", [])
 
+    def search_groups(self, query: str) -> list[dict[str, Any]]:
+        query_l = query.strip().lower()
+        groups = self.get_groups()
+        if not query_l:
+            return groups
+        return [group for group in groups if query_l in str(group.get("name") or "").lower()]
+
+    def get_group_members(self, group_id: int) -> list[dict[str, Any]]:
+        for group in self.get_groups():
+            if int(group["id"]) == group_id:
+                return group.get("members", [])
+        return []
+
     def create_expense(self, payload: dict[str, Any]) -> dict[str, Any]:
         data = self._request("POST", "/create_expense", json_body=payload)
         errors = data.get("errors")
@@ -184,6 +197,14 @@ class SplitwiseService:
         expenses = data.get("expenses", [])
         if not expenses:
             raise SplitwiseAPIError("Splitwise create_expense did not return an expense", data)
+        return data
+
+    def delete_expense(self, expense_id: str) -> dict[str, Any]:
+        data = self._request("POST", f"/delete_expense/{expense_id}")
+        if data.get("errors"):
+            raise SplitwiseAPIError("Splitwise delete_expense returned errors", data)
+        if data.get("success") is not True:
+            raise SplitwiseAPIError("Splitwise delete_expense was not successful", data)
         return data
 
 

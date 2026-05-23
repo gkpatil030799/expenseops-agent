@@ -20,7 +20,11 @@ from app.services.agent_service import match_friends
 from app.services.recommendation_service import classify_transaction_recommendation
 from app.services.share_calculator import cents_to_decimal_string, decimal_to_cents
 from app.services.splitwise_service import SplitwiseAPIError, SplitwiseService
-from app.services.transaction_service import TransactionError, TransactionService
+from app.services.transaction_service import (
+    TransactionError,
+    TransactionService,
+    can_undo_transaction,
+)
 
 router = APIRouter(prefix="/transactions", tags=["transactions"])
 
@@ -37,6 +41,7 @@ def _tx_out(tx: ExpenseTransaction) -> TransactionOut:
             "amount": cents_to_decimal_string(abs(tx.amount_cents)),
             "classification_suggestion": classification.suggestion,
             "classification_reason": classification.reason,
+            "can_undo_transaction": can_undo_transaction(tx),
         }
     )
 
@@ -68,6 +73,19 @@ def mark_personal(tx_id: int, db: DbSession) -> MarkPersonalResponse:
         return MarkPersonalResponse(transaction=_tx_out(tx), message="Marked as personal.")
     except TransactionError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/{tx_id}/undo", response_model=MarkPersonalResponse)
+def undo_transaction(tx_id: int, db: DbSession) -> MarkPersonalResponse:
+    try:
+        tx = TransactionService(db).undo_transaction(tx_id)
+        return MarkPersonalResponse(
+            transaction=_tx_out(tx),
+            message="Transaction moved back to review.",
+        )
+    except TransactionError as exc:
+        status_code = 404 if "not found" in str(exc).lower() else 400
+        raise HTTPException(status_code=status_code, detail=str(exc)) from exc
 
 
 @router.post("/{tx_id}/split/equal", response_model=SplitwisePostResponse)

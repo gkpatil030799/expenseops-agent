@@ -88,12 +88,30 @@ def list_friends(q: str = Query(default="")) -> list[FriendOut]:
 
 
 @router.get("/groups", response_model=list[GroupOut])
-def list_groups() -> list[GroupOut]:
+def list_groups(q: str = Query(default="")) -> list[GroupOut]:
     try:
-        groups = SplitwiseService().get_groups()
+        groups = SplitwiseService().search_groups(q) if q else SplitwiseService().get_groups()
         return [
             GroupOut(id=int(group["id"]), name=group.get("name") or str(group["id"]))
             for group in groups
+        ]
+    except SplitwiseAPIError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.get("/groups/{group_id}/members", response_model=list[FriendOut])
+def list_group_members(group_id: int) -> list[FriendOut]:
+    try:
+        members = SplitwiseService().get_group_members(group_id)
+        return [
+            FriendOut(
+                id=int(member["id"]),
+                first_name=member.get("first_name"),
+                last_name=member.get("last_name"),
+                email=member.get("email"),
+                display_name=friend_display_name(member),
+            )
+            for member in members
         ]
     except SplitwiseAPIError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

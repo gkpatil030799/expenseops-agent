@@ -41,6 +41,7 @@ class TransactionOut(BaseModel):
     last_error: str | None
     classification_suggestion: Literal["likely_personal", "likely_shared", "unsure"] | None = None
     classification_reason: str | None = None
+    can_undo_transaction: bool = False
     created_at: datetime
     updated_at: datetime
 
