@@ -194,6 +194,12 @@ def build_review_callback_data(action: str, transaction_id: int) -> str:
         "done",
         "confirm",
         "confirm_custom",
+        "ai_group_yes",
+        "ai_group_no",
+        "ai_split_people",
+        "ai_change_people",
+        "ai_change_group",
+        "ai_change_split",
         "undo",
         "cancel",
     }:
@@ -228,6 +234,12 @@ def parse_review_callback_data(data: str) -> TelegramReviewCallback:
         "done",
         "confirm",
         "confirm_custom",
+        "ai_group_yes",
+        "ai_group_no",
+        "ai_split_people",
+        "ai_change_people",
+        "ai_change_group",
+        "ai_change_split",
         "undo",
         "cancel",
     }:
@@ -273,6 +285,136 @@ def build_ai_fallback_keyboard(transaction_id: int) -> dict[str, Any]:
             ]
         ]
     }
+
+
+def build_ai_group_confirmation_keyboard(transaction_id: int) -> dict[str, Any]:
+    return {
+        "inline_keyboard": [
+            [
+                {
+                    "text": "Yes",
+                    "callback_data": build_review_callback_data("ai_group_yes", transaction_id),
+                },
+                {
+                    "text": "No",
+                    "callback_data": build_review_callback_data("ai_group_no", transaction_id),
+                },
+            ],
+            [
+                {
+                    "text": "Split as people",
+                    "callback_data": build_review_callback_data("ai_split_people", transaction_id),
+                },
+                {
+                    "text": "Open Button mode",
+                    "callback_data": build_review_callback_data("button_mode", transaction_id),
+                },
+            ],
+            [
+                {
+                    "text": "Cancel",
+                    "callback_data": build_review_callback_data("cancel", transaction_id),
+                }
+            ],
+        ]
+    }
+
+
+def build_ai_participant_ambiguity_keyboard(
+    transaction_id: int,
+    candidates: list[dict],
+) -> dict[str, Any]:
+    return {
+        "inline_keyboard": [
+            [
+                {
+                    "text": friend_display_name(candidate),
+                    "callback_data": build_friend_choice_callback_data(
+                        transaction_id,
+                        int(candidate["id"]),
+                    ),
+                }
+            ]
+            for candidate in candidates[:8]
+        ]
+        + [
+            [
+                {
+                    "text": "Split as people",
+                    "callback_data": build_review_callback_data("ai_split_people", transaction_id),
+                },
+                {
+                    "text": "Open Button mode",
+                    "callback_data": build_review_callback_data("button_mode", transaction_id),
+                },
+            ],
+            [
+                {
+                    "text": "Cancel",
+                    "callback_data": build_review_callback_data("cancel", transaction_id),
+                }
+            ],
+        ]
+    }
+
+
+def build_ai_split_confirmation_keyboard(
+    transaction_id: int,
+    *,
+    include_split_as_people: bool = False,
+) -> dict[str, Any]:
+    rows = [
+        [
+            {
+                "text": "Confirm split",
+                "callback_data": build_review_callback_data("confirm", transaction_id),
+            }
+        ],
+        [
+            {
+                "text": "Change people",
+                "callback_data": build_review_callback_data(
+                    "ai_change_people",
+                    transaction_id,
+                ),
+            },
+            {
+                "text": "Change group",
+                "callback_data": build_review_callback_data(
+                    "ai_change_group",
+                    transaction_id,
+                ),
+            },
+        ],
+    ]
+    if include_split_as_people:
+        rows.append(
+            [
+                {
+                    "text": "Split as people",
+                    "callback_data": build_review_callback_data(
+                        "ai_split_people",
+                        transaction_id,
+                    ),
+                }
+            ]
+        )
+    rows.append(
+        [
+            {
+                "text": "Change split",
+                "callback_data": build_review_callback_data(
+                    "ai_change_split",
+                    transaction_id,
+                ),
+            },
+            {
+                "text": "Cancel",
+                "callback_data": build_review_callback_data("cancel", transaction_id),
+            },
+        ]
+    )
+    return {"inline_keyboard": rows}
 
 
 def build_button_mode_keyboard(transaction_id: int) -> dict[str, Any]:
@@ -721,6 +863,46 @@ def format_ai_fallback_message(transaction_title: str) -> str:
             "I’ll remember the final result.",
         ]
     )
+
+
+def format_ai_group_confirmation_message(transaction_title: str, group_name: str) -> str:
+    return "\n".join(
+        [
+            f"<b>{html(transaction_title)}</b>",
+            f"I found this group: <b>{html(group_name)}</b>.",
+            "Is this correct?",
+        ]
+    )
+
+
+def format_ai_split_confirmation_message(
+    *,
+    transaction_title: str,
+    group_name: str | None,
+    participant_names: list[str],
+    split_mode: str,
+    payer_included: bool,
+    approx_share: str | None = None,
+    currency_code: str = "USD",
+) -> str:
+    lines = [
+        "<b>I understood this as:</b>",
+        f"Transaction: <b>{html(transaction_title)}</b>",
+    ]
+    if group_name:
+        lines.append(f"Group: <b>{html(group_name)}</b>")
+    lines.extend(
+        [
+            f"Participants: {html(', '.join(participant_names))}",
+            f"Split mode: <b>{html(split_mode.replace('_', ' '))}</b>",
+            f"Payer included: {'yes' if payer_included else 'no'}",
+        ]
+    )
+    if approx_share:
+        lines.append(f"Approx. share: <b>{html(currency_code)} {html(approx_share)}</b> each")
+    lines.append("")
+    lines.append("Confirm split before posting to Splitwise.")
+    return "\n".join(lines)
 
 
 def format_split_started_message(

@@ -1,8 +1,17 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from collections.abc import Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
+from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
+from decimal import Decimal
 
+from sqlalchemy import select
+from sqlalchemy.exc import OperationalError
+from sqlalchemy.orm import Session
+
+from app.models import TelegramSession, utc_now
 from app.services.agent_service import friend_display_name
 
 
@@ -31,6 +40,9 @@ class PendingTelegramSplit:
     ai_split_mode: str = "equal"
     ai_custom_values_text: str | None = None
     ai_waiting_for: str | None = None
+    ai_slots: dict = field(default_factory=dict)
+    ai_correction_type: str | None = None
+    ai_memory_recorded: bool = False
     last_ai_message: str | None = None
     failed_ai_message: str | None = None
     failed_ai_reason: str | None = None
@@ -70,10 +82,79 @@ class PendingTelegramSplit:
         self.failed_ai_reason = failure_reason
         self.failed_ai_created_at = datetime.now(UTC)
 
+    def to_dict(self) -> dict:
+        data = asdict(self)
+        data["failed_ai_created_at"] = (
+            self.failed_ai_created_at.isoformat() if self.failed_ai_created_at else None
+        )
+        data["selected_friend_names_by_id"] = {
+            str(key): value for key, value in self.selected_friend_names_by_id.items()
+        }
+        data["friend_lookup_by_id"] = {
+            str(key): value for key, value in self.friend_lookup_by_id.items()
+        }
+        return _json_safe(data)
+
+    @classmethod
+    def from_dict(cls, data: dict) -> PendingTelegramSplit:
+        payload = dict(data)
+        created_at = payload.get("failed_ai_created_at")
+        if isinstance(created_at, str) and created_at:
+            payload["failed_ai_created_at"] = datetime.fromisoformat(created_at)
+        else:
+            payload["failed_ai_created_at"] = None
+
+        payload["selected_friend_names_by_id"] = {
+            int(key): value
+            for key, value in dict(payload.get("selected_friend_names_by_id") or {}).items()
+        }
+        payload["friend_lookup_by_id"] = {
+            int(key): value for key, value in dict(payload.get("friend_lookup_by_id") or {}).items()
+        }
+
+        known_fields = set(cls.__dataclass_fields__)
+        return cls(**{key: value for key, value in payload.items() if key in known_fields})
+
+
+_current_db: ContextVar[Session | None] = ContextVar("telegram_session_db", default=None)
+_current_db_available: ContextVar[bool] = ContextVar(
+    "telegram_session_db_available",
+    default=True,
+)
+_current_touched_keys: ContextVar[set[str] | None] = ContextVar(
+    "telegram_session_touched_keys",
+    default=None,
+)
+
+
+def _json_safe(value):
+    if isinstance(value, Decimal):
+        return str(value)
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, dict):
+        return {str(key): _json_safe(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_json_safe(item) for item in value]
+    return value
+
 
 class TelegramSplitStateStore:
     def __init__(self):
         self._states: dict[str, PendingTelegramSplit] = {}
+
+    @contextmanager
+    def use_db(self, db: Session) -> Iterator[None]:
+        token = _current_db.set(db)
+        available_token = _current_db_available.set(True)
+        touched_token = _current_touched_keys.set(set())
+        try:
+            yield
+        finally:
+            self.flush_current_db()
+            _current_db.reset(token)
+            _current_db_available.reset(available_token)
+            _current_touched_keys.reset(touched_token)
 
     def key(self, chat_id: str, user_id: str) -> str:
         return f"{chat_id}:{user_id}"
@@ -86,17 +167,128 @@ class TelegramSplitStateStore:
         mode: str = "people",
     ) -> PendingTelegramSplit:
         state = PendingTelegramSplit(transaction_id=transaction_id, mode=mode)
-        self._states[self.key(chat_id, user_id)] = state
+        key = self.key(chat_id, user_id)
+        self._states[key] = state
+        self._mark_touched(key)
+        self._save_db_state(chat_id, user_id, state)
         return state
 
+    def update_pending(
+        self,
+        chat_id: str,
+        user_id: str,
+        state: PendingTelegramSplit,
+    ) -> None:
+        key = self.key(chat_id, user_id)
+        self._states[key] = state
+        self._mark_touched(key)
+        self._save_db_state(chat_id, user_id, state)
+
     def get_pending(self, chat_id: str, user_id: str) -> PendingTelegramSplit | None:
-        return self._states.get(self.key(chat_id, user_id))
+        key = self.key(chat_id, user_id)
+        self._mark_touched(key)
+        db_state = self._load_db_state(chat_id, user_id)
+        if db_state is not None:
+            existing_state = self._states.get(key)
+            if existing_state is not None:
+                existing_state.__dict__.update(db_state.__dict__)
+                return existing_state
+            self._states[key] = db_state
+            return db_state
+        return self._states.get(key)
 
     def clear(self, chat_id: str, user_id: str) -> None:
-        self._states.pop(self.key(chat_id, user_id), None)
+        key = self.key(chat_id, user_id)
+        self._states.pop(key, None)
+        self._mark_touched(key)
+        db = _current_db.get()
+        if db is None:
+            return
+        session = self._get_db_session(db, chat_id, user_id)
+        if session:
+            db.delete(session)
+            db.commit()
+
+    def flush_current_db(self) -> None:
+        db = _current_db.get()
+        if db is None or not _current_db_available.get():
+            return
+        touched_keys = _current_touched_keys.get()
+        keys_to_flush = touched_keys if touched_keys is not None else set(self._states)
+        for key in list(keys_to_flush):
+            state = self._states.get(key)
+            if state is None:
+                continue
+            chat_id, separator, user_id = key.partition(":")
+            if separator:
+                self._save_db_state(chat_id, user_id, state, commit=False)
+        if _current_db_available.get():
+            db.commit()
+
+    def _load_db_state(self, chat_id: str, user_id: str) -> PendingTelegramSplit | None:
+        db = _current_db.get()
+        if db is None or not _current_db_available.get():
+            return None
+        session = self._get_db_session(db, chat_id, user_id)
+        if not session:
+            return None
+        try:
+            return PendingTelegramSplit.from_dict(session.state_data)
+        except (TypeError, ValueError):
+            return None
+
+    def _save_db_state(
+        self,
+        chat_id: str,
+        user_id: str,
+        state: PendingTelegramSplit,
+        *,
+        commit: bool = True,
+    ) -> None:
+        db = _current_db.get()
+        if db is None or not _current_db_available.get():
+            return
+        session = self._get_db_session(db, chat_id, user_id)
+        if not _current_db_available.get():
+            return
+        state_data = state.to_dict()
+        if session is None:
+            session = TelegramSession(chat_id=chat_id, user_id=user_id, state_data=state_data)
+            db.add(session)
+        else:
+            session.state_data = state_data
+            session.updated_at = utc_now()
+        if commit:
+            db.commit()
+
+    def _mark_touched(self, key: str) -> None:
+        touched_keys = _current_touched_keys.get()
+        if touched_keys is not None:
+            touched_keys.add(key)
+
+    def _get_db_session(
+        self,
+        db: Session,
+        chat_id: str,
+        user_id: str,
+    ) -> TelegramSession | None:
+        try:
+            return db.execute(
+                select(TelegramSession).where(
+                    TelegramSession.chat_id == chat_id,
+                    TelegramSession.user_id == user_id,
+                )
+            ).scalar_one_or_none()
+        except OperationalError:
+            db.rollback()
+            _current_db_available.set(False)
+            return None
 
 
 telegram_split_state_store = TelegramSplitStateStore()
+
+
+TelegramSessionStore = TelegramSplitStateStore
 
 
 @dataclass

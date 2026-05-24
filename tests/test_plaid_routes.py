@@ -1,12 +1,14 @@
+import logging
 from datetime import UTC, datetime
 
 from fastapi.testclient import TestClient
 
 from app.api import plaid_routes
+from app.config import Settings
 from app.db import get_db
 from app.main import app
 from app.models import PlaidItem
-from app.services.plaid_service import PlaidRequestError
+from app.services.plaid_service import PlaidRequestError, PlaidWebhookVerificationError
 
 
 def test_link_token_returns_bad_gateway_for_plaid_request_errors(monkeypatch):
@@ -52,6 +54,168 @@ def test_plaid_webhook_ignores_unrelated_webhook_types():
 
     assert response.status_code == 200
     assert response.json()["message"] == "Webhook ignored: ITEM/ERROR"
+
+
+def test_plaid_webhook_verification_disabled_allows_webhook(monkeypatch):
+    monkeypatch.setattr(
+        plaid_routes,
+        "get_settings",
+        lambda: Settings(plaid_verify_webhooks=False),
+    )
+
+    class RaisingPlaidService:
+        def __init__(self, settings=None):
+            raise AssertionError("PlaidService should not be used when verification is disabled")
+
+    monkeypatch.setattr(plaid_routes, "PlaidService", RaisingPlaidService)
+    app.dependency_overrides[get_db] = lambda: object()
+
+    try:
+        response = TestClient(app).post(
+            "/plaid/webhook",
+            json={"webhook_type": "ITEM", "webhook_code": "ERROR", "item_id": "item-1"},
+        )
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    assert response.json()["message"] == "Webhook ignored: ITEM/ERROR"
+
+
+def test_plaid_webhook_verification_enabled_rejects_missing_header(monkeypatch):
+    monkeypatch.setattr(
+        plaid_routes,
+        "get_settings",
+        lambda: Settings(
+            plaid_verify_webhooks=True,
+            plaid_client_id="client-id",
+            plaid_secret="secret",
+        ),
+    )
+    app.dependency_overrides[get_db] = lambda: object()
+
+    try:
+        response = TestClient(app).post(
+            "/plaid/webhook",
+            json={"webhook_type": "ITEM", "webhook_code": "ERROR", "item_id": "item-1"},
+        )
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 401
+    assert response.json()["detail"] == "Missing Plaid webhook verification"
+
+
+def test_plaid_webhook_verification_enabled_rejects_invalid_header(monkeypatch, caplog):
+    caplog.set_level(logging.WARNING)
+    monkeypatch.setattr(
+        plaid_routes,
+        "get_settings",
+        lambda: Settings(
+            plaid_verify_webhooks=True,
+            plaid_client_id="client-id",
+            plaid_secret="secret",
+        ),
+    )
+
+    class FailingPlaidService:
+        def __init__(self, settings=None):
+            pass
+
+        def verify_webhook_signature(self, *, raw_body, verification_header):
+            raise PlaidWebhookVerificationError("invalid_signature")
+
+    monkeypatch.setattr(plaid_routes, "PlaidService", FailingPlaidService)
+    app.dependency_overrides[get_db] = lambda: object()
+
+    try:
+        response = TestClient(app).post(
+            "/plaid/webhook",
+            headers={"Plaid-Verification": "bad-jwt"},
+            json={"webhook_type": "ITEM", "webhook_code": "ERROR", "item_id": "item-1"},
+        )
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 401
+    assert response.json()["detail"] == "Invalid Plaid webhook verification"
+    assert any(
+        getattr(record, "event", None) == "plaid_webhook_verification_failed"
+        for record in caplog.records
+    )
+
+
+def test_plaid_webhook_verification_enabled_accepts_valid_header(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        plaid_routes,
+        "get_settings",
+        lambda: Settings(
+            plaid_verify_webhooks=True,
+            plaid_client_id="client-id",
+            plaid_secret="secret",
+        ),
+    )
+
+    class SuccessfulPlaidService:
+        def __init__(self, settings=None):
+            pass
+
+        def verify_webhook_signature(self, *, raw_body, verification_header):
+            calls.append((raw_body, verification_header))
+
+    monkeypatch.setattr(plaid_routes, "PlaidService", SuccessfulPlaidService)
+    app.dependency_overrides[get_db] = lambda: object()
+
+    try:
+        response = TestClient(app).post(
+            "/plaid/webhook",
+            headers={"Plaid-Verification": "valid-jwt"},
+            json={"webhook_type": "ITEM", "webhook_code": "ERROR", "item_id": "item-1"},
+        )
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    assert response.json()["message"] == "Webhook ignored: ITEM/ERROR"
+    assert calls
+    assert calls[0][1] == "valid-jwt"
+
+
+def test_plaid_webhook_verifies_before_ignoring_unrelated_webhook(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        plaid_routes,
+        "get_settings",
+        lambda: Settings(
+            plaid_verify_webhooks=True,
+            plaid_client_id="client-id",
+            plaid_secret="secret",
+        ),
+    )
+
+    class SuccessfulPlaidService:
+        def __init__(self, settings=None):
+            pass
+
+        def verify_webhook_signature(self, *, raw_body, verification_header):
+            calls.append(verification_header)
+
+    monkeypatch.setattr(plaid_routes, "PlaidService", SuccessfulPlaidService)
+    app.dependency_overrides[get_db] = lambda: object()
+
+    try:
+        response = TestClient(app).post(
+            "/plaid/webhook",
+            headers={"Plaid-Verification": "valid-jwt"},
+            json={"webhook_type": "ITEM", "webhook_code": "ERROR", "item_id": "item-1"},
+        )
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    assert response.json()["message"] == "Webhook ignored: ITEM/ERROR"
+    assert calls == ["valid-jwt"]
 
 
 def test_plaid_webhook_handles_sync_updates_available(monkeypatch):

@@ -72,6 +72,53 @@ def test_records_button_fallback_memory_and_caps_original_message():
     assert memory.final_participants[0]["display_name"] == "Rahul"
 
 
+def test_records_ai_confirmed_memory():
+    tx = ExpenseTransaction(
+        id=1,
+        plaid_transaction_id="tx-1",
+        plaid_item_id=1,
+        name="Costco",
+        amount_cents=5000,
+    )
+    pending = PendingTelegramSplit(transaction_id=1)
+    pending.ai_slots = {"original_user_message": "split with Rahul"}
+
+    memory = AIInterpretationMemoryService(FakeDb()).record_ai_interpretation_memory(
+        tx=tx,
+        pending=pending,
+        final_action="split_equal",
+        final_participants=[{"user_id": 2, "display_name": "Rahul"}],
+        final_split_mode="equal",
+        correction_type="ai_confirmed",
+    )
+
+    assert memory is not None
+    assert memory.original_message == "split with Rahul"
+    assert memory.correction_type == "ai_confirmed"
+    assert pending.ai_memory_recorded is True
+
+
+def test_ai_memory_does_not_record_for_button_fallback():
+    tx = ExpenseTransaction(
+        id=1,
+        plaid_transaction_id="tx-1",
+        plaid_item_id=1,
+        name="Costco",
+        amount_cents=5000,
+    )
+    pending = PendingTelegramSplit(transaction_id=1)
+    pending.ai_slots = {"original_user_message": "split with Rahul"}
+    pending.button_fallback_active = True
+
+    memory = AIInterpretationMemoryService(FakeDb()).record_ai_interpretation_memory(
+        tx=tx,
+        pending=pending,
+        final_action="split_equal",
+    )
+
+    assert memory is None
+
+
 def test_public_memory_does_not_expose_user_ids():
     memory = AIInterpretationMemory(
         id=1,
@@ -119,3 +166,24 @@ def test_memory_retrieval_prioritizes_same_merchant_and_similar_message():
     assert memories[0] is same
     assert same.usage_count == 1
     assert same.last_used_at is not None
+
+
+def test_memory_retrieval_scores_group_and_participant_overlap():
+    memory = AIInterpretationMemory(
+        id=1,
+        original_message="split in apartment",
+        failure_reason="none",
+        final_action="split_equal",
+        merchant="Other",
+        final_group_name="Apartment group",
+        final_participants=[{"display_name": "Rahul Shah"}],
+        created_at=datetime.now(UTC),
+    )
+    db = FakeDb([memory])
+
+    memories = AIInterpretationMemoryService(db).relevant_memories(
+        merchant="Costco",
+        message="split apartment with Rahul",
+    )
+
+    assert memories == [memory]

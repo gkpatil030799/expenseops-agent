@@ -106,6 +106,8 @@ class AIChatContextService:
                 "selected_participants": list(pending.selected_friend_names_by_id.values()),
                 "payer_included": pending.custom_payer_included,
                 "ai_waiting_for": pending.ai_waiting_for,
+                "slots": pending.ai_slots,
+                "correction_type": pending.ai_correction_type,
             },
             "relevant_memories": memories,
         }

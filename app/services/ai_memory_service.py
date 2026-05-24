@@ -130,6 +130,55 @@ class AIInterpretationMemoryService:
         self.db.refresh(memory)
         return memory
 
+    def record_ai_interpretation_memory(
+        self,
+        *,
+        tx: ExpenseTransaction,
+        pending: PendingTelegramSplit | None,
+        final_action: str,
+        final_group_id: int | None = None,
+        final_group_name: str | None = None,
+        final_participants: list[dict[str, Any]] | None = None,
+        final_split_mode: str | None = None,
+        payer_included: bool = True,
+        custom_values: list[dict[str, Any]] | None = None,
+        correction_type: str = "ai_confirmed",
+    ) -> AIInterpretationMemory | None:
+        if not pending or pending.button_fallback_active:
+            return None
+        if not pending.ai_slots or pending.ai_memory_recorded:
+            return None
+
+        original_message = (
+            pending.ai_slots.get("original_user_message")
+            or pending.last_ai_message
+            or pending.failed_ai_message
+        )
+        if not original_message:
+            return None
+
+        memory = AIInterpretationMemory(
+            original_message=_cap_message(str(original_message)),
+            failure_reason=pending.failed_ai_reason or "none",
+            final_action=final_action,
+            final_group_id=str(final_group_id) if final_group_id else None,
+            final_group_name=final_group_name,
+            final_participants=final_participants or [],
+            final_split_mode=final_split_mode,
+            payer_included=payer_included,
+            custom_values=custom_values,
+            correction_type=correction_type,
+            merchant=transaction_display_name(tx),
+            amount_cents=abs(tx.amount_cents),
+            currency=tx.iso_currency_code or "USD",
+            usage_count=0,
+        )
+        self.db.add(memory)
+        self.db.commit()
+        self.db.refresh(memory)
+        pending.ai_memory_recorded = True
+        return memory
+
     def relevant_memories(
         self,
         *,
@@ -154,10 +203,13 @@ class AIInterpretationMemoryService:
                 score += 8
             score += len(message_tokens & memory_tokens) * 3
             score += len(merchant_tokens & _tokens(memory.merchant)) * 2
+            score += len(message_tokens & _tokens(memory.final_group_name)) * 3
             participant_words = _tokens(" ".join(_participant_names(memory.final_participants)))
-            score += len(message_tokens & participant_words)
+            score += len(message_tokens & participant_words) * 2
             if memory.last_used_at:
-                score += 1
+                score += 2
+            if memory.usage_count:
+                score += min(int(memory.usage_count), 3)
             if score > 0:
                 scored.append((score, memory))
 

@@ -11,13 +11,19 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from app.api.deps import DbSession
 from app.config import get_settings
+from app.logging_config import log_event
 from app.models import ExpenseTransaction, TransactionStatus
 from app.services.agent_service import friend_display_name
 from app.services.ai_chat_context_service import AIChatContext, AIChatContextService
-from app.services.ai_memory_service import AIInterpretationMemoryService
+from app.services.ai_intent_extraction_service import AIIntentExtractionService, ExtractedAIIntent
+from app.services.ai_memory_service import AIInterpretationMemoryService, memory_prompt_context
 from app.services.ai_prompt_guardrails import validate_ai_chat_message
 from app.services.conversational_split_parser import parse_conversational_split
 from app.services.custom_split_parser import ParsedCustomSplit, parse_custom_split_text
+from app.services.entity_resolution_service import (
+    EntityResolutionResult,
+    EntityResolutionService,
+)
 from app.services.llm_ai_chat_parser import AIChatIntent, AICustomValue, LLMAIChatParser
 from app.services.llm_conversation_parser import LLMConversationIntent, LLMConversationParser
 from app.services.llm_split_parser import LLMSplitParser
@@ -32,6 +38,9 @@ from app.services.telegram_service import (
     TelegramService,
     approximate_equal_share_display,
     build_ai_fallback_keyboard,
+    build_ai_group_confirmation_keyboard,
+    build_ai_participant_ambiguity_keyboard,
+    build_ai_split_confirmation_keyboard,
     build_button_mode_keyboard,
     build_custom_split_confirmation_keyboard,
     build_friend_choice_keyboard,
@@ -48,6 +57,8 @@ from app.services.telegram_service import (
     compact_transaction_title,
     format_ai_chat_prompt,
     format_ai_fallback_message,
+    format_ai_group_confirmation_message,
+    format_ai_split_confirmation_message,
     format_ambiguity_message,
     format_button_mode_message,
     format_completion_summary,
@@ -91,13 +102,20 @@ async def telegram_webhook(
 ) -> dict[str, bool]:
     _verify_webhook_secret(secret)
     update = await request.json()
-    callback_query = update.get("callback_query")
-    if callback_query:
-        return _handle_callback_query(callback_query, db)
+    with telegram_split_state_store.use_db(db):
+        log_event(
+            logger,
+            "telegram_webhook_received",
+            has_callback=bool(update.get("callback_query")),
+            has_message=bool(update.get("message")),
+        )
+        callback_query = update.get("callback_query")
+        if callback_query:
+            return _handle_callback_query(callback_query, db)
 
-    message = update.get("message")
-    if message:
-        _handle_text_message(message, db)
+        message = update.get("message")
+        if message:
+            _handle_text_message(message, db)
     return {"ok": True}
 
 
@@ -143,17 +161,40 @@ def _handle_callback_query(callback_query: dict, db: DbSession) -> dict[str, boo
                 or str(exc)
             )
     else:
-        answer = _route_review_callback(
-            callback.action,
-            callback.transaction_id,
-            chat_id,
-            user_id,
-            int(message_id) if message_id else None,
-            db,
-            telegram,
+        log_event(
+            logger,
+            "telegram_callback_received",
+            action=callback.action,
+            tx_id=callback.transaction_id,
         )
+        try:
+            answer = _route_review_callback(
+                callback.action,
+                callback.transaction_id,
+                chat_id,
+                user_id,
+                int(message_id) if message_id else None,
+                db,
+                telegram,
+            )
+        except Exception as exc:
+            log_event(
+                logger,
+                "telegram_callback_failed",
+                level=logging.WARNING,
+                action=callback.action,
+                tx_id=callback.transaction_id,
+                reason="unexpected_error",
+                error_type=type(exc).__name__,
+            )
+            answer = "Could not complete that action. Please try again or use the dashboard."
+            if chat_id:
+                telegram.send_message(
+                    "Could not complete that Telegram action. Open the dashboard to review.",
+                    chat_id=chat_id,
+                )
 
-    if callback_query_id:
+    if callback_query_id and hasattr(telegram, "answer_callback_query"):
         telegram.answer_callback_query(callback_query_id, answer)
     return {"ok": True}
 
@@ -168,6 +209,7 @@ def _route_review_callback(
     telegram: TelegramService,
 ) -> str:
     if action == "button_mode":
+        log_event(logger, "telegram_button_mode_opened", tx_id=transaction_id)
         pending = telegram_split_state_store.get_pending(chat_id, user_id)
         if pending and pending.transaction_id == transaction_id and pending.failed_ai_message:
             pending.button_fallback_active = True
@@ -204,12 +246,14 @@ def _route_review_callback(
     if action == "split":
         if not chat_id or not user_id:
             return "This split session expired. Please start again from the transaction."
+        previous_pending = telegram_split_state_store.get_pending(chat_id, user_id)
         pending = telegram_split_state_store.set_pending(
             chat_id,
             user_id,
             transaction_id,
             mode="split_target",
         )
+        _carry_button_fallback_context(previous_pending, pending, transaction_id)
         pending.transaction_title = _compact_title_for_transaction(transaction_id, db)
         _edit_or_send(
             telegram,
@@ -304,12 +348,14 @@ def _route_review_callback(
         return "Payer setting updated."
     if action == "custom_split":
         if chat_id and user_id:
+            previous_pending = telegram_split_state_store.get_pending(chat_id, user_id)
             pending = telegram_split_state_store.set_pending(
                 chat_id,
                 user_id,
                 transaction_id,
                 mode="custom_split",
             )
+            _carry_button_fallback_context(previous_pending, pending, transaction_id)
             pending.transaction_title = _compact_title_for_transaction(transaction_id, db)
             telegram.send_message(
                 "\n".join(
@@ -356,6 +402,61 @@ def _route_review_callback(
             )
             return "Type a group name."
         return "No pending split found. Start again from the latest transaction message."
+    if action == "ai_group_yes":
+        pending = _require_pending(chat_id, user_id, transaction_id)
+        if pending is None:
+            return "This split session expired. Please start again from the transaction."
+        return _confirm_ai_slot_group(pending, chat_id, db, telegram)
+    if action == "ai_group_no":
+        pending = _require_pending(chat_id, user_id, transaction_id)
+        if pending is None:
+            return "This split session expired. Please start again from the transaction."
+        pending.ai_correction_type = "corrected_group"
+        pending.ai_waiting_for = "group"
+        pending.ai_slots["ai_waiting_for"] = "group"
+        telegram.send_message("Which group should I use?", chat_id=chat_id)
+        return "Type a group name."
+    if action == "ai_split_people":
+        pending = _require_pending(chat_id, user_id, transaction_id)
+        if pending is None:
+            return "This split session expired. Please start again from the transaction."
+        pending.ai_correction_type = "switched_to_people"
+        pending.selected_group_id = None
+        pending.selected_group_name = None
+        pending.group_members = []
+        pending.ai_slots["target_type"] = "people"
+        pending.ai_slots["resolved_group_id"] = None
+        pending.ai_slots["resolved_group_name"] = None
+        pending.ai_slots["group_confirmed"] = False
+        return _resolve_ai_slot_participants(pending, chat_id, db, telegram)
+    if action == "ai_change_people":
+        pending = _require_pending(chat_id, user_id, transaction_id)
+        if pending is None:
+            return "This split session expired. Please start again from the transaction."
+        pending.ai_correction_type = "corrected_people"
+        pending.ai_waiting_for = "participants"
+        pending.ai_slots["ai_waiting_for"] = "participants"
+        telegram.send_message("Who should I include?", chat_id=chat_id)
+        return "Type participant names."
+    if action == "ai_change_group":
+        pending = _require_pending(chat_id, user_id, transaction_id)
+        if pending is None:
+            return "This split session expired. Please start again from the transaction."
+        pending.ai_correction_type = "corrected_group"
+        pending.ai_waiting_for = "group"
+        pending.ai_slots["ai_waiting_for"] = "group"
+        telegram.send_message("Which group should I use?", chat_id=chat_id)
+        return "Type a group name."
+    if action == "ai_change_split":
+        pending = _require_pending(chat_id, user_id, transaction_id)
+        if pending is None:
+            return "This split session expired. Please start again from the transaction."
+        pending.ai_correction_type = "corrected_split"
+        telegram.send_message(
+            "For now, AI chat supports equal split confirmation here.",
+            chat_id=chat_id,
+        )
+        return "Equal split is selected."
     if action == "done":
         pending = _require_pending(chat_id, user_id, transaction_id)
         if pending is None:
@@ -387,6 +488,7 @@ def _route_review_callback(
         if not _participant_friend_ids(pending):
             return "Select at least one person before confirming."
         pending.is_submitting = True
+        log_event(logger, "telegram_split_confirmed", tx_id=transaction_id, split_mode="equal")
         _split_equal_from_telegram(
             pending.transaction_id,
             _participant_friend_ids(pending),
@@ -405,6 +507,7 @@ def _route_review_callback(
         if pending.is_submitting:
             return "Split already being processed."
         pending.is_submitting = True
+        log_event(logger, "telegram_split_confirmed", tx_id=transaction_id, split_mode="custom")
         _post_custom_split_from_telegram(pending, chat_id, user_id, db, telegram)
         return "Creating custom split."
     if action == "cancel":
@@ -415,6 +518,23 @@ def _route_review_callback(
         telegram.send_message("✅ Split flow cancelled.", chat_id=chat_id)
         return "Split flow cancelled."
     return "Unsupported action."
+
+
+def _carry_button_fallback_context(
+    previous_pending: PendingTelegramSplit | None,
+    pending: PendingTelegramSplit,
+    transaction_id: int,
+) -> None:
+    if (
+        not previous_pending
+        or previous_pending.transaction_id != transaction_id
+        or not previous_pending.failed_ai_message
+    ):
+        return
+    pending.failed_ai_message = previous_pending.failed_ai_message
+    pending.failed_ai_reason = previous_pending.failed_ai_reason
+    pending.failed_ai_created_at = previous_pending.failed_ai_created_at
+    pending.button_fallback_active = previous_pending.button_fallback_active
 
 
 def _edit_or_send(
@@ -572,6 +692,12 @@ def _handle_group_name_message(
     telegram: TelegramService,
 ) -> None:
     try:
+        log_event(
+            logger,
+            "ai_entity_resolution_started",
+            tx_id=pending.transaction_id,
+            entity_type="group",
+        )
         groups = SplitwiseService().get_groups()
     except SplitwiseAPIError:
         telegram.send_message(
@@ -606,7 +732,12 @@ def _handle_ai_chat_message(
 ) -> None:
     guardrail = validate_ai_chat_message(text)
     if not guardrail.allowed:
-        logger.info("AI chat message rejected by guardrail: %s", guardrail.reason)
+        log_event(
+            logger,
+            "telegram_ai_fallback",
+            tx_id=pending.transaction_id,
+            reason=guardrail.reason or "guardrail_rejected",
+        )
         telegram.send_message(
             guardrail.user_message
             or "I can only help classify or split this expense. Try: split with Rahul and Akash.",
@@ -619,28 +750,999 @@ def _handle_ai_chat_message(
     if _is_explicit_personal_command(text):
         _mark_personal(pending.transaction_id, chat_id, user_id, db, telegram)
         return
+    lowered = " ".join(text.strip().lower().split())
+    if lowered in {"draft", "draft this", "create draft", "create draft only"}:
+        _mark_shared_draft(pending.transaction_id, chat_id, user_id, db, telegram)
+        return
+    if lowered == "cancel":
+        telegram_split_state_store.clear(chat_id, user_id)
+        telegram.send_message("✅ Split flow cancelled.", chat_id=chat_id)
+        return
 
     if pending.ai_waiting_for and not _is_top_level_ai_command(text):
+        if _continue_enterprise_ai_slots(pending, text, chat_id, db, telegram):
+            return
         _continue_ai_chat_pending_flow(pending, text, chat_id, user_id, db, telegram)
         return
 
-    if _try_context_grounded_ai_chat(pending, text, chat_id, user_id, db, telegram):
+    _handle_enterprise_ai_chat_message(pending, text, chat_id, user_id, db, telegram)
+
+
+def _handle_enterprise_ai_chat_message(
+    pending: PendingTelegramSplit,
+    text: str,
+    chat_id: str,
+    user_id: str,
+    db: DbSession,
+    telegram: TelegramService,
+) -> None:
+    pending.last_ai_message = text
+    pending.ai_slots = {
+        "original_user_message": text,
+        "ai_waiting_for": None,
+    }
+    log_event(logger, "telegram_ai_started", tx_id=pending.transaction_id)
+    try:
+        tx = TransactionService(db).get_transaction(pending.transaction_id)
+    except TransactionError:
+        _record_ai_failure_and_prompt_button_mode(
+            pending,
+            text,
+            "validation_failed",
+            chat_id,
+            telegram,
+        )
         return
 
-    custom = parse_custom_split_text(text)
-    if custom.action == "custom_split" and (
-        custom.split_mode != "equal" or custom.payer_included is False
-    ):
-        _prepare_custom_split_confirmation(pending, custom, chat_id, user_id, db, telegram)
-        return
+    ai_context = {
+        "transaction": {
+            "merchant": _safe_transaction_display_name(tx),
+            "amount_cents": abs(tx.amount_cents),
+            "currency": tx.iso_currency_code or "USD",
+        },
+        "current_slots": pending.ai_slots,
+    }
+    try:
+        relevant_memory_rows = AIInterpretationMemoryService(db).relevant_memories(
+            merchant=tx.merchant_name or tx.name,
+            message=text,
+        )
+        memories = [memory_prompt_context(memory) for memory in relevant_memory_rows]
+        log_event(logger, "ai_memory_retrieved", tx_id=pending.transaction_id, count=len(memories))
+    except (AttributeError, SQLAlchemyError, TypeError, ValueError) as exc:
+        log_event(
+            logger,
+            "ai_memory_retrieved",
+            level=logging.WARNING,
+            tx_id=pending.transaction_id,
+            count=0,
+            reason="db_error",
+            error_type=type(exc).__name__,
+        )
+        memories = []
+    ai_context["relevant_memories"] = memories
 
-    intent = _deterministic_ai_chat_intent(text)
-    if intent is None:
-        intent = _parse_ai_chat_with_llm(pending, text, chat_id, db, telegram)
-        if intent is None:
+    memory_intent = _intent_from_matching_memory(text, memories)
+    if memory_intent:
+        log_event(logger, "ai_memory_shortcut_used", tx_id=pending.transaction_id)
+        _store_ai_intent_slots(pending, memory_intent, text)
+        if memory_intent.target_type == "group" or memory_intent.group_mentions:
+            _resolve_ai_slot_group(pending, memory_intent.group_mentions, chat_id, telegram)
             return
+        _resolve_ai_slot_participants(pending, chat_id, db, telegram)
+        return
 
-    _route_ai_chat_intent(pending, intent, text, chat_id, user_id, db, telegram)
+    intent = AIIntentExtractionService().extract(
+        user_message=text,
+        context=ai_context,
+    )
+    _store_ai_intent_slots(pending, intent, text)
+
+    if intent.action in {"clarify", "unknown"}:
+        confidence_values = list(intent.confidence_by_slot.values())
+        failure_reason = (
+            "low_confidence"
+            if confidence_values and max(confidence_values) < 0.75
+            else "parse_failed"
+        )
+        _record_ai_failure_and_prompt_button_mode(
+            pending,
+            text,
+            failure_reason,
+            chat_id,
+            telegram,
+        )
+        return
+    if intent.action == "personal":
+        _mark_personal(pending.transaction_id, chat_id, user_id, db, telegram)
+        return
+    if intent.action == "draft":
+        _mark_shared_draft(pending.transaction_id, chat_id, user_id, db, telegram)
+        return
+    if intent.action == "cancel":
+        telegram_split_state_store.clear(chat_id, user_id)
+        telegram.send_message("✅ Split flow cancelled.", chat_id=chat_id)
+        return
+    if intent.action != "split":
+        _record_ai_failure_and_prompt_button_mode(pending, text, "parse_failed", chat_id, telegram)
+        return
+
+    if intent.split_mode == "unknown":
+        pending.ai_waiting_for = "split_mode"
+        pending.ai_slots["ai_waiting_for"] = "split_mode"
+        telegram.send_message(
+            "Should this be equal, amounts, percentages, or shares?",
+            chat_id=chat_id,
+        )
+        return
+
+    if intent.target_type == "group" or intent.group_mentions:
+        _resolve_ai_slot_group(pending, intent.group_mentions, chat_id, telegram)
+        return
+
+    _resolve_ai_slot_participants(pending, chat_id, db, telegram)
+
+
+def _intent_from_matching_memory(
+    text: str,
+    memories: list[dict],
+) -> ExtractedAIIntent | None:
+    message_tokens = set(re.findall(r"[a-z0-9]+", text.lower()))
+    for memory in memories:
+        phrase = str(memory.get("original_phrase") or "")
+        phrase_tokens = set(re.findall(r"[a-z0-9]+", phrase.lower()))
+        if not phrase_tokens:
+            continue
+        overlap = len(message_tokens & phrase_tokens) / len(phrase_tokens)
+        if overlap < 0.8:
+            continue
+        if memory.get("correct_interpretation") not in {"split_equal", "custom_split"}:
+            continue
+        split_mode = str(memory.get("split_mode") or "equal")
+        if split_mode == "equal" and _message_has_custom_split_values(text):
+            continue
+        if split_mode not in {"equal", "exact_amounts", "percentages", "shares"}:
+            split_mode = "equal"
+        group = memory.get("group")
+        return ExtractedAIIntent(
+            action="split",
+            target_type="group" if group else "people",
+            group_mentions=[str(group)] if group else [],
+            person_mentions=[
+                str(participant)
+                for participant in memory.get("participants", [])
+                if str(participant).strip()
+            ],
+            split_mode=split_mode,
+            payer_included=memory.get("payer_included"),
+            remaining_split_behavior="none",
+            custom_values_text=None,
+            confidence_by_slot={"memory": 1.0},
+            explanation="Matched prior corrected AI memory.",
+        )
+    return None
+
+
+def _message_has_custom_split_values(text: str) -> bool:
+    lowered = text.lower()
+    return bool(
+        re.search(r"\d+(?:\.\d+)?\s*-\s*\d+(?:\.\d+)?", lowered)
+        or re.search(r"\d+(?:\.\d+)?\s*%", lowered)
+        or re.search(
+            r"\b\d+(?:\.\d+)?\s*(?:percent|percentage|shares?|dollars?|usd|bucks)\b",
+            lowered,
+        )
+        or re.search(r"\b(?:pays?|owes?|gets?|covers?|remaining|rest)\b", lowered)
+    )
+
+
+def _store_ai_intent_slots(
+    pending: PendingTelegramSplit,
+    intent: ExtractedAIIntent,
+    original_message: str,
+) -> None:
+    pending.ai_slots.update(
+        {
+            "action": intent.action,
+            "target_type": intent.target_type,
+            "group_mentions": list(intent.group_mentions),
+            "participant_mentions": list(intent.person_mentions),
+            "split_mode": intent.split_mode,
+            "payer_included": intent.payer_included,
+            "remaining_split_behavior": intent.remaining_split_behavior,
+            "custom_values_text": intent.custom_values_text,
+            "parsed_custom_values": [],
+            "missing_custom_values": [],
+            "custom_validation_status": None,
+            "original_user_message": original_message,
+            "last_ai_explanation": intent.explanation,
+            "confidence_by_slot": dict(intent.confidence_by_slot),
+            "errors": list(intent.errors),
+            "resolved_group_id": None,
+            "resolved_group_name": None,
+            "resolved_participants": [],
+            "unresolved_participants": [],
+            "ambiguous_participants": [],
+            "group_confirmed": False,
+        }
+    )
+    pending.ai_participant_names = list(intent.person_mentions)
+    pending.ai_target_type = intent.target_type
+    pending.ai_split_mode = intent.split_mode
+    pending.custom_payer_included = intent.payer_included is not False
+    pending.split_value_mode = (
+        intent.split_mode if intent.split_mode != "unknown" else pending.split_value_mode
+    )
+
+
+def _continue_enterprise_ai_slots(
+    pending: PendingTelegramSplit,
+    text: str,
+    chat_id: str,
+    db: DbSession,
+    telegram: TelegramService,
+) -> bool:
+    if not pending.ai_slots:
+        return False
+    if pending.ai_waiting_for == "group":
+        pending.ai_correction_type = pending.ai_correction_type or "corrected_group"
+        pending.ai_slots["group_mentions"] = [text]
+        pending.ai_slots["ai_waiting_for"] = None
+        _resolve_ai_slot_group(pending, [text], chat_id, telegram)
+        return True
+    if pending.ai_waiting_for == "participants":
+        pending.ai_correction_type = pending.ai_correction_type or "corrected_people"
+        names = parse_split_names(text) or [text]
+        pending.ai_slots["participant_mentions"] = names
+        pending.ai_participant_names = names
+        pending.ai_slots["ai_waiting_for"] = None
+        _resolve_ai_slot_participants(pending, chat_id, db, telegram)
+        return True
+    if pending.ai_waiting_for == "custom_values":
+        pending.ai_slots["custom_values_text"] = text
+        pending.ai_slots["ai_waiting_for"] = None
+        pending.ai_waiting_for = None
+        _prepare_enterprise_ai_custom_split_confirmation(pending, chat_id, db, telegram)
+        return True
+    return False
+
+
+def _resolve_ai_slot_group(
+    pending: PendingTelegramSplit,
+    group_mentions: list[str],
+    chat_id: str,
+    telegram: TelegramService,
+) -> None:
+    if not group_mentions:
+        pending.ai_waiting_for = "group"
+        pending.ai_slots["ai_waiting_for"] = "group"
+        telegram.send_message("Which group should I use?", chat_id=chat_id)
+        return
+    try:
+        groups = SplitwiseService().get_groups()
+    except (AttributeError, SplitwiseAPIError):
+        _record_ai_failure_and_prompt_button_mode(
+            pending,
+            pending.last_ai_message or "",
+            "unknown_group",
+            chat_id,
+            telegram,
+        )
+        return
+    result = EntityResolutionService().resolve_group_mentions(group_mentions, groups)
+    if result.ambiguous:
+        log_event(
+            logger,
+            "ai_entity_resolution_ambiguous",
+            tx_id=pending.transaction_id,
+            entity_type="group",
+            mention=group_mentions[0],
+            candidate_count=len(result.ambiguous[0].candidates),
+            reason="ambiguous_group",
+        )
+        pending.remember_failed_ai_attempt(pending.last_ai_message or "", "ambiguous_group")
+        pending.mode = "ai_group_choice"
+        pending.ambiguous_groups_by_name[group_mentions[0]] = [
+            candidate.entity for candidate in result.ambiguous[0].candidates
+        ]
+        telegram.send_message(
+            format_group_ambiguity_message(group_mentions[0]),
+            reply_markup=build_group_choice_keyboard(
+                pending.transaction_id,
+                pending.ambiguous_groups_by_name[group_mentions[0]],
+            ),
+            chat_id=chat_id,
+        )
+        return
+    if result.unresolved or not result.resolved:
+        log_event(
+            logger,
+            "ai_entity_resolution_failed",
+            tx_id=pending.transaction_id,
+            entity_type="group",
+            reason="unknown_group",
+        )
+        _record_ai_failure_and_prompt_button_mode(
+            pending,
+            pending.last_ai_message or "",
+            "unknown_group",
+            chat_id,
+            telegram,
+        )
+        return
+
+    group = result.resolved[0].entity
+    pending.ai_slots["resolved_group_id"] = int(group["id"])
+    pending.ai_slots["resolved_group_name"] = str(group.get("name") or group["id"])
+    pending.ai_slots["resolved_group"] = group
+    pending.ai_slots["ai_waiting_for"] = "group_confirmation"
+    pending.ai_waiting_for = "group_confirmation"
+    log_event(
+        logger,
+        "ai_entity_resolution_success",
+        tx_id=pending.transaction_id,
+        entity_type="group",
+        group_id=group["id"],
+    )
+    telegram.send_message(
+        format_ai_group_confirmation_message(
+            pending.transaction_title or f"Transaction {pending.transaction_id}",
+            pending.ai_slots["resolved_group_name"],
+        ),
+        reply_markup=build_ai_group_confirmation_keyboard(pending.transaction_id),
+        chat_id=chat_id,
+    )
+
+
+def _confirm_ai_slot_group(
+    pending: PendingTelegramSplit,
+    chat_id: str,
+    db: DbSession,
+    telegram: TelegramService,
+) -> str:
+    group = pending.ai_slots.get("resolved_group")
+    if not group:
+        return "This split session expired. Please start again from the transaction."
+    pending.selected_group_id = int(group["id"])
+    pending.selected_group_name = str(group.get("name") or group["id"])
+    pending.group_members = list(group.get("members", []))
+    pending.remember_friends(pending.group_members)
+    pending.ai_slots["group_confirmed"] = True
+    log_event(
+        logger,
+        "telegram_group_confirmed",
+        tx_id=pending.transaction_id,
+        group_id=pending.selected_group_id,
+    )
+    pending.ai_slots["ai_waiting_for"] = None
+    pending.ai_waiting_for = None
+    _resolve_ai_slot_participants(pending, chat_id, db, telegram)
+    return "Group confirmed."
+
+
+def _resolve_ai_slot_participants(
+    pending: PendingTelegramSplit,
+    chat_id: str,
+    db: DbSession,
+    telegram: TelegramService,
+) -> str:
+    mentions = list(pending.ai_slots.get("participant_mentions") or [])
+    if not mentions:
+        if pending.selected_group_id and pending.group_members:
+            _prompt_ai_group_member_selection(pending, chat_id, db, telegram)
+            pending.ai_waiting_for = "participants"
+            pending.ai_slots["ai_waiting_for"] = "participants"
+            return "Choose group members."
+        pending.ai_waiting_for = "participants"
+        pending.ai_slots["ai_waiting_for"] = "participants"
+        telegram.send_message("Who should I include?", chat_id=chat_id)
+        return "Type participant names."
+    try:
+        splitwise = SplitwiseService()
+        try:
+            friends = splitwise.get_friends()
+        except (AttributeError, SplitwiseAPIError):
+            friends = []
+        try:
+            payer = splitwise.get_current_user()
+        except (AttributeError, SplitwiseAPIError):
+            payer = None
+    except (AttributeError, SplitwiseAPIError):
+        _record_ai_failure_and_prompt_button_mode(
+            pending,
+            pending.last_ai_message or "",
+            "unknown_person",
+            chat_id,
+            telegram,
+        )
+        return "Use Button mode."
+
+    log_event(
+        logger,
+        "ai_entity_resolution_started",
+        tx_id=pending.transaction_id,
+        entity_type="person",
+        mention_count=len(mentions),
+    )
+    resolver = EntityResolutionService()
+    if pending.selected_group_id:
+        result = resolver.resolve_people_within_group(
+            mentions,
+            pending.group_members,
+            payer=payer,
+            all_friends=friends,
+        )
+    else:
+        result = resolver.resolve_person_mentions(mentions, friends, payer=payer)
+    pending.remember_friends([*friends, *pending.group_members])
+    _apply_ai_participant_resolution(pending, result)
+
+    if result.unresolved:
+        log_event(
+            logger,
+            "ai_entity_resolution_failed",
+            tx_id=pending.transaction_id,
+            entity_type="person",
+            reason="unknown_person",
+            unresolved_count=len(result.unresolved),
+        )
+        pending.remember_failed_ai_attempt(pending.last_ai_message or "", "unknown_person")
+        pending.ai_waiting_for = "participants"
+        pending.ai_slots["ai_waiting_for"] = "participants"
+        telegram.send_message(
+            f"I couldn't find {', '.join(result.unresolved)}. Use Button mode for this one.",
+            reply_markup=build_ai_fallback_keyboard(pending.transaction_id),
+            chat_id=chat_id,
+        )
+        return "Participant not found."
+    if result.ambiguous:
+        pending.remember_failed_ai_attempt(pending.last_ai_message or "", "ambiguous_person")
+        pending.ai_waiting_for = "participant_disambiguation"
+        pending.ai_slots["ai_waiting_for"] = "participant_disambiguation"
+        ambiguous = result.ambiguous[0]
+        log_event(
+            logger,
+            "ai_entity_resolution_ambiguous",
+            tx_id=pending.transaction_id,
+            entity_type="person",
+            mention=ambiguous.mention,
+            candidate_count=len(ambiguous.candidates),
+            reason="ambiguous_person",
+        )
+        pending.remaining_unresolved_names = [ambiguous.mention]
+        pending.ambiguous_matches_by_name = {
+            ambiguous.mention: [candidate.entity for candidate in ambiguous.candidates]
+        }
+        pending.remember_friends(pending.ambiguous_matches_by_name[ambiguous.mention])
+        telegram.send_message(
+            format_ambiguity_message(ambiguous.mention, _selected_friend_names(pending)),
+            reply_markup=build_ai_participant_ambiguity_keyboard(
+                pending.transaction_id,
+                pending.ambiguous_matches_by_name[ambiguous.mention],
+            ),
+            chat_id=chat_id,
+        )
+        return "Choose a participant."
+
+    log_event(
+        logger,
+        "ai_entity_resolution_success",
+        tx_id=pending.transaction_id,
+        entity_type="person",
+        resolved_count=len(result.resolved),
+    )
+    return _continue_after_enterprise_ai_participants(pending, chat_id, db, telegram)
+
+
+def _apply_ai_participant_resolution(
+    pending: PendingTelegramSplit,
+    result: EntityResolutionResult,
+) -> None:
+    pending.selected_friend_ids = []
+    pending.selected_friend_names_by_id = {}
+    pending.friend_lookup_by_id = {}
+    resolved_participants = []
+    for entity in result.resolved:
+        user_id = int(entity.entity_id)
+        pending.add_friend(user_id, entity.display_name)
+        if entity.source == "payer":
+            pending.payer_user_id = user_id
+        resolved_participants.append(
+            {
+                "user_id": user_id,
+                "display_name": entity.display_name,
+                "mention": entity.mention,
+                "source": entity.source,
+            }
+        )
+    pending.ai_slots["resolved_participants"] = resolved_participants
+    pending.ai_slots["unresolved_participants"] = list(result.unresolved)
+    pending.ai_slots["ambiguous_participants"] = [
+        {
+            "mention": ambiguous.mention,
+            "candidates": [
+                {
+                    "user_id": int(candidate.entity_id),
+                    "display_name": candidate.display_name,
+                    "source": candidate.source,
+                }
+                for candidate in ambiguous.candidates
+            ],
+        }
+        for ambiguous in result.ambiguous
+    ]
+
+
+def _continue_after_enterprise_ai_participants(
+    pending: PendingTelegramSplit,
+    chat_id: str,
+    db: DbSession,
+    telegram: TelegramService,
+) -> str:
+    split_mode = pending.ai_slots.get("split_mode") or "equal"
+    if split_mode in {"exact_amounts", "percentages", "shares"}:
+        return _prepare_enterprise_ai_custom_split_confirmation(pending, chat_id, db, telegram)
+    return _send_enterprise_ai_confirmation(pending, chat_id, db, telegram)
+
+
+def _send_enterprise_ai_confirmation(
+    pending: PendingTelegramSplit,
+    chat_id: str,
+    db: DbSession,
+    telegram: TelegramService,
+) -> str:
+    error = _ai_confirmation_blocker(pending)
+    if error:
+        telegram.send_message(
+            error,
+            reply_markup=build_ai_fallback_keyboard(pending.transaction_id),
+            chat_id=chat_id,
+        )
+        return "Use Button mode."
+    try:
+        tx = TransactionService(db).get_transaction(pending.transaction_id)
+    except TransactionError:
+        telegram.send_message(
+            "Could not prepare the split summary. Open the dashboard to review.",
+            chat_id=chat_id,
+        )
+        return "Open dashboard."
+
+    friend_ids = _participant_friend_ids(pending)
+    participant_names = _selected_friend_names(pending)
+    approx_share = approximate_equal_share_display(
+        int(getattr(tx, "amount_cents", 0)),
+        len(friend_ids) + 1,
+    )
+    pending.mode = "confirm"
+    pending.ai_waiting_for = "final_confirmation"
+    pending.ai_slots["ai_waiting_for"] = "final_confirmation"
+    telegram.send_message(
+        format_ai_split_confirmation_message(
+            transaction_title=pending.transaction_title
+            or _compact_title_for_transaction(pending.transaction_id, db),
+            group_name=pending.selected_group_name,
+            participant_names=participant_names,
+            split_mode=pending.ai_slots.get("split_mode") or "equal",
+            payer_included=pending.custom_payer_included,
+            approx_share=approx_share,
+            currency_code=getattr(tx, "iso_currency_code", "USD") or "USD",
+        ),
+        reply_markup=build_ai_split_confirmation_keyboard(
+            pending.transaction_id,
+            include_split_as_people=bool(pending.selected_group_id),
+        ),
+        chat_id=chat_id,
+    )
+    return "Review and confirm the split."
+
+
+def _ai_confirmation_blocker(pending: PendingTelegramSplit) -> str | None:
+    mentions = list(pending.ai_slots.get("participant_mentions") or [])
+    if not mentions:
+        return "I need to know who should be included before confirming."
+    if pending.ai_slots.get("split_mode") != "equal":
+        return "I need a complete custom split before confirming."
+    if pending.ai_slots.get("target_type") == "group" and not pending.ai_slots.get(
+        "group_confirmed"
+    ):
+        return "Please confirm the group before confirming the split."
+    if pending.ai_slots.get("unresolved_participants"):
+        return "I could not resolve every participant."
+    if pending.ai_slots.get("ambiguous_participants"):
+        return "Please choose the correct participant before confirming."
+    if len(set(pending.selected_friend_ids)) != len(pending.selected_friend_ids):
+        return "I found duplicate participants. Please review in Button mode."
+    if len(pending.selected_friend_ids) < len(set(mentions)):
+        return "I could not resolve every requested participant."
+    if pending.selected_group_id:
+        member_ids = {int(member["id"]) for member in pending.group_members}
+        missing = [
+            friend_id
+            for friend_id in pending.selected_friend_ids
+            if friend_id not in member_ids
+        ]
+        if missing:
+            return "One selected participant is not in the confirmed group."
+    return None
+
+
+def _prepare_enterprise_ai_custom_split_confirmation(
+    pending: PendingTelegramSplit,
+    chat_id: str,
+    db: DbSession,
+    telegram: TelegramService,
+) -> str:
+    split_mode = str(pending.ai_slots.get("split_mode") or "unknown")
+    if split_mode not in {"exact_amounts", "percentages", "shares"}:
+        pending.ai_waiting_for = "split_mode"
+        pending.ai_slots["ai_waiting_for"] = "split_mode"
+        telegram.send_message("Should this be amounts, percentages, or shares?", chat_id=chat_id)
+        return "Need split mode."
+
+    values_text = str(pending.ai_slots.get("custom_values_text") or pending.last_ai_message or "")
+    if not values_text.strip():
+        pending.ai_waiting_for = "custom_values"
+        pending.ai_slots["ai_waiting_for"] = "custom_values"
+        telegram.send_message(
+            format_custom_values_prompt(
+                pending.transaction_title
+                or _compact_title_for_transaction(pending.transaction_id, db),
+                split_mode,
+                _selected_friend_names(pending),
+            ),
+            chat_id=chat_id,
+        )
+        return "Need custom values."
+
+    try:
+        tx = TransactionService(db).get_transaction(pending.transaction_id)
+        splitwise = SplitwiseService()
+        payer = splitwise.get_current_user()
+        payer_user_id = int(payer["id"])
+        payer_name = friend_display_name(payer)
+    except (AttributeError, KeyError, TypeError, ValueError, TransactionError, SplitwiseAPIError):
+        telegram.send_message(
+            "Could not prepare the custom split. Use the web dashboard to review.",
+            chat_id=chat_id,
+        )
+        return "Open dashboard."
+
+    pending.payer_user_id = payer_user_id
+    pending.custom_split_mode = split_mode
+    pending.split_value_mode = split_mode
+    pending.custom_payer_included = pending.ai_slots.get("payer_included") is not False
+
+    participant_splits = _build_enterprise_ai_custom_participant_splits(
+        pending=pending,
+        tx_amount_cents=abs(int(tx.amount_cents)),
+        currency_code=tx.iso_currency_code or "USD",
+        payer_user_id=payer_user_id,
+        payer_name=payer_name,
+        values_text=values_text,
+    )
+    if participant_splits is None:
+        pending.ai_waiting_for = "custom_values"
+        pending.ai_slots["ai_waiting_for"] = "custom_values"
+        pending.ai_slots["custom_validation_status"] = "missing_or_invalid"
+        telegram.send_message(
+            "I need valid values for everyone in this custom split. "
+            "Try: Janhavi=50, Rahul=50, or use Button mode.",
+            reply_markup=build_ai_fallback_keyboard(pending.transaction_id),
+            chat_id=chat_id,
+        )
+        return "Need valid custom values."
+
+    pending.custom_participant_splits = participant_splits
+    pending.ai_slots["parsed_custom_values"] = participant_splits
+    split_inputs = [_custom_split_input_from_pending_split(split) for split in participant_splits]
+    try:
+        preview_shares = build_custom_split_shares_by_mode(
+            total_cents=abs(int(tx.amount_cents)),
+            payer_user_id=payer_user_id,
+            payer_included=pending.custom_payer_included,
+            split_mode=split_mode,
+            participant_splits=split_inputs,
+        )
+    except ValueError as exc:
+        log_event(
+            logger,
+            "ai_custom_split_validation_failed",
+            level=logging.WARNING,
+            tx_id=pending.transaction_id,
+            reason="split_validation_failed",
+            error_type=type(exc).__name__,
+        )
+        pending.ai_waiting_for = "custom_values"
+        pending.ai_slots["ai_waiting_for"] = "custom_values"
+        pending.ai_slots["custom_validation_status"] = "invalid"
+        pending.remember_failed_ai_attempt(pending.last_ai_message or "", "validation_failed")
+        telegram.send_message(
+            f"That custom split does not add up: {_compact_error_value(exc)}",
+            reply_markup=build_ai_fallback_keyboard(pending.transaction_id),
+            chat_id=chat_id,
+        )
+        return "Invalid custom split."
+
+    pending.mode = "awaiting_custom_confirmation"
+    pending.ai_waiting_for = "final_confirmation"
+    pending.ai_slots["ai_waiting_for"] = "final_confirmation"
+    pending.ai_slots["custom_validation_status"] = "valid"
+    telegram.send_message(
+        format_custom_split_confirmation_message(
+            merchant=_safe_transaction_display_name(tx),
+            amount=cents_to_decimal_string(abs(int(tx.amount_cents))),
+            currency_code=tx.iso_currency_code or "USD",
+            payer_name=payer_name,
+            payer_included=pending.custom_payer_included,
+            participant_lines=_custom_participant_lines(
+                preview_shares,
+                participant_splits,
+                payer_name,
+            ),
+        ),
+        reply_markup=build_custom_split_confirmation_keyboard(pending.transaction_id),
+        chat_id=chat_id,
+    )
+    return "Review and confirm the custom split."
+
+
+def _build_enterprise_ai_custom_participant_splits(
+    *,
+    pending: PendingTelegramSplit,
+    tx_amount_cents: int,
+    currency_code: str,
+    payer_user_id: int,
+    payer_name: str,
+    values_text: str,
+) -> list[dict] | None:
+    split_mode = str(pending.ai_slots.get("split_mode") or pending.split_value_mode)
+    participants = _enterprise_ai_custom_participants(
+        pending,
+        payer_user_id=payer_user_id,
+        payer_name=payer_name,
+    )
+    if not participants:
+        return None
+
+    explicit = _parse_enterprise_ai_custom_values(
+        values_text,
+        split_mode=split_mode,
+        participants=participants,
+    )
+    if explicit is None:
+        explicit_splits = _parse_enterprise_ai_custom_values_with_llm(
+            pending=pending,
+            values_text=values_text,
+            split_mode=split_mode,
+            total_amount_cents=tx_amount_cents,
+            currency_code=currency_code,
+            participants=participants,
+            payer_user_id=payer_user_id,
+            payer_name=payer_name,
+        )
+        if explicit_splits is not None:
+            return explicit_splits
+        return None
+
+    remaining_behavior = pending.ai_slots.get("remaining_split_behavior") or "unknown"
+    missing = [
+        participant for participant in participants if participant["user_id"] not in explicit
+    ]
+    if missing:
+        if remaining_behavior != "equal_remaining":
+            pending.ai_slots["missing_custom_values"] = [
+                participant["display_name"] for participant in missing
+            ]
+            return None
+        explicit = _fill_equal_remaining_custom_values(
+            split_mode=split_mode,
+            total_amount_cents=tx_amount_cents,
+            explicit=explicit,
+            missing=missing,
+        )
+        if explicit is None:
+            return None
+
+    output: list[dict] = []
+    for participant in participants:
+        user_id_value = int(participant["user_id"])
+        value = explicit.get(user_id_value)
+        if value is None:
+            return None
+        split_data = {
+            "user_id": user_id_value,
+            "display_name": participant["display_name"],
+        }
+        if split_mode == "exact_amounts":
+            split_data["amount_cents"] = decimal_to_cents(value)
+        elif split_mode == "percentages":
+            split_data["percentage"] = value
+        elif split_mode == "shares":
+            split_data["shares"] = value
+        else:
+            return None
+        output.append(split_data)
+    return output
+
+
+def _parse_enterprise_ai_custom_values_with_llm(
+    *,
+    pending: PendingTelegramSplit,
+    values_text: str,
+    split_mode: str,
+    total_amount_cents: int,
+    currency_code: str,
+    participants: list[dict],
+    payer_user_id: int,
+    payer_name: str,
+) -> list[dict] | None:
+    if split_mode not in {"exact_amounts", "percentages", "shares"}:
+        return None
+
+    selected_participants = [
+        {
+            "user_id": int(participant["user_id"]),
+            "display_name": str(participant["display_name"]),
+        }
+        for participant in participants
+        if int(participant["user_id"]) != payer_user_id
+    ]
+    payer = None
+    if pending.custom_payer_included:
+        payer = {"user_id": payer_user_id, "display_name": payer_name}
+
+    result = LLMSplitParser().parse(
+        user_message=values_text,
+        total_amount_cents=total_amount_cents,
+        currency_code=currency_code,
+        split_mode=split_mode,  # type: ignore[arg-type]
+        payer_included=pending.custom_payer_included,
+        selected_participants=selected_participants,
+        payer=payer,
+    )
+    if not result.ok:
+        pending.ai_slots["custom_value_parse_errors"] = list(result.errors)
+        if result.clarification_question:
+            pending.ai_slots["custom_value_clarification"] = result.clarification_question
+        return None
+
+    allowed_ids = {int(participant["user_id"]) for participant in participants}
+    output: list[dict] = []
+    seen_ids: set[int] = set()
+    for split in result.participant_splits:
+        user_id_value = int(split.user_id)
+        if user_id_value not in allowed_ids or user_id_value in seen_ids:
+            return None
+        seen_ids.add(user_id_value)
+        split_data = {
+            "user_id": user_id_value,
+            "display_name": split.display_name,
+        }
+        if split_mode == "exact_amounts":
+            split_data["amount_cents"] = split.amount_cents
+        elif split_mode == "percentages":
+            split_data["percentage"] = split.percentage
+        elif split_mode == "shares":
+            split_data["shares"] = split.shares
+        output.append(split_data)
+
+    return output if seen_ids == allowed_ids else None
+
+
+def _enterprise_ai_custom_participants(
+    pending: PendingTelegramSplit,
+    *,
+    payer_user_id: int,
+    payer_name: str,
+) -> list[dict]:
+    participants = [
+        {
+            "user_id": friend_id,
+            "display_name": pending.selected_friend_names_by_id.get(friend_id)
+            or pending.friend_lookup_by_id.get(friend_id)
+            or str(friend_id),
+        }
+        for friend_id in pending.selected_friend_ids
+    ]
+    if pending.custom_payer_included and payer_user_id not in {
+        int(participant["user_id"]) for participant in participants
+    }:
+        participants.insert(0, {"user_id": payer_user_id, "display_name": payer_name})
+    seen: set[int] = set()
+    unique = []
+    for participant in participants:
+        user_id_value = int(participant["user_id"])
+        if user_id_value in seen:
+            continue
+        seen.add(user_id_value)
+        unique.append(participant)
+    return unique
+
+
+def _parse_enterprise_ai_custom_values(
+    text: str,
+    *,
+    split_mode: str,
+    participants: list[dict],
+) -> dict[int, Decimal] | None:
+    numbers = [Decimal(match) for match in re.findall(r"\d+(?:\.\d+)?", text)]
+    if len(numbers) == len(participants):
+        return {
+            int(participant["user_id"]): numbers[index]
+            for index, participant in enumerate(participants)
+        }
+
+    values: dict[int, Decimal] = {}
+    for participant in participants:
+        value = _explicit_custom_value_for_participant(
+            text,
+            split_mode,
+            participant["display_name"],
+        )
+        if value is not None:
+            values[int(participant["user_id"])] = value
+    return values if values else None
+
+
+def _explicit_custom_value_for_participant(
+    text: str,
+    split_mode: str,
+    display_name: str,
+) -> Decimal | None:
+    lowered = text.lower()
+    tokens = [token for token in re.split(r"\s+", display_name.lower()) if token]
+    aliases = {display_name.lower(), *(token for token in tokens if len(token) > 1)}
+    if display_name.lower() in {"you", "gunjan patil"}:
+        aliases.update({"me", "you"})
+    value_pattern = r"(\d+(?:\.\d+)?)"
+    unit_pattern = {
+        "exact_amounts": r"(?:dollars?|bucks?|usd)?",
+        "percentages": r"(?:%|percent|percentage)",
+        "shares": r"(?:shares?|share)?",
+    }.get(split_mode, "")
+    for alias in aliases:
+        alias_pattern = re.escape(alias)
+        patterns = [
+            rf"{alias_pattern}[^0-9]{{0,40}}{value_pattern}\s*{unit_pattern}",
+            rf"{value_pattern}\s*{unit_pattern}[^A-Za-z0-9]{{0,40}}{alias_pattern}",
+        ]
+        for pattern in patterns:
+            match = re.search(pattern, lowered, flags=re.IGNORECASE)
+            if match:
+                return Decimal(match.group(1))
+    return None
+
+
+def _fill_equal_remaining_custom_values(
+    *,
+    split_mode: str,
+    total_amount_cents: int,
+    explicit: dict[int, Decimal],
+    missing: list[dict],
+) -> dict[int, Decimal] | None:
+    values = dict(explicit)
+    if not missing:
+        return values
+    if split_mode == "percentages":
+        remaining = Decimal("100") - sum(values.values(), Decimal("0"))
+    elif split_mode == "exact_amounts":
+        remaining = Decimal(total_amount_cents) / Decimal("100") - sum(
+            values.values(),
+            Decimal("0"),
+        )
+    elif split_mode == "shares":
+        for participant in missing:
+            values[int(participant["user_id"])] = Decimal("1")
+        return values
+    else:
+        return None
+    if remaining < 0:
+        return None
+    each = remaining / Decimal(len(missing))
+    for participant in missing:
+        values[int(participant["user_id"])] = each
+    return values
 
 
 def _try_context_grounded_ai_chat(
@@ -684,6 +1786,12 @@ def _record_ai_failure_and_prompt_button_mode(
     chat_id: str,
     telegram: TelegramService,
 ) -> None:
+    log_event(
+        logger,
+        "telegram_ai_fallback",
+        tx_id=pending.transaction_id,
+        reason=failure_reason,
+    )
     pending.remember_failed_ai_attempt(original_message, failure_reason)
     title = pending.transaction_title or f"Transaction {pending.transaction_id}"
     telegram.send_message(
@@ -1297,6 +2405,12 @@ def _prompt_ai_group_member_selection(
     telegram: TelegramService,
 ) -> None:
     if pending.selected_group_id and pending.group_members:
+        if pending.payer_user_id is None:
+            try:
+                current_user = SplitwiseService().get_current_user()
+                pending.payer_user_id = int(current_user["id"])
+            except (KeyError, TypeError, ValueError, AttributeError, SplitwiseAPIError):
+                pass
         _preselect_payer_if_group_member(pending)
         pending.mode = "group_members"
         telegram.send_message(
@@ -2050,7 +3164,25 @@ def _try_route_group_choice(
                     prompt=not ai_group_choice,
                 )
                 if ai_group_choice:
-                    _resolve_ai_group_members(pending, chat_id, user_id, db, telegram)
+                    if pending.ai_slots:
+                        pending.ai_slots["resolved_group_id"] = int(group["id"])
+                        pending.ai_slots["resolved_group_name"] = str(
+                            group.get("name") or group["id"]
+                        )
+                        pending.ai_slots["resolved_group"] = group
+                        pending.ai_slots["ai_waiting_for"] = "group_confirmation"
+                        pending.ai_waiting_for = "group_confirmation"
+                        telegram.send_message(
+                            format_ai_group_confirmation_message(
+                                pending.transaction_title
+                                or _compact_title_for_transaction(transaction_id, db),
+                                pending.ai_slots["resolved_group_name"],
+                            ),
+                            reply_markup=build_ai_group_confirmation_keyboard(transaction_id),
+                            chat_id=chat_id,
+                        )
+                    else:
+                        _resolve_ai_group_members(pending, chat_id, user_id, db, telegram)
                 return "Group selected."
     for group in pending.group_options:
         if int(group["id"]) == group_id:
@@ -2075,6 +3207,27 @@ def _try_route_friend_choice(
     pending = telegram_split_state_store.get_pending(chat_id, user_id)
     if not pending or pending.transaction_id != transaction_id:
         return "No pending split found. Start again from the latest transaction message."
+
+    if pending.ai_waiting_for == "participant_disambiguation" and pending.ai_slots:
+        pending.add_friend(friend_id, _friend_name_from_pending_choice(pending, friend_id))
+        if pending.remaining_unresolved_names:
+            resolved_name = pending.remaining_unresolved_names.pop(0)
+            pending.ambiguous_matches_by_name.pop(resolved_name, None)
+        pending.ai_slots["resolved_participants"] = [
+            {
+                "user_id": selected_id,
+                "display_name": pending.selected_friend_names_by_id.get(
+                    selected_id,
+                    str(selected_id),
+                ),
+            }
+            for selected_id in pending.selected_friend_ids
+        ]
+        pending.ai_slots["ambiguous_participants"] = []
+        pending.ai_waiting_for = None
+        pending.ai_slots["ai_waiting_for"] = None
+        _send_enterprise_ai_confirmation(pending, chat_id, db, telegram)
+        return "Selection saved."
 
     if pending.mode in {"people_select", "people_search", "group_members"}:
         if pending.payer_user_id and friend_id == pending.payer_user_id:
@@ -2187,6 +3340,21 @@ def _split_equal_from_telegram(
         telegram_split_state_store.clear(chat_id, user_id)
         return
     pending = telegram_split_state_store.get_pending(chat_id, user_id)
+    final_participants = [
+        {"user_id": friend_id, "display_name": name}
+        for friend_id, name in zip(friend_user_ids, friend_names, strict=False)
+    ]
+    _record_ai_interpretation_memory_if_needed(
+        tx,
+        pending,
+        db,
+        final_action="split_equal",
+        final_group_id=group_id,
+        final_group_name=pending.selected_group_name if pending else None,
+        final_participants=final_participants,
+        final_split_mode="equal",
+        payer_included=True,
+    )
     _record_button_fallback_memory_if_needed(
         tx,
         pending,
@@ -2194,15 +3362,18 @@ def _split_equal_from_telegram(
         final_action="split_equal",
         final_group_id=group_id,
         final_group_name=pending.selected_group_name if pending else None,
-        final_participants=[
-            {"user_id": friend_id, "display_name": name}
-            for friend_id, name in zip(friend_user_ids, friend_names, strict=False)
-        ],
+        final_participants=final_participants,
         final_split_mode="equal",
         payer_included=True,
     )
     participant_names = ["You", *friend_names]
     telegram_split_state_store.clear(chat_id, user_id)
+    log_event(
+        logger,
+        "telegram_split_posted",
+        tx_id=tx.id,
+        splitwise_expense_id=tx.splitwise_expense_id,
+    )
     amount = cents_to_decimal_string(abs(tx.amount_cents))
     approx_share = approximate_equal_share_display(tx.amount_cents, len(friend_user_ids) + 1)
     telegram.send_message(
@@ -2240,12 +3411,7 @@ def _post_custom_split_from_telegram(
             return
 
         split_inputs = [
-            CustomSplitInput(
-                user_id=split["user_id"],
-                amount_cents=split.get("amount_cents"),
-                percentage=split.get("percentage"),
-                shares=split.get("shares"),
-            )
+            _custom_split_input_from_pending_split(split)
             for split in pending.custom_participant_splits
         ]
         tx, _response = TransactionService(db).create_custom_split_expense(
@@ -2262,14 +3428,49 @@ def _post_custom_split_from_telegram(
             confirm=True,
             post_pending=False,
         )
-    except (TransactionError, SplitwiseAPIError, ValueError):
+    except (KeyError, TypeError, TransactionError, SplitwiseAPIError, ValueError) as exc:
+        db.rollback()
+        pending.is_submitting = False
+        telegram_split_state_store.update_pending(chat_id, user_id, pending)
+        log_event(
+            logger,
+            "telegram_custom_split_failed",
+            level=logging.WARNING,
+            tx_id=pending.transaction_id,
+            reason=_safe_custom_split_failure_reason(exc),
+            error_type=type(exc).__name__,
+        )
         telegram.send_message(
-            "Could not create the custom split. Open the dashboard to review.",
+            "\n".join(
+                [
+                    "Could not create the custom split.",
+                    _safe_custom_split_failure_message(exc),
+                    "You can adjust and try again, or open the dashboard to review.",
+                ]
+            ),
             chat_id=chat_id,
         )
-        telegram_split_state_store.clear(chat_id, user_id)
         return
 
+    final_participants = [
+        {
+            "user_id": split["user_id"],
+            "display_name": split.get("display_name") or str(split["user_id"]),
+        }
+        for split in pending.custom_participant_splits
+    ]
+    _record_ai_interpretation_memory_if_needed(
+        tx,
+        pending,
+        db,
+        final_action="custom_split",
+        final_group_id=pending.selected_group_id,
+        final_group_name=pending.selected_group_name,
+        final_participants=final_participants,
+        final_split_mode=pending.custom_split_mode,
+        payer_included=pending.custom_payer_included,
+        custom_values=pending.custom_participant_splits,
+    )
     _record_button_fallback_memory_if_needed(
         tx,
         pending,
@@ -2277,13 +3478,7 @@ def _post_custom_split_from_telegram(
         final_action="custom_split",
         final_group_id=pending.selected_group_id,
         final_group_name=pending.selected_group_name,
-        final_participants=[
-            {
-                "user_id": split["user_id"],
-                "display_name": split.get("display_name") or str(split["user_id"]),
-            }
-            for split in pending.custom_participant_splits
-        ],
+        final_participants=final_participants,
         final_split_mode=pending.custom_split_mode,
         payer_included=pending.custom_payer_included,
         custom_values=pending.custom_participant_splits,
@@ -2297,6 +3492,12 @@ def _post_custom_split_from_telegram(
         pending.custom_participant_splits,
     )
     telegram_split_state_store.clear(chat_id, user_id)
+    log_event(
+        logger,
+        "telegram_custom_split_posted",
+        tx_id=tx.id,
+        splitwise_expense_id=tx.splitwise_expense_id,
+    )
     telegram.send_message(
         format_custom_split_success_message(
             merchant=_safe_transaction_display_name(tx),
@@ -2308,6 +3509,56 @@ def _post_custom_split_from_telegram(
         chat_id=chat_id,
     )
     _record_completion_and_show_next(tx, chat_id, user_id, db, telegram)
+
+
+def _safe_custom_split_failure_reason(exc: Exception) -> str:
+    if isinstance(exc, SplitwiseAPIError):
+        errors = exc.response_data.get("errors")
+        if errors:
+            return "splitwise_errors"
+        return "splitwise_api_error"
+    if isinstance(exc, TransactionError):
+        return str(exc)[:160]
+    if isinstance(exc, ValueError):
+        return str(exc)[:160]
+    return type(exc).__name__
+
+
+def _custom_split_input_from_pending_split(split: dict) -> CustomSplitInput:
+    return CustomSplitInput(
+        user_id=int(split["user_id"]),
+        amount_cents=_optional_int(split.get("amount_cents")),
+        percentage=_optional_decimal(split.get("percentage")),
+        shares=_optional_decimal(split.get("shares")),
+    )
+
+
+def _optional_int(value) -> int | None:
+    if value in {None, ""}:
+        return None
+    return int(value)
+
+
+def _optional_decimal(value) -> Decimal | None:
+    if value in {None, ""}:
+        return None
+    return Decimal(str(value))
+
+
+def _safe_custom_split_failure_message(exc: Exception) -> str:
+    if isinstance(exc, SplitwiseAPIError):
+        errors = exc.response_data.get("errors")
+        if errors:
+            return f"Splitwise rejected it: {_compact_error_value(errors)}"
+        return "Splitwise rejected the expense request."
+    if isinstance(exc, TransactionError | ValueError):
+        return str(exc)
+    return "The saved Telegram split state was incomplete or expired."
+
+
+def _compact_error_value(value) -> str:
+    text = str(value)
+    return text if len(text) <= 220 else f"{text[:217]}..."
 
 
 def _custom_participant_lines(shares, participant_splits: list[dict], payer_name: str) -> list[str]:
@@ -2438,8 +3689,16 @@ def _mark_personal(
     try:
         tx = TransactionService(db).mark_personal(transaction_id)
     except TransactionError as exc:
-        logger.info("Telegram personal action could not be completed: %s", exc)
+        log_event(
+            logger,
+            "telegram_personal_failed",
+            level=logging.WARNING,
+            tx_id=transaction_id,
+            reason="validation_failed",
+            error_type=type(exc).__name__,
+        )
         return "Could not mark personal. Open the dashboard to review."
+    log_event(logger, "telegram_split_confirmed", tx_id=transaction_id, action="personal")
     pending = telegram_split_state_store.get_pending(chat_id, user_id)
     _record_button_fallback_memory_if_needed(
         tx,
@@ -2466,7 +3725,14 @@ def _undo_transaction(
     try:
         tx = TransactionService(db).undo_transaction(transaction_id)
     except TransactionError as exc:
-        logger.info("Telegram undo action could not be completed: %s", exc)
+        log_event(
+            logger,
+            "telegram_undo",
+            level=logging.WARNING,
+            tx_id=transaction_id,
+            reason="validation_failed",
+            error_type=type(exc).__name__,
+        )
         telegram.send_message(
             "Could not undo this transaction. Open the dashboard to review.",
             chat_id=chat_id,
@@ -2475,6 +3741,7 @@ def _undo_transaction(
 
     telegram_review_queue_store.clear(chat_id, user_id)
     telegram_split_state_store.clear(chat_id, user_id)
+    log_event(logger, "telegram_undo", tx_id=tx.id)
     telegram.send_message(
         format_undo_success_message(tx),
         reply_markup=build_review_inline_keyboard(tx.id),
@@ -2493,8 +3760,16 @@ def _mark_shared_draft(
     try:
         tx = TransactionService(db).mark_shared_draft(transaction_id)
     except TransactionError as exc:
-        logger.info("Telegram draft action could not be completed: %s", exc)
+        log_event(
+            logger,
+            "telegram_draft_failed",
+            level=logging.WARNING,
+            tx_id=transaction_id,
+            reason="validation_failed",
+            error_type=type(exc).__name__,
+        )
         return "Could not create draft. Open the dashboard to review."
+    log_event(logger, "telegram_split_confirmed", tx_id=transaction_id, action="draft")
     pending = telegram_split_state_store.get_pending(chat_id, user_id)
     _record_button_fallback_memory_if_needed(
         tx,
@@ -2520,6 +3795,8 @@ def _record_button_fallback_memory_if_needed(
     payer_included: bool = True,
     custom_values: list[dict] | None = None,
 ) -> None:
+    if not pending or not pending.button_fallback_active:
+        return
     try:
         AIInterpretationMemoryService(db).record_button_fallback_memory(
             tx=tx,
@@ -2533,7 +3810,70 @@ def _record_button_fallback_memory_if_needed(
             custom_values=custom_values,
         )
     except (SQLAlchemyError, TypeError, ValueError) as exc:
-        logger.info("AI fallback memory recording skipped: %s", type(exc).__name__)
+        log_event(
+            logger,
+            "ai_memory_recorded",
+            level=logging.WARNING,
+            tx_id=tx.id,
+            correction_type="button_fallback_learned",
+            reason="db_error",
+            error_type=type(exc).__name__,
+        )
+        return
+    log_event(
+        logger,
+        "ai_memory_recorded",
+        tx_id=tx.id,
+        correction_type="button_fallback_learned",
+    )
+
+
+def _record_ai_interpretation_memory_if_needed(
+    tx: ExpenseTransaction,
+    pending: PendingTelegramSplit | None,
+    db: DbSession,
+    *,
+    final_action: str,
+    final_group_id: int | None = None,
+    final_group_name: str | None = None,
+    final_participants: list[dict] | None = None,
+    final_split_mode: str | None = None,
+    payer_included: bool = True,
+    custom_values: list[dict] | None = None,
+) -> None:
+    if not pending or pending.button_fallback_active:
+        return
+    correction_type = pending.ai_correction_type or "ai_confirmed"
+    try:
+        AIInterpretationMemoryService(db).record_ai_interpretation_memory(
+            tx=tx,
+            pending=pending,
+            final_action=final_action,
+            final_group_id=final_group_id,
+            final_group_name=final_group_name,
+            final_participants=final_participants,
+            final_split_mode=final_split_mode,
+            payer_included=payer_included,
+            custom_values=custom_values,
+            correction_type=correction_type,
+        )
+    except (SQLAlchemyError, TypeError, ValueError) as exc:
+        log_event(
+            logger,
+            "ai_memory_recorded",
+            level=logging.WARNING,
+            tx_id=tx.id,
+            correction_type=correction_type,
+            reason="db_error",
+            error_type=type(exc).__name__,
+        )
+        return
+    log_event(
+        logger,
+        "ai_memory_recorded",
+        tx_id=tx.id,
+        correction_type=correction_type,
+    )
 
 
 def _record_completion_and_show_next(

@@ -9,6 +9,7 @@ from typing import Any, Literal
 import httpx
 
 from app.config import Settings, get_settings
+from app.logging_config import log_event
 
 logger = logging.getLogger(__name__)
 
@@ -57,7 +58,12 @@ class LLMSplitParser:
         payer: dict | None,
     ) -> LLMSplitParseResult:
         if not self.settings.openai_api_key:
-            logger.info("LLM split parser skipped: OpenAI API key is not configured")
+            log_event(
+                logger,
+                "ai_intent_extraction_failed",
+                reason="missing_openai_api_key",
+                parser="custom_split",
+            )
             return LLMSplitParseResult(
                 ok=False,
                 clarification_question=(
@@ -195,7 +201,13 @@ class LLMSplitParser:
                 data = response.json()
                 parsed = json.loads(data["output"][0]["content"][0]["text"])
         except (KeyError, IndexError, json.JSONDecodeError, httpx.HTTPError):
-            logger.warning("LLM split parser request failed safely")
+            log_event(
+                logger,
+                "ai_intent_extraction_failed",
+                level=logging.WARNING,
+                reason="llm_request_failed",
+                parser="custom_split",
+            )
             return {
                 "ok": False,
                 "clarification_question": (
@@ -204,7 +216,7 @@ class LLMSplitParser:
                 "errors": ["llm_request_failed"],
             }
 
-        logger.info("LLM split parser completed")
+        log_event(logger, "ai_intent_extraction_success", parser="custom_split")
         return parsed
 
     def _coerce_and_validate_llm_result(

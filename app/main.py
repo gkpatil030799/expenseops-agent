@@ -2,8 +2,10 @@ from __future__ import annotations
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.requests import Request
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.responses import Response
 
 from app.api import (
     ai_memory_routes,
@@ -15,8 +17,10 @@ from app.api import (
 from app.auth import install_dashboard_auth
 from app.config import get_settings
 from app.db import init_db
+from app.logging_config import configure_logging, new_trace_id, reset_trace_id, set_trace_id
 
 settings = get_settings()
+configure_logging(settings)
 app = FastAPI(
     title=settings.app_name,
     version="0.1.0",
@@ -34,6 +38,18 @@ app.add_middleware(
 )
 
 install_dashboard_auth(app, settings)
+
+
+@app.middleware("http")
+async def request_trace_middleware(request: Request, call_next) -> Response:
+    trace_id = request.headers.get("X-Request-ID") or new_trace_id()
+    token = set_trace_id(trace_id)
+    try:
+        response = await call_next(request)
+        response.headers["X-Request-ID"] = trace_id
+        return response
+    finally:
+        reset_trace_id(token)
 
 
 @app.on_event("startup")

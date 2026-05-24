@@ -26,6 +26,7 @@ This app uses **Plaid + Splitwise APIs directly**, not a Splitwise MCP. It is de
 - Plaid `/transactions/sync` ingestion
 - Plaid webhook receiver that queues a sync
 - Local SQLite by default, PostgreSQL-compatible SQLAlchemy models
+- Alembic database migrations for production/private beta deploys
 - Encrypted Plaid access-token storage
 - Splitwise friends/groups lookup
 - Splitwise custom-share `create_expense` posting
@@ -125,6 +126,15 @@ make run
 ```
 
 Backend API and fallback HTML UI:
+
+For local development, startup still creates missing SQLite tables automatically.
+You can also run migrations explicitly:
+
+```bash
+make migrate
+```
+
+This uses `DATABASE_URL` from `.env`, so it works with local SQLite or Postgres.
 
 ```text
 http://localhost:8000
@@ -326,10 +336,40 @@ uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000}
 
 ### 4. Database initialization
 
-For private beta, the app runs SQLAlchemy `create_all()` on startup. This is
-idempotent and creates missing tables in SQLite or Railway Postgres without
-dropping data. Before a public launch, add Alembic migrations and disable
-startup table creation after the schema is stable.
+For local development, the app still runs SQLAlchemy `create_all()` on startup
+as a convenience for SQLite. In production, startup does not run `create_all()`;
+use Alembic migrations instead.
+
+Run migrations locally:
+
+```bash
+make migrate
+```
+
+If your local SQLite database already existed before Alembic was added and the
+tables are already present, mark it as current once:
+
+```bash
+make stamp-db
+```
+
+Run migrations on Railway after setting `DATABASE_URL`:
+
+```bash
+railway run alembic upgrade head
+```
+
+If you deploy with a release/predeploy step, use:
+
+```bash
+alembic upgrade head
+```
+
+Create future migrations after model changes:
+
+```bash
+MESSAGE="add table name" make revision
+```
 
 ### 5. Cost controls
 
@@ -445,6 +485,38 @@ The app uses Splitwise's custom-share format:
 ```
 
 The payer is the authenticated Splitwise user returned by `/get_current_user`.
+
+## Logging & Observability
+
+ExpenseOps uses structured event logs for local debugging and Railway private
+beta operations.
+
+Local logs are readable key/value lines. Production logs are compact JSON so
+Railway can display and filter them cleanly. The default production level is
+`INFO`; local development allows `DEBUG`.
+
+Every HTTP request gets a `trace_id`. Telegram webhook handling reuses that
+trace id across AI parsing, entity resolution, memory lookup, Splitwise posting,
+undo, and related failures. When debugging an AI chat issue, search Railway logs
+for one `trace_id` and inspect events such as:
+
+- `telegram_ai_started`
+- `ai_memory_retrieved`
+- `ai_intent_extraction_success`
+- `ai_entity_resolution_ambiguous`
+- `ai_custom_split_validation_failed`
+- `telegram_ai_fallback`
+- `telegram_split_posted`
+- `telegram_custom_split_posted`
+
+Safe logging policy:
+
+- Do not log Plaid access tokens, Splitwise tokens, OpenAI raw prompts or raw
+  responses, auth headers, webhook verification payloads, passwords, or secrets.
+- Production logs do not include raw Telegram user text.
+- Logs focus on business events, state transitions, external API calls, and safe
+  reason codes like `parse_failed`, `unknown_person`, `duplicate_post`,
+  `split_validation_failed`, and `plaid_verification_failed`.
 
 ## Tests
 

@@ -12,5 +12,14 @@ start:
 test:
 	$(PYTHON) -m pytest -q
 
+migrate:
+	$(PYTHON) -c "from alembic.config import main; main()" upgrade head
+
+revision:
+	$(PYTHON) -c "from alembic.config import main; main()" revision --autogenerate -m "$${MESSAGE:-schema change}"
+
+stamp-db:
+	$(PYTHON) -c "from alembic.config import main; main()" stamp head
+
 lint:
 	$(PYTHON) -m ruff check app tests

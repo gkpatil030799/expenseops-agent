@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import hashlib
+import hmac
+from dataclasses import dataclass
 from typing import Any
 
 from app.config import Settings, get_settings
@@ -11,6 +14,11 @@ class PlaidConfigurationError(RuntimeError):
 
 class PlaidRequestError(RuntimeError):
     pass
+
+
+@dataclass
+class PlaidWebhookVerificationError(RuntimeError):
+    reason: str
 
 
 class PlaidService:
@@ -115,6 +123,48 @@ class PlaidService:
         except Exception as exc:
             raise PlaidRequestError(_plaid_error_message(exc)) from exc
         return response.to_dict()
+
+    def verify_webhook_signature(self, *, raw_body: bytes, verification_header: str) -> None:
+        """Verify Plaid's webhook JWT and exact request-body hash."""
+        if not verification_header:
+            raise PlaidWebhookVerificationError("missing_header")
+
+        try:
+            from jose import jwt
+        except Exception as exc:  # pragma: no cover - dependency/config failure
+            raise PlaidWebhookVerificationError("jwt_dependency_unavailable") from exc
+
+        try:
+            unverified_header = jwt.get_unverified_header(verification_header)
+        except Exception as exc:
+            raise PlaidWebhookVerificationError("invalid_jwt_header") from exc
+
+        key_id = unverified_header.get("kid")
+        if not key_id:
+            raise PlaidWebhookVerificationError("missing_key_id")
+
+        key_response = self.get_webhook_verification_key(str(key_id))
+        jwk = key_response.get("key") or key_response
+        if not isinstance(jwk, dict):
+            raise PlaidWebhookVerificationError("invalid_verification_key")
+
+        try:
+            claims = jwt.decode(
+                verification_header,
+                jwk,
+                algorithms=["ES256"],
+                options={"verify_aud": False},
+            )
+        except Exception as exc:
+            raise PlaidWebhookVerificationError("invalid_signature") from exc
+
+        expected_hash = claims.get("request_body_sha256")
+        if not expected_hash:
+            raise PlaidWebhookVerificationError("missing_body_hash")
+
+        actual_hash = hashlib.sha256(raw_body).hexdigest()
+        if not hmac.compare_digest(str(expected_hash), actual_hash):
+            raise PlaidWebhookVerificationError("body_hash_mismatch")
 
 
 def _plaid_error_message(exc: Exception) -> str:

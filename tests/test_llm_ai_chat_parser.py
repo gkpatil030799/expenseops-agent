@@ -4,7 +4,7 @@ from app.config import Settings
 from app.services.llm_ai_chat_parser import LLMAIChatParser
 
 
-def test_missing_api_key_returns_clarification():
+def test_ai_chat_missing_api_key_returns_clarification():
     result = LLMAIChatParser(Settings(openai_api_key="")).parse(
         user_message="split with Janhavi",
         ai_context={},

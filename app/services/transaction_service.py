@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from typing import Any
@@ -9,6 +10,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.config import Settings, get_settings
+from app.logging_config import log_event
 from app.models import ExpenseTransaction, PlaidItem, TransactionStatus, utc_now
 from app.security import decrypt_secret
 from app.services.agent_service import classify_transaction, transaction_display_name
@@ -25,6 +27,8 @@ from app.services.share_calculator import (
     decimal_to_cents,
 )
 from app.services.splitwise_service import SplitwiseAPIError, SplitwiseService
+
+logger = logging.getLogger(__name__)
 
 
 class TransactionError(RuntimeError):
@@ -55,6 +59,7 @@ class TransactionService:
         self.notification_service = notification_service or NotificationService(self.settings)
 
     def sync_item(self, item: PlaidItem) -> dict[str, int]:
+        log_event(logger, "plaid_sync_started", plaid_item_db_id=item.id)
         plaid = self.plaid_service or PlaidService(self.settings)
         access_token = decrypt_secret(item.access_token_encrypted)
         self._ensure_item_matches_plaid_environment(item, access_token)
@@ -87,6 +92,14 @@ class TransactionService:
         item.cursor = cursor or original_cursor
         item.updated_at = utc_now()
         self.db.commit()
+        log_event(
+            logger,
+            "plaid_sync_completed",
+            plaid_item_db_id=item.id,
+            added=added_count,
+            modified=modified_count,
+            removed=removed_count,
+        )
         return {"added": added_count, "modified": modified_count, "removed": removed_count}
 
     def sync_all_items(self) -> dict[str, dict[str, int | str]]:
@@ -229,6 +242,13 @@ class TransactionService:
         post_pending: bool,
     ) -> tuple[ExpenseTransaction, dict[str, Any]]:
         tx = self.get_transaction(tx_id)
+        log_event(
+            logger,
+            "splitwise_equal_split_started",
+            tx_id=tx_id,
+            group_id=group_id,
+            participant_count=len(friend_user_ids),
+        )
         self._ensure_can_post(tx, post_pending=post_pending)
         payer_user_id = int(self.splitwise_service.get_current_user()["id"])
         shares = build_equal_split_shares(
@@ -263,6 +283,13 @@ class TransactionService:
         post_pending: bool,
     ) -> tuple[ExpenseTransaction, dict[str, Any]]:
         tx = self.get_transaction(tx_id)
+        log_event(
+            logger,
+            "splitwise_custom_split_started",
+            tx_id=tx_id,
+            group_id=group_id,
+            split_mode=split_mode,
+        )
         self._ensure_can_post(tx, post_pending=post_pending)
         resolved_payer_user_id = payer_user_id or int(
             self.splitwise_service.get_current_user()["id"]
@@ -342,8 +369,21 @@ class TransactionService:
             self.db.commit()
             self.db.refresh(tx)
             self.notification_service.notify_splitwise_posted(tx, expense_id)
+            log_event(
+                logger,
+                "splitwise_expense_posted",
+                tx_id=tx.id,
+                splitwise_expense_id=expense_id,
+            )
             return tx, response
         except SplitwiseAPIError as exc:
+            log_event(
+                logger,
+                "splitwise_expense_post_failed",
+                level=logging.WARNING,
+                tx_id=tx.id,
+                reason="splitwise_api_error",
+            )
             tx.status = TransactionStatus.ERROR.value
             tx.last_error = str(exc)
             tx.updated_at = utc_now()
