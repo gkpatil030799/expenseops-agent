@@ -1,5 +1,7 @@
 # ExpenseOps Agent
 
+Private, approval-first expense automation for Plaid card transactions, Splitwise posting, Telegram review, and a React dashboard.
+
 A personal approval-first agent for shared expenses:
 
 ```text
@@ -14,7 +16,7 @@ You search/select Splitwise friends and shares
 Agent posts the confirmed expense to Splitwise
 ```
 
-This scaffold uses **Plaid + Splitwise API directly**, not a Splitwise MCP. The app is built as a backend automation system first, with a small local web UI for testing.
+This app uses **Plaid + Splitwise APIs directly**, not a Splitwise MCP. It is designed for private use and private beta testing, with explicit user approval before anything is posted.
 
 ## What is included
 
@@ -50,16 +52,46 @@ docs/ARCHITECTURE.md    Design and safety notes
 tests/                  Unit tests
 ```
 
-## 1. Install
+## Prerequisites
+
+Recommended versions:
+
+- Python `3.11` or newer
+- Node.js `20` or newer
+- npm `10` or newer
+- Git
+- Plaid developer account
+- Splitwise developer app
+- Optional: Telegram bot token from BotFather
+- Optional: OpenAI API key for AI chat parsing
+- Optional: ngrok for local webhook testing
+
+## Clone
 
 ```bash
+git clone https://github.com/YOUR_USERNAME/expenseops-agent.git
 cd expenseops-agent
+```
+
+## Local Setup
+
+Create and activate a Python virtual environment:
+
+```bash
 python -m venv .venv
 source .venv/bin/activate
 python -m pip install -e ".[dev]"
 ```
 
-## 2. Configure
+Install frontend dependencies:
+
+```bash
+cd frontend
+npm install
+cd ..
+```
+
+Create your local environment file:
 
 ```bash
 cp .env.example .env
@@ -68,9 +100,14 @@ python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().d
 
 Paste the generated key into `APP_SECRET_KEY` in `.env`.
 
-Then fill in:
+Important: `.env` contains secrets and must never be committed. Keep `.env` ignored by git.
+
+Minimum local settings:
 
 ```bash
+ENVIRONMENT="local"
+DATABASE_URL="sqlite:///./expenseops.db"
+FRONTEND_ORIGIN="http://localhost:5173"
 PLAID_CLIENT_ID="..."
 PLAID_SECRET="..."
 PLAID_ENV="sandbox"
@@ -81,14 +118,53 @@ TELEGRAM_CHAT_ID="..."
 TELEGRAM_WEBHOOK_SECRET="..."
 ```
 
+Run the backend:
+
+```bash
+make run
+```
+
+Backend API and fallback HTML UI:
+
+```text
+http://localhost:8000
+```
+
+Run the React dashboard:
+
+```bash
+cd frontend
+npm run dev
+```
+
+Open `http://localhost:5173`.
+
+The Vite dev server proxies `/plaid`, `/transactions`, `/splitwise`, and other backend APIs to `http://localhost:8000`. The original `app/static/index.html` remains available as a fallback at the backend root.
+
+## Splitwise Setup
+
+Recommended for this private beta: use a Splitwise API key.
+
 For Splitwise, generate an API key from your Splitwise app page and paste it into
 `SPLITWISE_API_KEY`. The app sends it as `Authorization: Bearer <api key>`.
 
-Telegram is optional. Leave the Telegram fields blank if you only want console
-logging. Fill them in when you want review notifications and inline button
-actions from the bot.
+```bash
+SPLITWISE_API_KEY="..."
+SPLITWISE_ACCESS_TOKEN=""
+SPLITWISE_AUTH_SCHEME="Bearer"
+```
 
-Optional OAuth 1.0 fallback:
+Optional OAuth 1.0 fallback is supported if you prefer consumer key/secret plus user tokens:
+
+```bash
+SPLITWISE_CONSUMER_KEY="..."
+SPLITWISE_CONSUMER_SECRET="..."
+SPLITWISE_OAUTH_CALLBACK_URL="http://localhost:8000/splitwise/oauth/callback"
+SPLITWISE_OAUTH_TOKEN="..."
+SPLITWISE_OAUTH_TOKEN_SECRET="..."
+```
+
+To generate OAuth 1.0 user tokens:
 
 1. Start the app.
 2. Open `http://localhost:8000/splitwise/oauth/authorize`.
@@ -101,6 +177,8 @@ SPLITWISE_OAUTH_TOKEN_SECRET="..."
 ```
 
 The old bearer-token path still works if `SPLITWISE_ACCESS_TOKEN` is set.
+
+## Plaid Setup
 
 For Plaid Transactions webhooks in local development, expose the backend with
 ngrok and set `PLAID_WEBHOOK_URL` before creating a Plaid Link token:
@@ -115,49 +193,28 @@ then syncs the matching linked item. After a new Item is created, the app also
 runs one initial transactions sync so future `SYNC_UPDATES_AVAILABLE` webhooks
 can fire.
 
-## 3. Run locally
+## OpenAI Setup
 
-### Backend
-
-```bash
-make run
-```
-
-Backend API and fallback HTML UI:
-
-```text
-http://localhost:8000
-```
-
-### React frontend
+OpenAI is optional. Without `OPENAI_API_KEY`, deterministic parsing and Button mode still work.
 
 ```bash
-cd frontend
-npm install
-npm run dev
+OPENAI_API_KEY=""
+OPENAI_MODEL="gpt-4.1-mini"
 ```
 
-Open:
+OpenAI powers Telegram AI chat interpretation and custom split parsing. The app still validates everything deterministically and always requires confirmation before posting.
 
-```text
-http://localhost:5173
-```
+## Telegram Setup
 
-The Vite dev server proxies `/plaid`, `/transactions`, and `/splitwise` to
-`http://localhost:8000`, so the FastAPI APIs stay unchanged. The original
-`app/static/index.html` remains available as a fallback at the backend root.
+Telegram is optional. Leave Telegram fields blank if you only want dashboard review and console logging.
 
-### Telegram webhook with ngrok
-
-Create a Telegram bot with BotFather, paste the bot token into `.env`, and send
-at least one message to the bot from the Telegram chat you want to use. Then get
-the chat id:
+Create a Telegram bot with BotFather, paste the bot token into `.env`, and send at least one message to the bot from the Telegram chat you want to use. Then get the chat id:
 
 ```bash
 curl "https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/getUpdates"
 ```
 
-Paste the chat id into `.env` and set a local webhook secret:
+Paste the chat id into `.env` and set a webhook secret:
 
 ```bash
 TELEGRAM_BOT_TOKEN="..."
@@ -165,13 +222,7 @@ TELEGRAM_CHAT_ID="..."
 TELEGRAM_WEBHOOK_SECRET="choose-a-long-random-string"
 ```
 
-Start the backend:
-
-```bash
-make run
-```
-
-Expose the backend with ngrok:
+Expose the backend locally with ngrok:
 
 ```bash
 ngrok http 8000
@@ -183,22 +234,119 @@ Register the Telegram webhook using your ngrok URL and the same secret:
 curl "https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/setWebhook?url=https://YOUR-NGROK-DOMAIN.ngrok-free.app/telegram/webhook?secret=$TELEGRAM_WEBHOOK_SECRET"
 ```
 
-If `TELEGRAM_WEBHOOK_SECRET` is blank, `/telegram/webhook` remains open for local
-backward compatibility. Use a secret when exposing the app through ngrok.
+If `TELEGRAM_WEBHOOK_SECRET` is blank, `/telegram/webhook` remains open for local backward compatibility. Always use a secret when exposing the app publicly.
 
-Telegram review messages include inline buttons:
+Current Telegram features:
 
-- **Personal** marks the transaction as personal.
-- **Create Draft** replies that friend selection is still required in the dashboard.
-- **Split Equal** replies that selected friends are still required in the dashboard.
-- **Split with people** starts a Telegram split flow.
+- Button mode for deterministic review
+- AI chat mode for natural-language expense instructions
+- People splits and group splits
+- Equal, exact amount, percentage, and share-based custom splits
+- Confirmation before posting
+- Undo after personal or Splitwise-posted actions
+- AI prompt guardrails for unsafe or irrelevant messages
+- AI fallback learning: if AI fails and you complete through Button mode, the app remembers that correction for future prompts
 
-For **Split with people**, send Splitwise friend names separated by commas, for
-example `Rahul, Akash`. The bot searches Splitwise friends by name, asks you to
-choose if a name has multiple matches, and posts the equal split once every name
-is resolved. The **Cancel** button clears the pending Telegram split flow.
+## First-Run Verification Checklist
 
-## 4. Local workflow
+1. Start the backend with `make run`.
+2. Start the frontend with `cd frontend && npm run dev`.
+3. Open `http://localhost:5173`.
+4. Click **Open Plaid Link** and connect a sandbox institution.
+5. Click **Manual sync**.
+6. Confirm pending transactions appear in the dashboard.
+7. Search Splitwise friends by name.
+8. Mark one transaction personal or create a draft before testing real posting.
+9. If Telegram is configured, confirm the bot receives a review message.
+10. Confirm `.env` is not staged with `git status`.
+
+## Railway Deployment
+
+Railway injects a `PORT` variable for the web service and a Postgres
+`DATABASE_URL` when you add a Postgres service. This app keeps SQLite as the
+local default and uses `DATABASE_URL` automatically in production.
+
+Railway’s FastAPI guide recommends deploying from GitHub and defining a start
+command for the server; Railway’s public networking docs expect the app to bind
+to `0.0.0.0` and the Railway-provided port:
+
+- https://docs.railway.com/guides/fastapi
+- https://docs.railway.com/deploy/exposing-your-app
+
+### 1. Create Railway services
+
+1. Push this repo to GitHub.
+2. In Railway, create a new project from the GitHub repo.
+3. Add a Railway Postgres service.
+4. Set the app service `DATABASE_URL` to the Postgres connection string Railway
+   provides. Prefer the private/internal database URL when the app and database
+   are in the same Railway project.
+
+### 2. Set Railway app variables
+
+```bash
+ENVIRONMENT="production"
+ENABLE_DOCS=false
+DATABASE_URL="${{ Postgres.DATABASE_URL }}"
+APP_SECRET_KEY="generated-fernet-key"
+FRONTEND_ORIGIN="https://YOUR-RAILWAY-APP.up.railway.app"
+DASHBOARD_USERNAME="your-private-beta-username"
+DASHBOARD_PASSWORD="a-long-random-password"
+DASHBOARD_API_TOKEN="a-long-random-api-token"
+
+PLAID_CLIENT_ID="..."
+PLAID_SECRET="..."
+PLAID_ENV="sandbox"
+PLAID_WEBHOOK_URL="https://YOUR-RAILWAY-APP.up.railway.app/plaid/webhook"
+
+SPLITWISE_API_KEY="..."
+
+TELEGRAM_BOT_TOKEN="..."
+TELEGRAM_CHAT_ID="..."
+TELEGRAM_WEBHOOK_SECRET="a-long-random-webhook-secret"
+
+OPENAI_API_KEY="..."
+OPENAI_MODEL="gpt-4.1-mini"
+```
+
+`/health`, `/telegram/webhook`, and `/plaid/webhook` remain public. Telegram is
+still protected by `TELEGRAM_WEBHOOK_SECRET`. All dashboard/API routes require
+either Basic auth with `DASHBOARD_USERNAME` and `DASHBOARD_PASSWORD`, or
+`Authorization: Bearer <DASHBOARD_API_TOKEN>`.
+
+### 3. Start command
+
+Railway can use either the Dockerfile or this start command:
+
+```bash
+uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000}
+```
+
+`railway.json` includes this command for non-Docker Railway builds.
+
+### 4. Database initialization
+
+For private beta, the app runs SQLAlchemy `create_all()` on startup. This is
+idempotent and creates missing tables in SQLite or Railway Postgres without
+dropping data. Before a public launch, add Alembic migrations and disable
+startup table creation after the schema is stable.
+
+### 5. Cost controls
+
+Railway documents usage limits and cost controls for avoiding runaway spend:
+
+- https://docs.railway.com/pricing/cost-control
+- https://docs.railway.com/projects/project-usage
+
+For this private beta, set a Railway project usage limit around `$5`:
+
+1. Open the Railway project.
+2. Go to project usage/cost controls.
+3. Set a hard usage limit around `$5`.
+4. Keep preview/PR deployments disabled unless needed.
+5. Use Railway private networking for app-to-Postgres traffic when available.
+
+## Local Workflow
 
 1. Click **Open Plaid Link**.
 2. Link a Plaid sandbox institution or your real Chase card once you are ready for development/production mode.
@@ -306,10 +454,13 @@ make test
 
 ## Security checklist before using real Chase data
 
-- Keep this app private; do not expose it publicly without authentication.
+- Treat real Chase data as private beta production data.
+- Keep this app private; do not expose it publicly without dashboard/API authentication.
 - Use Plaid OAuth/Link only. Do not scrape Chase and do not store Chase credentials.
-- Use a real secret manager for deployment.
-- Use PostgreSQL for deployment.
+- Never commit `.env` or paste real tokens into GitHub issues, screenshots, or logs.
+- Use Railway variables or another secret manager for deployment secrets.
+- Use PostgreSQL for deployment, not SQLite.
 - Enable Plaid webhook verification.
 - Keep `confirm=true` only after explicit user action.
 - Keep duplicate-posting guard enabled.
+- Set Railway usage limits before inviting beta users.

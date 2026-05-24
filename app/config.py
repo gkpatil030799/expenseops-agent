@@ -17,9 +17,16 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
     app_name: str = "ExpenseOps Agent"
-    environment: str = "local"
+    environment: Literal["local", "production"] = "local"
+    enable_docs: bool = False
+    frontend_origin: Annotated[list[str], NoDecode] = Field(
+        default_factory=lambda: ["http://localhost:5173"]
+    )
     database_url: str = "sqlite:///./expenseops.db"
     app_secret_key: str = ""
+    dashboard_username: str = ""
+    dashboard_password: str = ""
+    dashboard_api_token: str = ""
 
     allow_posting_pending_transactions: bool = False
 
@@ -50,10 +57,14 @@ class Settings(BaseSettings):
     openai_api_key: str = ""
     openai_model: str = "gpt-4.1-mini"
 
-    @field_validator("plaid_country_codes", "plaid_products", mode="before")
+    @field_validator("frontend_origin", "plaid_country_codes", "plaid_products", mode="before")
     @classmethod
     def parse_csv(cls, value: str | list[str]) -> list[str]:
         return _csv(value)
+
+    @property
+    def docs_enabled(self) -> bool:
+        return self.environment != "production" or self.enable_docs
 
     @property
     def uses_splitwise_oauth1(self) -> bool:
