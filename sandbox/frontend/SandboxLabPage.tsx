@@ -2,14 +2,17 @@ import {
   AlertTriangle,
   ArrowLeft,
   ArrowRight,
+  CheckCircle2,
   Database,
   FlaskConical,
+  ListChecks,
   Play,
   RadioTower,
   RefreshCw,
   Send,
   ShieldCheck,
   TerminalSquare,
+  XCircle,
 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 
@@ -25,6 +28,7 @@ import { SandboxTransactionsTable } from "./components/SandboxTransactionsTable"
 import {
   Button,
   Card,
+  CopyButton,
   formatDateTime,
   shortId,
   StatusPill,
@@ -34,19 +38,23 @@ import type {
   SandboxCreateTransactionResponse,
   SandboxEvent,
   SandboxRunResponse,
+  SandboxScenarioDefinition,
+  SandboxScenarioResult,
+  SandboxScenarioRunAggregate,
   SandboxStatus,
   SandboxSyncResponse,
   SandboxTransactionRequest,
   SandboxWebhookResponse,
 } from "./types";
 
-type SandboxSection = "overview" | "webhook" | "manual-sync" | "e2e" | "events";
+type SandboxSection = "overview" | "webhook" | "manual-sync" | "e2e" | "scenarios" | "events";
 
 const navItems: Array<{ id: SandboxSection; label: string }> = [
   { id: "overview", label: "Overview" },
   { id: "webhook", label: "Webhook Flow" },
   { id: "manual-sync", label: "Manual Sync Flow" },
   { id: "e2e", label: "Full E2E" },
+  { id: "scenarios", label: "Scenario Runner" },
   { id: "events", label: "Event Explorer" },
 ];
 
@@ -67,6 +75,14 @@ export function SandboxLabPage() {
     useState<SandboxCreateTransactionResponse | null>(null);
   const [webhookResponse, setWebhookResponse] = useState<SandboxWebhookResponse | null>(null);
   const [syncResponse, setSyncResponse] = useState<SandboxSyncResponse | null>(null);
+  const [scenarios, setScenarios] = useState<SandboxScenarioDefinition[]>([]);
+  const [scenarioResults, setScenarioResults] = useState<SandboxScenarioResult[]>([]);
+  const [scenarioAggregate, setScenarioAggregate] = useState<SandboxScenarioRunAggregate | null>(null);
+  const [scenarioRunStatus, setScenarioRunStatus] = useState<{
+    mode: "idle" | "running" | "sleeping";
+    scenarioName?: string;
+    message?: string;
+  }>({ mode: "idle" });
   const [traceFilter, setTraceFilter] = useState("");
   const [eventFilter, setEventFilter] = useState("");
   const [webhookCode, setWebhookCode] = useState("SYNC_UPDATES_AVAILABLE");
@@ -95,6 +111,10 @@ export function SandboxLabPage() {
     }, 3000);
     return () => window.clearInterval(timer);
   }, [autoRefresh, loadEvents, loadStatus, traceFilter]);
+
+  useEffect(() => {
+    void refreshScenarioData();
+  }, []);
 
   async function refreshAll(traceId?: string) {
     await Promise.all([loadStatus(), loadEvents(traceId || traceFilter || undefined)]);
@@ -136,6 +156,58 @@ export function SandboxLabPage() {
     await runAction("reset-events", () => sandboxApiClient.resetEvents());
     setTraceFilter("");
     await refreshAll("");
+  }
+
+  async function refreshScenarioData() {
+    const [scenarioData, runData] = await Promise.all([
+      sandboxApiClient.scenarios(),
+      sandboxApiClient.scenarioRuns(),
+    ]);
+    setScenarios(scenarioData);
+    setScenarioResults(runData.results);
+  }
+
+  async function runScenario(scenarioId: string) {
+    const result = await runAction(`scenario-${scenarioId}`, () =>
+      sandboxApiClient.runScenario(scenarioId),
+    );
+    setScenarioResults((current) => [result, ...current.filter((item) => item.scenario_run_id !== result.scenario_run_id)]);
+    setTraceFilter(result.trace_id);
+    await refreshAll(result.trace_id);
+  }
+
+  async function runAllScenarios() {
+    const results: SandboxScenarioResult[] = [];
+    try {
+      for (const [index, scenario] of scenarios.entries()) {
+        if (index > 0) {
+          setScenarioRunStatus({
+            mode: "sleeping",
+            scenarioName: scenario.name,
+            message: "Sleeping before the next scenario to avoid Plaid Sandbox rate limits.",
+          });
+          await delay(8000 + Math.random() * 2000);
+        }
+        setScenarioRunStatus({
+          mode: "running",
+          scenarioName: scenario.name,
+          message: "Running scenario. Retries may pause here if Plaid Sandbox rate limits transaction create.",
+        });
+        const result = await runAction(`scenario-${scenario.id}`, () =>
+          sandboxApiClient.runScenario(scenario.id),
+        );
+        results.push(result);
+        setScenarioResults((current) => [
+          result,
+          ...current.filter((item) => item.scenario_run_id !== result.scenario_run_id),
+        ]);
+        setTraceFilter(result.trace_id);
+        await refreshAll(result.trace_id);
+      }
+      setScenarioAggregate(aggregateScenarioResults(results));
+    } finally {
+      setScenarioRunStatus({ mode: "idle" });
+    }
   }
 
   const blocked = Boolean(status && (!status.enabled || status.plaid_env !== "sandbox"));
@@ -211,6 +283,25 @@ export function SandboxLabPage() {
             loading={loading}
             runResponse={runResponse}
             onRun={() => void runE2E()}
+          />
+        ) : null}
+
+        {activeSection === "scenarios" ? (
+          <ScenarioRunnerPage
+            blocked={blocked}
+            loading={loading}
+            scenarios={scenarios}
+            results={scenarioResults}
+            aggregate={scenarioAggregate}
+            runStatus={scenarioRunStatus}
+            onRun={(scenarioId) => void runScenario(scenarioId)}
+            onRunAll={() => void runAllScenarios()}
+            onRefresh={() => void refreshScenarioData()}
+            onShowEvents={(traceId) => {
+              setTraceFilter(traceId);
+              setActiveSection("events");
+              void loadEvents(traceId);
+            }}
           />
         ) : null}
 
@@ -471,6 +562,262 @@ function FullE2EPage({
       />
       <SandboxRunPanel loading={loading === "run-e2e" || blocked} response={runResponse} onRun={onRun} />
     </div>
+  );
+}
+
+function ScenarioRunnerPage({
+  blocked,
+  loading,
+  scenarios,
+  results,
+  aggregate,
+  runStatus,
+  onRun,
+  onRunAll,
+  onRefresh,
+  onShowEvents,
+}: {
+  blocked: boolean;
+  loading: string | null;
+  scenarios: SandboxScenarioDefinition[];
+  results: SandboxScenarioResult[];
+  aggregate: SandboxScenarioRunAggregate | null;
+  runStatus: {
+    mode: "idle" | "running" | "sleeping";
+    scenarioName?: string;
+    message?: string;
+  };
+  onRun: (scenarioId: string) => void;
+  onRunAll: () => void;
+  onRefresh: () => void;
+  onShowEvents: (traceId: string) => void;
+}) {
+  const latestByScenario = new Map(results.map((result) => [result.scenario_id, result]));
+
+  return (
+    <div className="space-y-5">
+      <FlowHeader
+        title="Scenario Runner"
+        description="Run repeatable Sandbox Lab QA scenarios with assertions and traceable event results."
+      />
+      {runStatus.mode !== "idle" ? (
+        <Card className="p-4">
+          <div className="flex flex-wrap items-center gap-3">
+            <StatusPill value={runStatus.mode === "running" ? "running" : "warning"} label={runStatus.mode} />
+            <span className="text-sm font-semibold text-slate-950">
+              {runStatus.scenarioName}
+            </span>
+            <span className="text-sm text-slate-600">{runStatus.message}</span>
+          </div>
+        </Card>
+      ) : null}
+      <div className="flex flex-wrap gap-2">
+        <Button disabled={blocked || runStatus.mode !== "idle"} onClick={onRunAll}>
+          <Play className="h-4 w-4" />
+          {runStatus.mode !== "idle" ? "Running..." : "Run All Scenarios"}
+        </Button>
+        <Button variant="secondary" onClick={onRefresh}>
+          <RefreshCw className="h-4 w-4" />
+          Refresh Results
+        </Button>
+      </div>
+      {aggregate ? (
+        <Card className="p-4">
+          <div className="flex flex-wrap items-center gap-3">
+            <StatusPill value={aggregate.status} label={`Run all: ${aggregate.status}`} />
+            <span className="text-sm text-slate-600">
+              {aggregate.passed}/{aggregate.total} passed, {aggregate.failed} failed,{" "}
+              {aggregate.errors} errors, {aggregate.rate_limit_errors} rate-limit errors
+            </span>
+          </div>
+        </Card>
+      ) : null}
+      <div className="grid gap-4 lg:grid-cols-2">
+        {scenarios.map((scenario) => (
+          <ScenarioCard
+            key={scenario.id}
+            scenario={scenario}
+            latestResult={latestByScenario.get(scenario.id)}
+            loading={loading === `scenario-${scenario.id}`}
+            blocked={blocked}
+            onRun={() => onRun(scenario.id)}
+            onShowEvents={onShowEvents}
+          />
+        ))}
+      </div>
+      <ScenarioResultsTable results={results.slice(0, 8)} onShowEvents={onShowEvents} />
+    </div>
+  );
+}
+
+function aggregateScenarioResults(results: SandboxScenarioResult[]): SandboxScenarioRunAggregate {
+  const passed = results.filter((result) => result.status === "passed").length;
+  const failed = results.filter((result) => result.status === "failed").length;
+  const partial = results.filter((result) => result.status === "partial").length;
+  const errors = results.filter((result) => result.status === "error").length;
+  const rateLimitErrors = results.filter((result) => result.error_details?.rate_limit_error).length;
+  let status: SandboxScenarioRunAggregate["status"] = "passed";
+  if (errors > 0 && failed === 0) status = "error";
+  else if (failed > 0 || errors > 0) status = "failed";
+  else if (partial > 0) status = "partial";
+  return {
+    status,
+    total: results.length,
+    passed,
+    failed,
+    partial,
+    errors,
+    rate_limit_errors: rateLimitErrors,
+    passed_count: passed,
+    failed_count: failed,
+    error_count: errors,
+    rate_limit_error_count: rateLimitErrors,
+    results,
+  };
+}
+
+function delay(ms: number) {
+  return new Promise((resolve) => window.setTimeout(resolve, ms));
+}
+
+function ScenarioCard({
+  scenario,
+  latestResult,
+  loading,
+  blocked,
+  onRun,
+  onShowEvents,
+}: {
+  scenario: SandboxScenarioDefinition;
+  latestResult?: SandboxScenarioResult;
+  loading: boolean;
+  blocked: boolean;
+  onRun: () => void;
+  onShowEvents: (traceId: string) => void;
+}) {
+  return (
+    <Card className="p-5">
+      <div className="flex items-start justify-between gap-3">
+        <div>
+          <h2 className="text-base font-semibold text-slate-950">{scenario.name}</h2>
+          <p className="mt-1 text-sm leading-6 text-slate-500">{scenario.description}</p>
+        </div>
+        <StatusPill value={latestResult?.status || "unknown"} label={latestResult?.status || "not run"} />
+      </div>
+      <div className="mt-3 flex flex-wrap gap-2 text-xs">
+        <span className="rounded-full bg-slate-100 px-2 py-1 font-semibold text-slate-600">
+          {scenario.flow}
+        </span>
+        {scenario.tags.map((tag) => (
+          <span key={tag} className="rounded-full bg-white px-2 py-1 text-slate-500 ring-1 ring-slate-200">
+            {tag}
+          </span>
+        ))}
+      </div>
+      <div className="mt-4 flex flex-wrap gap-2">
+        <Button disabled={blocked || loading} onClick={onRun}>
+          <Play className="h-4 w-4" />
+          {loading ? "Running..." : "Run"}
+        </Button>
+        {latestResult ? (
+          <Button variant="secondary" onClick={() => onShowEvents(latestResult.trace_id)}>
+            Open events for this trace
+          </Button>
+        ) : null}
+      </div>
+      {latestResult ? <ScenarioResultPanel result={latestResult} compact /> : null}
+    </Card>
+  );
+}
+
+function ScenarioResultsTable({
+  results,
+  onShowEvents,
+}: {
+  results: SandboxScenarioResult[];
+  onShowEvents: (traceId: string) => void;
+}) {
+  if (!results.length) {
+    return (
+      <Card className="p-6 text-sm text-slate-500">
+        No scenario runs yet.
+      </Card>
+    );
+  }
+  return (
+    <div className="space-y-4">
+      {results.map((result) => (
+        <ScenarioResultPanel key={result.scenario_run_id} result={result} onShowEvents={onShowEvents} />
+      ))}
+    </div>
+  );
+}
+
+function ScenarioResultPanel({
+  result,
+  compact = false,
+  onShowEvents,
+}: {
+  result: SandboxScenarioResult;
+  compact?: boolean;
+  onShowEvents?: (traceId: string) => void;
+}) {
+  return (
+    <Card className={compact ? "mt-4 p-4" : "p-5"}>
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <div className="flex flex-wrap items-center gap-2">
+            <StatusPill value={result.status} label={result.status} />
+            <span className="text-sm font-semibold text-slate-950">{result.scenario_name}</span>
+          </div>
+          <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-slate-500">
+            <span>trace {shortId(result.trace_id, 12)}</span>
+            <CopyButton value={result.trace_id} label="Copy trace ID" />
+            <span>{result.duration_ms} ms</span>
+          </div>
+        </div>
+        {onShowEvents ? (
+          <Button variant="secondary" onClick={() => onShowEvents(result.trace_id)}>
+            Open events for this trace
+          </Button>
+        ) : null}
+      </div>
+      {result.error_details?.rate_limit_error ? (
+        <div className="mt-4 rounded-md border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">
+          Plaid Sandbox rate limit hit. Wait a bit or rerun this scenario individually.
+        </div>
+      ) : result.error_message ? (
+        <div className="mt-4 rounded-md border border-red-200 bg-red-50 p-3 text-sm text-red-700">
+          {result.error_message}
+        </div>
+      ) : null}
+      <div className="mt-4 grid gap-2 md:grid-cols-2">
+        {result.assertions.map((assertion) => {
+          const Icon = assertion.status === "passed" ? CheckCircle2 : assertion.status === "failed" ? XCircle : ListChecks;
+          return (
+            <div
+              key={assertion.name}
+              className="rounded-md border border-slate-200 bg-white p-3 text-sm"
+            >
+              <div className="flex items-center gap-2 font-semibold text-slate-800">
+                <Icon className="h-4 w-4" />
+                {assertion.name}
+                <StatusPill value={assertion.status} />
+              </div>
+              {assertion.status === "failed" ? (
+                <p className="mt-1 text-xs text-red-700">{assertion.message}</p>
+              ) : null}
+            </div>
+          );
+        })}
+      </div>
+      {!compact ? (
+        <div className="mt-4 grid gap-3 lg:grid-cols-2">
+          <SandboxJsonViewer title="Event summary" data={result.events_summary} />
+          <SandboxJsonViewer title="Raw scenario result JSON" data={result} />
+        </div>
+      ) : null}
+    </Card>
   );
 }
 

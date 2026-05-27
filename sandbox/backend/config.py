@@ -10,6 +10,8 @@ from app.config import get_settings
 SANDBOX_ROOT = Path(__file__).resolve().parents[1]
 STATE_PATH = SANDBOX_ROOT / "state" / "sandbox_state.local.json"
 EVENT_LOG_PATH = SANDBOX_ROOT / "logs" / "sandbox_events.jsonl"
+SCENARIO_RUN_LOG_PATH = SANDBOX_ROOT / "logs" / "scenario_runs.jsonl"
+SCENARIOS_PATH = SANDBOX_ROOT / "scenarios"
 
 
 class SandboxSettings(BaseSettings):
@@ -17,6 +19,7 @@ class SandboxSettings(BaseSettings):
 
     enable_expenseops_sandbox_lab: bool = False
     sandbox_public_webhook_url: str = ""
+    sandbox_scenario_run_all_delay_seconds: int = 8
 
     @property
     def app_settings(self):

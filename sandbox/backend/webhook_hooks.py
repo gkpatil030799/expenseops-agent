@@ -8,7 +8,7 @@ from sandbox.backend.config import get_sandbox_settings
 from sandbox.backend.event_store import SandboxEventStore
 from sandbox.backend.state import SandboxStateStore
 
-_TRACE_PATTERN = re.compile(r"\[trace:(sandbox_[^\]]+)\]")
+_TRACE_PATTERN = re.compile(r"\[trace:((?:sandbox|scenario)_[^\]]+)\]")
 _SYNC_KEYS_IN_PROGRESS: set[str] = set()
 
 

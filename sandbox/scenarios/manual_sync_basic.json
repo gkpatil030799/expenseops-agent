@@ -1,0 +1,21 @@
+{
+  "id": "manual_sync_basic",
+  "name": "Manual sync basic",
+  "description": "Create a transaction, explicitly pull Transactions Sync, and verify import.",
+  "flow": "manual_sync",
+  "transaction": {
+    "description": "ExpenseOps Scenario Manual Sync",
+    "amount": 12.34,
+    "currency": "USD"
+  },
+  "expectations": {
+    "transaction_created": true,
+    "sync_completed": true,
+    "imported_transaction_visible": true,
+    "telegram_sent_min": 0,
+    "telegram_sent_max": 1,
+    "no_integrity_error": true,
+    "no_loop_guard_triggered": true
+  },
+  "tags": ["manual-sync"]
+}

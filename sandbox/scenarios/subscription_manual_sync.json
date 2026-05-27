@@ -1,0 +1,21 @@
+{
+  "id": "subscription_manual_sync",
+  "name": "Subscription manual sync",
+  "description": "Create an OpenAI-style subscription transaction and verify the review flow remains safe.",
+  "flow": "manual_sync",
+  "transaction": {
+    "description": "OpenAI Scenario Subscription",
+    "amount": 20.00,
+    "currency": "USD"
+  },
+  "expectations": {
+    "transaction_created": true,
+    "sync_completed": true,
+    "review_needed_visible": true,
+    "telegram_sent_min": 0,
+    "telegram_sent_max": 1,
+    "no_integrity_error": true,
+    "no_loop_guard_triggered": true
+  },
+  "tags": ["manual-sync", "subscription"]
+}

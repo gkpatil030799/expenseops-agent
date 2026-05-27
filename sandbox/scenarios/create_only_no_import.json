@@ -1,0 +1,20 @@
+{
+  "id": "create_only_no_import",
+  "name": "Create-only no import",
+  "description": "Create a Plaid Sandbox transaction without importing or notifying.",
+  "flow": "create_only",
+  "transaction": {
+    "description": "ExpenseOps Scenario Create Only",
+    "amount": 12.34,
+    "currency": "USD"
+  },
+  "expectations": {
+    "transaction_created": true,
+    "telegram_sent_min": 0,
+    "telegram_sent_max": 0,
+    "no_integrity_error": true,
+    "no_loop_guard_triggered": true,
+    "no_boundary_violation": true
+  },
+  "tags": ["boundary", "create-only"]
+}

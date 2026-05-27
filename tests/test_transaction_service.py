@@ -383,6 +383,106 @@ def test_repeated_sync_same_transaction_is_idempotent(tmp_path, monkeypatch):
     db.close()
 
 
+def test_create_only_scenario_transaction_imported_later_skips_notification(
+    tmp_path,
+    monkeypatch,
+    caplog,
+):
+    db = _sqlite_session(tmp_path)
+    item = db.get(PlaidItem, 1)
+    notifications = FakeNotificationService()
+    trace = "scenario_create_only_no_import_20260527_a1b2c3"
+
+    class FakePlaidService:
+        def transactions_sync(self, *, access_token, cursor):
+            return {
+                "added": [
+                    _plaid_tx(
+                        "tx-create-only-leaked",
+                        pending=False,
+                        name=f"Scenario Coffee [trace:{trace}]",
+                    )
+                ],
+                "modified": [],
+                "removed": [],
+                "next_cursor": "cursor",
+                "has_more": False,
+            }
+
+    monkeypatch.setattr(transaction_service, "decrypt_secret", lambda _encrypted: "access-token")
+    service = TransactionService(
+        db,
+        plaid_service=FakePlaidService(),
+        splitwise_service=object(),
+        notification_service=notifications,
+    )
+
+    with caplog.at_level(logging.INFO):
+        result = service.sync_item(item)
+
+    tx = db.query(ExpenseTransaction).filter_by(plaid_transaction_id="tx-create-only-leaked").one()
+    assert result["added"] == 1
+    assert notifications.review_notifications == []
+    assert tx.review_notification_sent_at is not None
+    assert any(
+        getattr(record, "event", None) == "scenario_create_only_imported_later_skipped_notification"
+        and record.log_metadata["transaction_id"] == tx.id
+        and record.log_metadata["plaid_transaction_id"] == "tx-create-only-leaked"
+        and record.log_metadata["trace_id"] == trace
+        and record.log_metadata["scenario_id"] == "create_only_no_import"
+        for record in caplog.records
+    )
+    db.close()
+
+
+@pytest.mark.parametrize(
+    ("scenario_id", "plaid_transaction_id"),
+    [
+        ("manual_sync_basic", "tx-manual-scenario"),
+        ("webhook_basic", "tx-webhook-scenario"),
+    ],
+)
+def test_non_create_only_scenario_transaction_still_sends_notification(
+    tmp_path,
+    monkeypatch,
+    scenario_id,
+    plaid_transaction_id,
+):
+    db = _sqlite_session(tmp_path)
+    item = db.get(PlaidItem, 1)
+    notifications = FakeNotificationService()
+    trace = f"scenario_{scenario_id}_20260527_a1b2c3"
+
+    class FakePlaidService:
+        def transactions_sync(self, *, access_token, cursor):
+            return {
+                "added": [
+                    _plaid_tx(
+                        plaid_transaction_id,
+                        pending=False,
+                        name=f"Scenario Coffee [trace:{trace}]",
+                    )
+                ],
+                "modified": [],
+                "removed": [],
+                "next_cursor": "cursor",
+                "has_more": False,
+            }
+
+    monkeypatch.setattr(transaction_service, "decrypt_secret", lambda _encrypted: "access-token")
+    TransactionService(
+        db,
+        plaid_service=FakePlaidService(),
+        splitwise_service=object(),
+        notification_service=notifications,
+    ).sync_item(item)
+
+    tx = db.query(ExpenseTransaction).filter_by(plaid_transaction_id=plaid_transaction_id).one()
+    assert notifications.review_notifications == [tx.id]
+    assert tx.review_notification_sent_at is not None
+    db.close()
+
+
 def test_notify_ready_transactions_for_item_uses_atomic_claim(tmp_path):
     db = _sqlite_session(tmp_path)
     item = db.get(PlaidItem, 1)

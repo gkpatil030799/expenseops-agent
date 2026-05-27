@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from decimal import Decimal
@@ -31,6 +32,9 @@ from app.services.share_calculator import (
 from app.services.splitwise_service import SplitwiseAPIError, SplitwiseService
 
 logger = logging.getLogger(__name__)
+
+_SCENARIO_TRACE_PATTERN = re.compile(r"\[trace:(scenario_([a-z0-9_]+)_\d{8}_[a-f0-9]+)\]")
+_NO_NOTIFY_SCENARIO_IDS = {"create_only_no_import"}
 
 
 class TransactionError(RuntimeError):
@@ -256,11 +260,15 @@ class TransactionService:
                 )
             self.db.commit()
         else:
+            skip_reason = self._notification_skip_reason(tx)
+            if skip_reason == "scenario_create_only_no_import":
+                self._skip_scenario_create_only_notification(tx)
+                self.db.commit()
             log_event(
                 logger,
                 "transaction_notification_skipped",
                 tx_id=tx.id,
-                reason=self._notification_skip_reason(tx),
+                reason=skip_reason,
                 status=tx.status,
                 pending=tx.pending,
             )
@@ -356,9 +364,13 @@ class TransactionService:
             return False
         if tx.review_notification_sent_at is not None:
             return False
+        if _scenario_id_for_no_notify(tx):
+            return False
         return created or previous_pending is True
 
     def _notification_skip_reason(self, tx: ExpenseTransaction) -> str:
+        if _scenario_id_for_no_notify(tx):
+            return "scenario_create_only_no_import"
         if tx.status != TransactionStatus.ASK_USER.value:
             return "status_not_ask_user"
         if tx.pending:
@@ -391,6 +403,10 @@ class TransactionService:
         for tx in rows:
             if tx.id in exclude_tx_ids:
                 continue
+            if _scenario_id_for_no_notify(tx):
+                self._skip_scenario_create_only_notification(tx)
+                skipped += 1
+                continue
             if self._attempt_review_notification(tx):
                 sent += 1
             else:
@@ -399,6 +415,30 @@ class TransactionService:
         if eligible:
             self.db.commit()
         return {"eligible": eligible, "sent": sent, "skipped": skipped}
+
+    def _skip_scenario_create_only_notification(self, tx: ExpenseTransaction) -> None:
+        trace_id, scenario_id = _scenario_trace_metadata(tx)
+        tx.review_notification_sent_at = tx.review_notification_sent_at or utc_now()
+        tx.updated_at = utc_now()
+        log_event(
+            logger,
+            "scenario_create_only_imported_later_skipped_notification",
+            transaction_id=tx.id,
+            plaid_transaction_id=tx.plaid_transaction_id,
+            trace_id=trace_id,
+            scenario_id=scenario_id,
+        )
+        self._sandbox_telegram_event(
+            tx,
+            event_type="scenario_create_only_imported_later_skipped_notification",
+            status="info",
+            payload={
+                "transaction_id": tx.id,
+                "plaid_transaction_id": tx.plaid_transaction_id,
+                "trace_id": trace_id,
+                "scenario_id": scenario_id,
+            },
+        )
 
     def _attempt_review_notification(self, tx: ExpenseTransaction) -> bool:
         log_event(
@@ -784,6 +824,23 @@ def _plaid_token_environment(access_token: str) -> str | None:
         return "production"
     if access_token.startswith("access-development-"):
         return "development"
+    return None
+
+
+def _scenario_trace_metadata(tx: ExpenseTransaction) -> tuple[str | None, str | None]:
+    for value in (tx.name, tx.merchant_name):
+        if not value:
+            continue
+        match = _SCENARIO_TRACE_PATTERN.search(str(value))
+        if match:
+            return match.group(1), match.group(2)
+    return None, None
+
+
+def _scenario_id_for_no_notify(tx: ExpenseTransaction) -> str | None:
+    _trace_id, scenario_id = _scenario_trace_metadata(tx)
+    if scenario_id in _NO_NOTIFY_SCENARIO_IDS:
+        return scenario_id
     return None
 
 

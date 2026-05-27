@@ -8,6 +8,7 @@ from sandbox.backend.event_store import SandboxEventStore, new_trace_id
 from sandbox.backend.guards import require_sandbox_plaid_env
 from sandbox.backend.plaid_sandbox_service import SandboxPlaidError
 from sandbox.backend.sandbox_orchestrator import SandboxOrchestrator
+from sandbox.backend.scenario_runner import ScenarioRunner
 from sandbox.backend.schemas import (
     CreateItemResponse,
     CreateTransactionRequest,
@@ -19,6 +20,10 @@ from sandbox.backend.schemas import (
     ResetEventsResponse,
     RunE2EResponse,
     SandboxStatusResponse,
+    ScenarioDefinition,
+    ScenarioResult,
+    ScenarioRunAggregateResponse,
+    ScenarioRunsResponse,
     SyncNowRequest,
     SyncNowResponse,
 )
@@ -29,6 +34,10 @@ router = APIRouter(prefix="/api/sandbox", tags=["sandbox-lab"])
 
 def _orchestrator(db: DbSession, settings: SandboxSettings) -> SandboxOrchestrator:
     return SandboxOrchestrator(db=db, settings=settings)
+
+
+def _scenario_runner(db: DbSession, settings: SandboxSettings) -> ScenarioRunner:
+    return ScenarioRunner(db=db, settings=settings)
 
 
 @router.get("/status", response_model=SandboxStatusResponse)
@@ -125,3 +134,76 @@ def reset_events(_settings: SandboxSettings = Depends(require_sandbox_plaid_env)
 @router.post("/trace-id")
 def create_trace_id(_settings: SandboxSettings = Depends(require_sandbox_plaid_env)) -> dict:
     return {"trace_id": new_trace_id()}
+
+
+@router.get("/scenarios", response_model=list[ScenarioDefinition])
+def list_scenarios(
+    db: DbSession,
+    settings: SandboxSettings = Depends(require_sandbox_plaid_env),
+) -> list[ScenarioDefinition]:
+    return _scenario_runner(db, settings).list_scenarios()
+
+
+@router.get("/scenarios/{scenario_id}", response_model=ScenarioDefinition)
+def get_scenario(
+    scenario_id: str,
+    db: DbSession,
+    settings: SandboxSettings = Depends(require_sandbox_plaid_env),
+) -> ScenarioDefinition:
+    try:
+        return _scenario_runner(db, settings).get_scenario(scenario_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=f"Scenario not found: {scenario_id}") from exc
+
+
+@router.post("/scenarios/{scenario_id}/run", response_model=ScenarioResult)
+def run_scenario(
+    scenario_id: str,
+    db: DbSession,
+    settings: SandboxSettings = Depends(require_sandbox_plaid_env),
+) -> ScenarioResult:
+    try:
+        return _scenario_runner(db, settings).run_scenario(scenario_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=f"Scenario not found: {scenario_id}") from exc
+
+
+@router.post("/scenarios/run-all", response_model=ScenarioRunAggregateResponse)
+def run_all_scenarios(
+    db: DbSession,
+    settings: SandboxSettings = Depends(require_sandbox_plaid_env),
+) -> ScenarioRunAggregateResponse:
+    return _scenario_runner(db, settings).run_all()
+
+
+@router.get("/scenario-runs", response_model=ScenarioRunsResponse)
+def list_scenario_runs(
+    db: DbSession,
+    limit: int = Query(default=50, ge=1, le=500),
+    settings: SandboxSettings = Depends(require_sandbox_plaid_env),
+) -> ScenarioRunsResponse:
+    return ScenarioRunsResponse(results=_scenario_runner(db, settings).list_results(limit=limit))
+
+
+@router.get("/scenario-runs/{scenario_run_id}", response_model=ScenarioResult)
+def get_scenario_run(
+    scenario_run_id: str,
+    db: DbSession,
+    settings: SandboxSettings = Depends(require_sandbox_plaid_env),
+) -> ScenarioResult:
+    try:
+        return _scenario_runner(db, settings).get_result(scenario_run_id)
+    except KeyError as exc:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Scenario run not found: {scenario_run_id}",
+        ) from exc
+
+
+@router.post("/scenario-runs/reset", response_model=ResetEventsResponse)
+def reset_scenario_runs(
+    db: DbSession,
+    settings: SandboxSettings = Depends(require_sandbox_plaid_env),
+) -> dict:
+    _scenario_runner(db, settings).clear_results()
+    return {"cleared": True}

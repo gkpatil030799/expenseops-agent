@@ -113,3 +113,87 @@ class EventsResponse(BaseModel):
 
 class ResetEventsResponse(BaseModel):
     cleared: bool
+
+
+class ScenarioTransaction(BaseModel):
+    description: str
+    amount: Decimal
+    iso_currency_code: str = "USD"
+    date_transacted: date | None = None
+    date_posted: date | None = None
+
+    @field_validator("iso_currency_code", mode="before")
+    @classmethod
+    def normalize_scenario_currency(cls, value: str | None) -> str:
+        return (value or "USD").upper()
+
+
+class ScenarioExpectations(BaseModel):
+    transaction_created: bool | None = None
+    webhook_fired: bool | None = None
+    webhook_received: bool | None = None
+    sync_completed: bool | None = None
+    imported_transaction_visible: bool | None = None
+    review_needed_visible: bool | None = None
+    telegram_sent_min: int | None = None
+    telegram_sent_max: int | None = None
+    no_integrity_error: bool | None = None
+    no_loop_guard_triggered: bool | None = None
+    no_boundary_violation: bool | None = None
+
+
+class ScenarioDefinition(BaseModel):
+    id: str
+    name: str
+    description: str
+    flow: Literal["create_only", "manual_sync", "webhook", "e2e"]
+    transaction: ScenarioTransaction | None = None
+    expectations: ScenarioExpectations = Field(default_factory=ScenarioExpectations)
+    timeout_seconds: int = Field(default=30, ge=1, le=300)
+    tags: list[str] = Field(default_factory=list)
+    enabled: bool = True
+
+
+class ScenarioAssertionResult(BaseModel):
+    name: str
+    status: Literal["passed", "failed", "skipped"]
+    expected: Any = None
+    actual: Any = None
+    message: str = ""
+
+
+class ScenarioResult(BaseModel):
+    scenario_id: str
+    scenario_name: str
+    scenario_run_id: str
+    trace_id: str
+    status: Literal["passed", "failed", "partial", "error"]
+    started_at: str
+    completed_at: str
+    duration_ms: int
+    flow: Literal["create_only", "manual_sync", "webhook", "e2e"]
+    transaction_summary: dict[str, Any] = Field(default_factory=dict)
+    assertions: list[ScenarioAssertionResult] = Field(default_factory=list)
+    events_summary: dict[str, Any] = Field(default_factory=dict)
+    raw_events: list[dict[str, Any]] = Field(default_factory=list)
+    error_message: str | None = None
+    error_details: dict[str, Any] = Field(default_factory=dict)
+
+
+class ScenarioRunsResponse(BaseModel):
+    results: list[ScenarioResult]
+
+
+class ScenarioRunAggregateResponse(BaseModel):
+    status: Literal["passed", "failed", "partial", "error"]
+    total: int
+    passed: int
+    failed: int
+    partial: int
+    errors: int
+    rate_limit_errors: int = 0
+    passed_count: int = 0
+    failed_count: int = 0
+    error_count: int = 0
+    rate_limit_error_count: int = 0
+    results: list[ScenarioResult]
