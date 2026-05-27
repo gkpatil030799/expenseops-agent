@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass
 from decimal import ROUND_HALF_UP, Decimal
 from html import escape
@@ -16,6 +17,8 @@ from app.services.recommendation_service import classify_transaction_recommendat
 from app.services.share_calculator import cents_to_decimal_string
 
 logger = logging.getLogger(__name__)
+
+_SCENARIO_TRACE_PATTERN = re.compile(r"\[trace:scenario_([^_\]]+(?:_[^_\]]+)*)_\d{8}_[a-f0-9]+\]")
 
 
 class TelegramService:
@@ -149,7 +152,7 @@ def format_ask_user_transaction_message(tx: ExpenseTransaction) -> str:
         [
             "🧾 <b>ExpenseOps review needed</b>",
             "",
-            f"🏪 <b>Merchant</b>: {html(transaction_display_name(tx))}",
+            f"🏪 <b>Merchant</b>: {html(_telegram_merchant_display(tx))}",
             f"💳 <b>Amount</b>: {html(tx.iso_currency_code)} {html(amount)}",
             f"📌 <b>Status</b>: {html(tx.status)}",
             f"🧠 <b>Recommendation</b>: {html(classification.suggestion)}",
@@ -158,6 +161,25 @@ def format_ask_user_transaction_message(tx: ExpenseTransaction) -> str:
             f"❓ <b>Question</b>: {html(question)}",
         ]
     )
+
+
+def _telegram_merchant_display(tx: ExpenseTransaction) -> str:
+    scenario_name = _scenario_name_from_transaction(tx)
+    if scenario_name:
+        return f"Scenario: {scenario_name}"
+    return transaction_display_name(tx)
+
+
+def _scenario_name_from_transaction(tx: ExpenseTransaction) -> str | None:
+    for value in (tx.name, tx.merchant_name):
+        if not value:
+            continue
+        match = _SCENARIO_TRACE_PATTERN.search(str(value))
+        if not match:
+            continue
+        scenario_id = match.group(1)
+        return scenario_id.replace("_", " ").capitalize()
+    return None
 
 
 def compact_transaction_title(tx: ExpenseTransaction) -> str:

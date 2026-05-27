@@ -55,6 +55,23 @@ def test_formatting_escapes_html():
     assert "Coffee &amp; &lt;Bagels&gt;" in message
 
 
+def test_scenario_runner_transaction_uses_scenario_name_as_merchant():
+    tx = make_tx()
+    tx.merchant_name = None
+    tx.name = "ExpenseOps Scenario Manual Sync [trace:scenario_manual_sync_basic_20260527_a1b2c3]"
+
+    message = format_ask_user_transaction_message(tx)
+
+    assert "Merchant</b>: Scenario: Manual sync basic" in message
+    assert "ExpenseOps Scenario Manual Sync" not in message
+
+
+def test_non_scenario_transaction_uses_regular_merchant():
+    message = format_ask_user_transaction_message(make_tx())
+
+    assert "Merchant</b>: Costco" in message
+
+
 def test_build_review_inline_keyboard_has_safe_callback_data():
     keyboard = build_review_inline_keyboard(12)
     buttons = keyboard["inline_keyboard"][0]

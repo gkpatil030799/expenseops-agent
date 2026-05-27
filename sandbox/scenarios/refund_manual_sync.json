@@ -1,0 +1,20 @@
+{
+  "id": "refund_manual_sync",
+  "name": "Refund manual sync",
+  "description": "Create a refund-style negative transaction and verify manual sync handles it safely.",
+  "flow": "manual_sync",
+  "transaction": {
+    "description": "ExpenseOps Scenario Refund",
+    "amount": -9.99,
+    "currency": "USD"
+  },
+  "expectations": {
+    "transaction_created": true,
+    "sync_completed": true,
+    "telegram_sent_min": 0,
+    "telegram_sent_max": 1,
+    "no_integrity_error": true,
+    "no_loop_guard_triggered": true
+  },
+  "tags": ["manual-sync", "refund"]
+}

@@ -1,0 +1,22 @@
+{
+  "id": "webhook_basic",
+  "name": "Webhook basic",
+  "description": "Create a transaction, ask Plaid to fire webhook, and verify webhook-driven sync.",
+  "flow": "webhook",
+  "transaction": {
+    "description": "ExpenseOps Scenario Webhook",
+    "amount": 12.34,
+    "currency": "USD"
+  },
+  "expectations": {
+    "transaction_created": true,
+    "webhook_fired": true,
+    "webhook_received": true,
+    "sync_completed": true,
+    "telegram_sent_min": 0,
+    "telegram_sent_max": 1,
+    "no_integrity_error": true,
+    "no_loop_guard_triggered": true
+  },
+  "tags": ["webhook"]
+}

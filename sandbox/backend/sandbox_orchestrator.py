@@ -440,8 +440,8 @@ class SandboxOrchestrator:
         finally:
             sandbox_sync_guard_finish(sync_guard)
 
-    def run_e2e(self) -> dict[str, Any]:
-        trace_id = new_trace_id()
+    def run_e2e(self, trace_id: str | None = None) -> dict[str, Any]:
+        trace_id = trace_id or new_trace_id()
         steps: list[StepStatus] = []
         details: dict[str, Any] = {}
         self._event(trace_id, "sandbox_e2e_started", "started", source_action="e2e")

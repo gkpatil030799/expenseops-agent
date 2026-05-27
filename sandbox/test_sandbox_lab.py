@@ -11,7 +11,16 @@ from app.db import Base
 from sandbox.backend.config import SandboxSettings
 from sandbox.backend.event_store import SandboxEventStore, new_trace_id
 from sandbox.backend.guards import require_sandbox_lab_enabled, require_sandbox_plaid_env
+from sandbox.backend.plaid_sandbox_service import SandboxPlaidError
 from sandbox.backend.sandbox_orchestrator import SandboxOrchestrator, _parse_integrity_error_text
+from sandbox.backend.scenario_runner import (
+    ScenarioLoadError,
+    ScenarioRunner,
+    assert_expectations,
+    is_retryable_sandbox_error,
+    summarize_events,
+)
+from sandbox.backend.schemas import ScenarioDefinition
 from sandbox.backend.state import SandboxState, SandboxStateStore, redact_cursor, redact_token
 from sandbox.backend.webhook_hooks import sandbox_sync_guard_finish, sandbox_sync_guard_start
 
@@ -529,6 +538,273 @@ def test_integrity_error_text_is_sanitized_for_debugging():
     assert details["plaid_transaction_id"] is None
 
 
+def test_scenario_loader_reads_json_definitions(tmp_path):
+    scenario_dir = tmp_path / "scenarios"
+    scenario_dir.mkdir()
+    (scenario_dir / "create.json").write_text(
+        """
+        {
+          "id": "create_only_no_import",
+          "name": "Create only",
+          "description": "Create only",
+          "flow": "create_only",
+          "transaction": {"description": "Coffee", "amount": 1.23, "currency": "USD"}
+        }
+        """,
+        encoding="utf-8",
+    )
+    runner, _fake = _scenario_runner(
+        tmp_path,
+        scenarios_path=scenario_dir,
+    )
+
+    scenarios = runner.list_scenarios()
+
+    assert [scenario.id for scenario in scenarios] == ["create_only_no_import"]
+    assert scenarios[0].transaction.iso_currency_code == "USD"
+
+
+def test_invalid_scenario_schema_is_rejected(tmp_path):
+    scenario_dir = tmp_path / "scenarios"
+    scenario_dir.mkdir()
+    (scenario_dir / "bad.json").write_text('{"id": "bad"}', encoding="utf-8")
+    runner, _fake = _scenario_runner(tmp_path, scenarios_path=scenario_dir)
+
+    with pytest.raises(ScenarioLoadError):
+        runner.list_scenarios()
+
+
+def test_run_create_only_scenario_calls_create_only(tmp_path):
+    runner, fake = _scenario_runner(tmp_path, _scenario("create_only_no_import", "create_only"))
+
+    result = runner.run_scenario("create_only_no_import")
+
+    assert result.status == "passed"
+    assert fake.create_calls == 1
+    assert fake.sync_calls == 0
+    assert fake.fire_calls == 0
+    assert result.events_summary["transaction_created"] is True
+
+
+def test_create_only_assertion_fails_if_sync_event_exists():
+    scenario = _scenario("create_only_no_import", "create_only")
+    summary = summarize_events(
+        [
+            {"event_type": "sandbox_transaction_create_succeeded"},
+            {"event_type": "plaid_transactions_sync_completed"},
+        ],
+        trace_id="trace",
+    )
+
+    assertions = assert_expectations(scenario, summary)
+
+    assert any(
+        assertion.name == "no_unexpected_sync_for_create_only" and assertion.status == "failed"
+        for assertion in assertions
+    )
+
+
+def test_create_only_assertion_fails_if_later_sync_leak_is_logged():
+    scenario = _scenario("create_only_no_import", "create_only")
+    summary = summarize_events(
+        [
+            {"event_type": "sandbox_transaction_create_succeeded"},
+            {"event_type": "scenario_create_only_imported_later_skipped_notification"},
+        ],
+        trace_id="trace",
+    )
+
+    assertions = assert_expectations(scenario, summary)
+
+    assert any(
+        assertion.name == "no_create_only_leak"
+        and assertion.status == "failed"
+        and assertion.message == "Create-only transaction leaked into later sync."
+        for assertion in assertions
+    )
+
+
+def test_manual_sync_scenario_expects_sync_completed(tmp_path):
+    runner, fake = _scenario_runner(tmp_path, _scenario("manual_sync_basic", "manual_sync"))
+
+    result = runner.run_scenario("manual_sync_basic")
+
+    assert result.status == "passed"
+    assert fake.create_calls == 1
+    assert fake.sync_calls == 1
+    assert result.events_summary["sync_completed"] is True
+
+
+def test_webhook_scenario_expects_webhook_received_and_sync_completed(tmp_path):
+    runner, fake = _scenario_runner(tmp_path, _scenario("webhook_basic", "webhook"))
+
+    result = runner.run_scenario("webhook_basic")
+
+    assert result.status == "passed"
+    assert fake.create_calls == 1
+    assert fake.fire_calls == 1
+    assert result.events_summary["webhook_received"] is True
+    assert result.events_summary["sync_completed"] is True
+
+
+def test_telegram_sent_max_assertion_fails_when_exceeded():
+    scenario = _scenario("manual_sync_basic", "manual_sync", telegram_sent_max=1)
+    summary = summarize_events(
+        [
+            {"event_type": "sandbox_telegram_send_succeeded"},
+            {"event_type": "sandbox_telegram_send_succeeded"},
+        ],
+        trace_id="trace",
+    )
+
+    assertions = assert_expectations(scenario, summary)
+
+    assert any(
+        assertion.name == "telegram_sent_max" and assertion.status == "failed"
+        for assertion in assertions
+    )
+
+
+def test_integrity_and_loop_guard_assertions_fail_when_seen():
+    scenario = _scenario("manual_sync_basic", "manual_sync")
+    summary = summarize_events(
+        [
+            {"event_type": "sandbox_integrity_error"},
+            {"event_type": "sandbox_loop_guard_triggered"},
+        ],
+        trace_id="trace",
+    )
+
+    assertions = assert_expectations(scenario, summary)
+
+    assert any(
+        assertion.name == "no_integrity_error" and assertion.status == "failed"
+        for assertion in assertions
+    )
+    assert any(
+        assertion.name == "no_loop_guard_triggered" and assertion.status == "failed"
+        for assertion in assertions
+    )
+
+
+def test_scenario_result_persists_to_jsonl(tmp_path):
+    runner, _fake = _scenario_runner(tmp_path, _scenario("manual_sync_basic", "manual_sync"))
+
+    result = runner.run_scenario("manual_sync_basic")
+    persisted = runner.get_result(result.scenario_run_id)
+
+    assert persisted.scenario_run_id == result.scenario_run_id
+    assert len(runner.list_results()) == 1
+
+
+def test_run_all_aggregates_results(tmp_path):
+    runner, _fake = _scenario_runner(
+        tmp_path,
+        _scenario("create_only_no_import", "create_only"),
+        _scenario("manual_sync_basic", "manual_sync"),
+    )
+
+    result = runner.run_all()
+
+    assert result.total == 2
+    assert result.passed == 2
+    assert result.status == "passed"
+
+
+def test_run_all_places_create_only_scenario_last(tmp_path):
+    runner, _fake = _scenario_runner(
+        tmp_path,
+        _scenario("create_only_no_import", "create_only"),
+        _scenario("manual_sync_basic", "manual_sync"),
+        _scenario("webhook_basic", "webhook"),
+    )
+
+    result = runner.run_all()
+
+    assert [scenario.scenario_id for scenario in result.results] == [
+        "manual_sync_basic",
+        "webhook_basic",
+        "create_only_no_import",
+    ]
+
+
+def test_run_all_waits_between_scenarios(tmp_path):
+    sleeps = []
+    runner, _fake = _scenario_runner(
+        tmp_path,
+        _scenario("create_only_no_import", "create_only"),
+        _scenario("manual_sync_basic", "manual_sync"),
+        sleep_func=sleeps.append,
+    )
+
+    runner.run_all()
+
+    assert sleeps == [8]
+
+
+def test_rate_limit_sandbox_error_is_retryable():
+    exc = SandboxPlaidError(
+        'rate limit exceeded for attempts to access "sandbox/transactions/create"',
+        request_id="plaid-1",
+    )
+
+    assert is_retryable_sandbox_error(exc) is True
+
+
+def test_transaction_create_retry_succeeds_on_second_attempt(tmp_path):
+    runner, fake = _scenario_runner(tmp_path, _scenario("manual_sync_basic", "manual_sync"))
+    fake.create_failures = [
+        SandboxPlaidError("rate limit exceeded, please try again later", request_id="plaid-1")
+    ]
+
+    result = runner.run_scenario("manual_sync_basic")
+
+    assert result.status == "passed"
+    assert fake.create_calls == 2
+    event_types = [event["event_type"] for event in result.raw_events]
+    assert "scenario_transaction_create_retry_scheduled" in event_types
+    assert "scenario_transaction_create_retry_started" in event_types
+
+
+def test_transaction_create_retry_exhausts_with_clear_error(tmp_path):
+    runner, fake = _scenario_runner(tmp_path, _scenario("manual_sync_basic", "manual_sync"))
+    fake.create_failures = [
+        SandboxPlaidError("rate limit exceeded, please try again later", request_id=f"plaid-{idx}")
+        for idx in range(4)
+    ]
+
+    result = runner.run_scenario("manual_sync_basic")
+
+    assert result.status == "error"
+    assert result.error_message == "Plaid Sandbox rate limit while creating transaction"
+    assert result.error_details["rate_limit_error"] is True
+    assert result.error_details["error_class"] == "SandboxPlaidError"
+    assert result.error_details["plaid_request_id"] == "plaid-3"
+    assert any(
+        assertion.name == "transaction_created" and assertion.status == "failed"
+        for assertion in result.assertions
+    )
+    event_types = [event["event_type"] for event in result.raw_events]
+    assert "scenario_transaction_create_retry_exhausted" in event_types
+
+
+def test_run_all_counts_rate_limit_errors(tmp_path):
+    runner, fake = _scenario_runner(
+        tmp_path,
+        _scenario("manual_sync_basic", "manual_sync"),
+        _scenario("webhook_basic", "webhook"),
+    )
+    fake.create_failures = [
+        SandboxPlaidError("rate limit exceeded, please try again later", request_id=f"plaid-{idx}")
+        for idx in range(4)
+    ]
+
+    result = runner.run_all()
+
+    assert result.errors == 1
+    assert result.rate_limit_errors == 1
+
+
 class FakePlaid:
     def __init__(self):
         self.create_transaction_calls = 0
@@ -570,6 +846,105 @@ class FakePlaid:
         return {"request_id": "request-webhook"}
 
 
+class FakeScenarioOrchestrator:
+    def __init__(self, event_store):
+        self.event_store = event_store
+        self.state_store = SandboxStateStore()
+        self.create_calls = 0
+        self.fire_calls = 0
+        self.sync_calls = 0
+        self.init_calls = 0
+        self.create_failures = []
+
+    def ensure_item_ready(self, trace_id):
+        return SandboxState(item_id="sandbox-item", access_token="access-sandbox-token")
+
+    def init_sync(self, trace_id=None):
+        self.init_calls += 1
+        return {"trace_id": trace_id, "has_cursor": True}
+
+    def create_transaction(self, payload, trace_id=None):
+        self.create_calls += 1
+        if self.create_failures:
+            raise self.create_failures.pop(0)
+        self.event_store.append(
+            trace_id=trace_id,
+            event_type="sandbox_transaction_create_succeeded",
+            status="succeeded",
+        )
+        return {
+            "trace_id": trace_id,
+            "transaction": {
+                "description": payload.description,
+                "amount": str(payload.amount),
+                "iso_currency_code": payload.iso_currency_code,
+            },
+            "plaid_request_id": "request-create",
+            "created": True,
+            "steps": [],
+        }
+
+    def fire_webhook(
+        self,
+        trace_id=None,
+        webhook_type="TRANSACTIONS",
+        webhook_code="SYNC_UPDATES_AVAILABLE",
+    ):
+        self.fire_calls += 1
+        self.event_store.append(
+            trace_id=trace_id,
+            event_type="sandbox_item_webhook_attached",
+            status="succeeded",
+        )
+        self.event_store.append(
+            trace_id=trace_id,
+            event_type="sandbox_webhook_fire_succeeded",
+            status="succeeded",
+        )
+        self.event_store.append(
+            trace_id=trace_id,
+            event_type="plaid_webhook_received",
+            status="info",
+        )
+        self.event_store.append(
+            trace_id=trace_id,
+            event_type="plaid_transactions_sync_completed",
+            status="succeeded",
+        )
+        return {"trace_id": trace_id, "webhook_fired": True, "plaid_request_id": "request-fire"}
+
+    def sync_now(self, trace_id=None):
+        self.sync_calls += 1
+        self.event_store.append(
+            trace_id=trace_id,
+            event_type="plaid_transactions_sync_completed",
+            status="succeeded",
+        )
+        return {
+            "trace_id": trace_id,
+            "added_count": 1,
+            "modified_count": 0,
+            "removed_count": 0,
+            "cursor_present": True,
+            "cursor_updated": True,
+            "next_cursor_present": True,
+            "added_transactions": [{"id": 1, "status": "ask_user"}],
+        }
+
+    def run_e2e(self, trace_id=None):
+        self.create_calls += 1
+        self.fire_calls += 1
+        self.sync_calls += 1
+        for event_type in [
+            "sandbox_transaction_create_succeeded",
+            "sandbox_webhook_fire_succeeded",
+            "plaid_transactions_sync_completed",
+            "sandbox_e2e_completed",
+        ]:
+            self.event_store.append(trace_id=trace_id, event_type=event_type, status="succeeded")
+        return {"trace_id": trace_id, "status": "completed", "steps": [], "details": {}}
+
+
 def _create_payload():
     from sandbox.backend.schemas import CreateTransactionRequest
 
@@ -578,6 +953,71 @@ def _create_payload():
         amount="12.34",
         auto_fire_webhook=False,
         auto_sync_after=False,
+    )
+
+
+def _scenario_runner(
+    tmp_path,
+    *scenarios,
+    scenarios_path=None,
+    sleep_func=lambda _seconds: None,
+    jitter_func=lambda: 0,
+):
+    event_store = SandboxEventStore(tmp_path / "events.jsonl")
+    scenario_dir = scenarios_path or tmp_path / "scenarios"
+    scenario_dir.mkdir(exist_ok=True)
+    for scenario in scenarios:
+        (scenario_dir / f"{scenario.id}.json").write_text(
+            scenario.model_dump_json(),
+            encoding="utf-8",
+        )
+    fake = FakeScenarioOrchestrator(event_store)
+    runner = ScenarioRunner(
+        db=object(),
+        settings=SandboxSettings(enable_expenseops_sandbox_lab=True),
+        scenarios_path=scenario_dir,
+        result_path=tmp_path / "scenario_runs.jsonl",
+        event_store=event_store,
+        orchestrator=fake,
+        sleep_func=sleep_func,
+        jitter_func=jitter_func,
+    )
+    return runner, fake
+
+
+def _scenario(scenario_id, flow, **expectation_overrides):
+    expectations = {
+        "transaction_created": True,
+        "telegram_sent_min": 0,
+        "telegram_sent_max": 1,
+        "no_integrity_error": True,
+        "no_loop_guard_triggered": True,
+    }
+    if flow == "manual_sync":
+        expectations["sync_completed"] = True
+        expectations["imported_transaction_visible"] = True
+    if flow == "webhook":
+        expectations["webhook_fired"] = True
+        expectations["webhook_received"] = True
+        expectations["sync_completed"] = True
+    if flow == "create_only":
+        expectations["telegram_sent_max"] = 0
+        expectations["no_boundary_violation"] = True
+    expectations.update(expectation_overrides)
+    return ScenarioDefinition.model_validate(
+        {
+            "id": scenario_id,
+            "name": scenario_id.replace("_", " ").title(),
+            "description": "Test scenario",
+            "flow": flow,
+            "transaction": {
+                "description": "Scenario Coffee",
+                "amount": "1.23",
+                "iso_currency_code": "USD",
+            },
+            "expectations": expectations,
+            "timeout_seconds": 1,
+        }
     )
 
 

@@ -2,6 +2,9 @@ import type {
   SandboxCreateTransactionResponse,
   SandboxEventsResponse,
   SandboxRunResponse,
+  SandboxScenarioDefinition,
+  SandboxScenarioResult,
+  SandboxScenarioRunAggregate,
   SandboxStatus,
   SandboxSyncResponse,
   SandboxTransactionRequest,
@@ -20,6 +23,14 @@ async function sandboxApi<T>(path: string, options: RequestInit = {}): Promise<T
 
 export const sandboxApiClient = {
   status: () => sandboxApi<SandboxStatus>("/status"),
+  scenarios: () => sandboxApi<SandboxScenarioDefinition[]>("/scenarios"),
+  scenarioRuns: () => sandboxApi<{ results: SandboxScenarioResult[] }>("/scenario-runs"),
+  runScenario: (scenarioId: string) =>
+    sandboxApi<SandboxScenarioResult>(`/scenarios/${scenarioId}/run`, { method: "POST" }),
+  runAllScenarios: () =>
+    sandboxApi<SandboxScenarioRunAggregate>("/scenarios/run-all", { method: "POST" }),
+  resetScenarioRuns: () =>
+    sandboxApi<{ cleared: boolean }>("/scenario-runs/reset", { method: "POST" }),
   runE2E: () => sandboxApi<SandboxRunResponse>("/run-e2e", { method: "POST" }),
   createTransaction: (payload: SandboxTransactionRequest) =>
     sandboxApi<SandboxCreateTransactionResponse>("/create-transaction", {
