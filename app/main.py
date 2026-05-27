@@ -18,6 +18,7 @@ from app.auth import install_dashboard_auth
 from app.config import get_settings
 from app.db import init_db
 from app.logging_config import configure_logging, new_trace_id, reset_trace_id, set_trace_id
+from sandbox.backend.router import router as sandbox_router
 
 settings = get_settings()
 configure_logging(settings)
@@ -62,6 +63,7 @@ app.include_router(splitwise_routes.router)
 app.include_router(telegram_routes.router)
 app.include_router(transaction_routes.router)
 app.include_router(ai_memory_routes.router)
+app.include_router(sandbox_router)
 app.mount("/static", StaticFiles(directory="app/static"), name="static")
 
 

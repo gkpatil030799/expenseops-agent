@@ -1,8 +1,14 @@
+import logging
+
 import pytest
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
 
 from app.config import Settings
+from app.db import Base
 from app.models import ExpenseTransaction, PlaidItem, TransactionStatus
 from app.services import transaction_service
+from app.services.share_calculator import CustomSplitInput
 from app.services.splitwise_service import SplitwiseAPIError
 from app.services.transaction_service import (
     TransactionError,
@@ -38,6 +44,9 @@ def test_sync_all_items_skips_items_from_different_plaid_environment(monkeypatch
     class FakeScalars:
         def __iter__(self):
             return iter([sandbox_item, production_item])
+
+        def all(self):
+            return []
 
     class FakeExecuteResult:
         def scalars(self):
@@ -79,7 +88,14 @@ def test_sync_all_items_skips_items_from_different_plaid_environment(monkeypatch
 
     assert result["sandbox-item"]["skipped"] == 1
     assert "linked in sandbox" in result["sandbox-item"]["reason"]
-    assert result["production-item"] == {"added": 0, "modified": 0, "removed": 0}
+    assert result["production-item"] == {
+        "added": 0,
+        "modified": 0,
+        "removed": 0,
+        "notification_eligible": 0,
+        "notification_sent": 0,
+        "notification_skipped": 0,
+    }
 
 
 def make_tx(status: str, splitwise_expense_id: str | None = None) -> ExpenseTransaction:
@@ -108,6 +124,53 @@ class FakeDb:
 
     def refresh(self, _tx):
         pass
+
+
+class FakeNotificationService:
+    def __init__(self):
+        self.review_notifications = []
+        self.posted_notifications = []
+
+    def notify_transaction_needs_review(self, tx):
+        self.review_notifications.append(tx.id)
+        return True
+
+    def notify_splitwise_posted(self, tx, expense_id):
+        self.posted_notifications.append((tx.id, expense_id))
+
+
+def _sqlite_session(tmp_path):
+    engine = create_engine(
+        f"sqlite:///{tmp_path / 'transaction-service.db'}",
+        connect_args={"check_same_thread": False},
+    )
+    Base.metadata.create_all(bind=engine)
+    SessionLocal = sessionmaker(bind=engine)
+    db = SessionLocal()
+    item = PlaidItem(
+        id=1,
+        item_id="item-1",
+        access_token_encrypted="encrypted",
+        institution_name="Test Bank",
+    )
+    db.add(item)
+    db.commit()
+    return db
+
+
+def _plaid_tx(transaction_id: str, *, pending: bool, name: str = "Trader Joe's"):
+    return {
+        "transaction_id": transaction_id,
+        "account_id": "account-1",
+        "name": name,
+        "merchant_name": name,
+        "amount": "53.87",
+        "iso_currency_code": "USD",
+        "date": "2026-05-24",
+        "pending": pending,
+        "payment_channel": "in store",
+        "category": ["Shops"],
+    }
 
 
 def test_can_undo_transaction_helper():
@@ -187,6 +250,237 @@ def test_undo_unknown_transaction_raises_error():
         TransactionService(FakeDb(None), splitwise_service=object()).undo_transaction(999)
 
 
+def test_new_pending_transaction_is_saved_without_review_notification(tmp_path):
+    db = _sqlite_session(tmp_path)
+    notifications = FakeNotificationService()
+    service = TransactionService(
+        db,
+        splitwise_service=object(),
+        notification_service=notifications,
+    )
+
+    created = service.upsert_transaction(
+        db.get(PlaidItem, 1),
+        _plaid_tx("tx-pending", pending=True),
+    )
+    tx = db.query(ExpenseTransaction).filter_by(plaid_transaction_id="tx-pending").one()
+
+    assert created is True
+    assert tx.pending is True
+    assert tx.status == TransactionStatus.ASK_USER.value
+    assert notifications.review_notifications == []
+    db.close()
+
+
+def test_new_settled_transaction_sends_review_notification(tmp_path):
+    db = _sqlite_session(tmp_path)
+    notifications = FakeNotificationService()
+    service = TransactionService(
+        db,
+        splitwise_service=object(),
+        notification_service=notifications,
+    )
+
+    created = service.upsert_transaction(
+        db.get(PlaidItem, 1),
+        _plaid_tx("tx-settled", pending=False),
+    )
+    tx = db.query(ExpenseTransaction).filter_by(plaid_transaction_id="tx-settled").one()
+
+    assert created is True
+    assert tx.pending is False
+    assert tx.status == TransactionStatus.ASK_USER.value
+    assert notifications.review_notifications == [tx.id]
+    assert tx.review_notification_sent_at is not None
+    db.close()
+
+
+def test_pending_to_settled_transaction_sends_review_notification_once(tmp_path):
+    db = _sqlite_session(tmp_path)
+    notifications = FakeNotificationService()
+    service = TransactionService(
+        db,
+        splitwise_service=object(),
+        notification_service=notifications,
+    )
+
+    service.upsert_transaction(db.get(PlaidItem, 1), _plaid_tx("tx-transition", pending=True))
+    tx = db.query(ExpenseTransaction).filter_by(plaid_transaction_id="tx-transition").one()
+    assert notifications.review_notifications == []
+
+    created = service.upsert_transaction(
+        db.get(PlaidItem, 1),
+        _plaid_tx("tx-transition", pending=False),
+    )
+    db.refresh(tx)
+
+    assert created is False
+    assert tx.pending is False
+    assert notifications.review_notifications == [tx.id]
+
+    service.upsert_transaction(db.get(PlaidItem, 1), _plaid_tx("tx-transition", pending=False))
+
+    assert notifications.review_notifications == [tx.id]
+    db.close()
+
+
+def test_existing_settled_transaction_update_does_not_duplicate_review_notification(tmp_path):
+    db = _sqlite_session(tmp_path)
+    notifications = FakeNotificationService()
+    service = TransactionService(
+        db,
+        splitwise_service=object(),
+        notification_service=notifications,
+    )
+
+    service.upsert_transaction(db.get(PlaidItem, 1), _plaid_tx("tx-no-duplicate", pending=False))
+    tx = db.query(ExpenseTransaction).filter_by(plaid_transaction_id="tx-no-duplicate").one()
+    assert notifications.review_notifications == [tx.id]
+
+    service.upsert_transaction(db.get(PlaidItem, 1), _plaid_tx("tx-no-duplicate", pending=False))
+
+    assert notifications.review_notifications == [tx.id]
+    db.close()
+
+
+def test_repeated_sync_same_transaction_is_idempotent(tmp_path, monkeypatch):
+    db = _sqlite_session(tmp_path)
+    item = db.get(PlaidItem, 1)
+    notifications = FakeNotificationService()
+
+    class RepeatingPlaidService:
+        def __init__(self):
+            self.calls = 0
+
+        def transactions_sync(self, *, access_token, cursor):
+            self.calls += 1
+            return {
+                "added": [_plaid_tx("tx-repeat-sync", pending=False)],
+                "modified": [],
+                "removed": [],
+                "next_cursor": f"cursor-{self.calls}",
+                "has_more": False,
+            }
+
+    monkeypatch.setattr(transaction_service, "decrypt_secret", lambda _encrypted: "access-token")
+    plaid = RepeatingPlaidService()
+    service = TransactionService(
+        db,
+        plaid_service=plaid,
+        splitwise_service=object(),
+        notification_service=notifications,
+    )
+
+    first = service.sync_item(item)
+    second = service.sync_item(item)
+
+    rows = db.query(ExpenseTransaction).filter_by(plaid_transaction_id="tx-repeat-sync").all()
+    assert len(rows) == 1
+    assert first["added"] == 1
+    assert second["added"] == 0
+    assert notifications.review_notifications == [rows[0].id]
+    assert rows[0].review_notification_sent_at is not None
+    db.close()
+
+
+def test_notify_ready_transactions_for_item_uses_atomic_claim(tmp_path):
+    db = _sqlite_session(tmp_path)
+    item = db.get(PlaidItem, 1)
+    tx = ExpenseTransaction(
+        plaid_transaction_id="tx-unsent-ready",
+        plaid_item_id=item.id,
+        name="Starbucks",
+        merchant_name="Starbucks",
+        amount_cents=433,
+        pending=False,
+        status=TransactionStatus.ASK_USER.value,
+    )
+    db.add(tx)
+    db.commit()
+    notifications = FakeNotificationService()
+    service = TransactionService(
+        db,
+        splitwise_service=object(),
+        notification_service=notifications,
+    )
+
+    first = service._notify_ready_transactions_for_item(item)
+    second = service._notify_ready_transactions_for_item(item)
+    db.refresh(tx)
+
+    assert first == {"eligible": 1, "sent": 1, "skipped": 0}
+    assert second == {"eligible": 0, "sent": 0, "skipped": 0}
+    assert notifications.review_notifications == [tx.id]
+    assert tx.review_notification_sent_at is not None
+    db.close()
+
+
+def test_duplicate_review_notification_claim_logs_skip(tmp_path, caplog):
+    db = _sqlite_session(tmp_path)
+    notifications = FakeNotificationService()
+    service = TransactionService(
+        db,
+        splitwise_service=object(),
+        notification_service=notifications,
+    )
+    service.upsert_transaction(db.get(PlaidItem, 1), _plaid_tx("tx-claim-once", pending=False))
+    tx = db.query(ExpenseTransaction).filter_by(plaid_transaction_id="tx-claim-once").one()
+    assert notifications.review_notifications == [tx.id]
+
+    with caplog.at_level(logging.INFO):
+        sent = service._attempt_review_notification(tx)
+
+    assert sent is False
+    assert notifications.review_notifications == [tx.id]
+    assert any(
+        getattr(record, "event", None) == "telegram_notification_skipped_duplicate"
+        and record.log_metadata["reason"] == "review_notification_already_claimed"
+        for record in caplog.records
+    )
+    db.close()
+
+
+def test_failed_review_notification_stays_claimed_to_avoid_spam(tmp_path, monkeypatch):
+    db = _sqlite_session(tmp_path)
+    item = db.get(PlaidItem, 1)
+
+    class FailingNotificationService:
+        def __init__(self):
+            self.review_notifications = []
+
+        def notify_transaction_needs_review(self, tx):
+            self.review_notifications.append(tx.id)
+            return False
+
+    class FakePlaidService:
+        def transactions_sync(self, *, access_token, cursor):
+            return {
+                "added": [_plaid_tx("tx-failed-notification", pending=False)],
+                "modified": [],
+                "removed": [],
+                "next_cursor": "cursor",
+                "has_more": False,
+            }
+
+    monkeypatch.setattr(transaction_service, "decrypt_secret", lambda _encrypted: "access-token")
+    notifications = FailingNotificationService()
+
+    result = TransactionService(
+        db,
+        plaid_service=FakePlaidService(),
+        splitwise_service=object(),
+        notification_service=notifications,
+    ).sync_item(item)
+    tx = db.query(ExpenseTransaction).filter_by(plaid_transaction_id="tx-failed-notification").one()
+
+    assert result["notification_eligible"] == 1
+    assert result["notification_sent"] == 0
+    assert result["notification_skipped"] == 1
+    assert notifications.review_notifications == [tx.id]
+    assert tx.review_notification_sent_at is not None
+    db.close()
+
+
 def test_custom_split_duplicate_post_is_rejected():
     tx = make_tx(TransactionStatus.POSTED.value, splitwise_expense_id="expense-1")
 
@@ -210,3 +504,122 @@ def test_custom_split_duplicate_post_is_rejected():
             confirm=True,
             post_pending=False,
         )
+
+
+def test_pending_transaction_equal_split_is_rejected():
+    tx = make_tx(TransactionStatus.ASK_USER.value)
+    tx.pending = True
+
+    class FakeSplitwise:
+        def get_current_user(self):
+            return {"id": 111}
+
+    service = TransactionService(FakeDb(tx), splitwise_service=FakeSplitwise())
+
+    with pytest.raises(TransactionError, match="still pending"):
+        service.create_equal_split_expense(
+            tx_id=1,
+            friend_user_ids=[222],
+            group_id=None,
+            description=None,
+            details=None,
+            currency_code=None,
+            confirm=True,
+            post_pending=False,
+        )
+
+
+def test_settled_transaction_equal_split_is_allowed():
+    tx = make_tx(TransactionStatus.ASK_USER.value)
+    tx.pending = False
+
+    class FakeSplitwise:
+        def get_current_user(self):
+            return {"id": 111}
+
+        def create_expense(self, payload):
+            return {"expenses": [{"id": "expense-1"}], "payload": payload}
+
+    notifications = FakeNotificationService()
+    service = TransactionService(
+        FakeDb(tx),
+        splitwise_service=FakeSplitwise(),
+        notification_service=notifications,
+    )
+
+    posted_tx, response = service.create_equal_split_expense(
+        tx_id=1,
+        friend_user_ids=[222],
+        group_id=None,
+        description=None,
+        details=None,
+        currency_code=None,
+        confirm=True,
+        post_pending=False,
+    )
+
+    assert posted_tx.status == TransactionStatus.POSTED.value
+    assert posted_tx.splitwise_expense_id == "expense-1"
+    assert response["expenses"][0]["id"] == "expense-1"
+    assert notifications.posted_notifications == [(1, "expense-1")]
+
+
+def test_pending_transaction_custom_split_is_rejected():
+    tx = make_tx(TransactionStatus.ASK_USER.value)
+    tx.pending = True
+
+    class FakeSplitwise:
+        def get_current_user(self):
+            return {"id": 111}
+
+    service = TransactionService(FakeDb(tx), splitwise_service=FakeSplitwise())
+
+    with pytest.raises(TransactionError, match="still pending"):
+        service.create_custom_split_expense(
+            tx_id=1,
+            participant_splits=[CustomSplitInput(user_id=222, amount_cents=633)],
+            split_mode="exact_amounts",
+            payer_included=False,
+            payer_user_id=111,
+            owed_by_user_id=None,
+            group_id=None,
+            description=None,
+            details=None,
+            currency_code=None,
+            confirm=True,
+            post_pending=False,
+        )
+
+
+def test_settled_transaction_custom_split_is_allowed():
+    tx = make_tx(TransactionStatus.ASK_USER.value)
+    tx.pending = False
+
+    class FakeSplitwise:
+        def create_expense(self, payload):
+            return {"expenses": [{"id": "custom-expense-1"}], "payload": payload}
+
+    service = TransactionService(
+        FakeDb(tx),
+        splitwise_service=FakeSplitwise(),
+        notification_service=FakeNotificationService(),
+    )
+
+    posted_tx, response = service.create_custom_split_expense(
+        tx_id=1,
+        participant_splits=[CustomSplitInput(user_id=222, amount_cents=633)],
+        split_mode="exact_amounts",
+        payer_included=False,
+        payer_user_id=111,
+        owed_by_user_id=None,
+        group_id=None,
+        description=None,
+        details=None,
+        currency_code=None,
+        confirm=True,
+        post_pending=False,
+    )
+
+    assert posted_tx.status == TransactionStatus.POSTED.value
+    assert posted_tx.splitwise_expense_id == "custom-expense-1"
+    assert response["expenses"][0]["id"] == "custom-expense-1"

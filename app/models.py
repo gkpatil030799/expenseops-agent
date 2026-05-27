@@ -49,6 +49,37 @@ class PlaidItem(Base):
     )
 
 
+class PlaidWebhookEvent(Base):
+    __tablename__ = "plaid_webhook_events"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    webhook_type: Mapped[str] = mapped_column(String(64), index=True)
+    webhook_code: Mapped[str] = mapped_column(String(128), index=True)
+    plaid_item_id: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
+    item_id: Mapped[int | None] = mapped_column(
+        ForeignKey("plaid_items.id"),
+        nullable=True,
+        index=True,
+    )
+    received_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=utc_now,
+        index=True,
+    )
+    processed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    processing_status: Mapped[str] = mapped_column(String(32), default="received")
+    sync_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    sync_completed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    payload_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+    plaid_item: Mapped[PlaidItem | None] = relationship()
+
+
 class ExpenseTransaction(Base):
     __tablename__ = "expense_transactions"
     __table_args__ = (UniqueConstraint("plaid_transaction_id", name="uq_plaid_transaction_id"),)
@@ -71,6 +102,10 @@ class ExpenseTransaction(Base):
 
     status: Mapped[str] = mapped_column(String(32), default=TransactionStatus.ASK_USER.value)
     agent_question: Mapped[str | None] = mapped_column(Text, nullable=True)
+    review_notification_sent_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
     splitwise_expense_id: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
     splitwise_payload_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
