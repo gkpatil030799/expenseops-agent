@@ -36,6 +36,7 @@ import {
   memoryForTransactions,
 } from "@/dashboardLogic";
 import { api } from "@/lib/api";
+import { SandboxLabPage } from "$sandbox/SandboxLabPage";
 import type {
   DashboardEvent,
   DashboardFilters,
@@ -66,6 +67,14 @@ type ExchangeResponse = { item_id: string; plaid_item_db_id: number };
 type SplitResponse = { splitwise_expense_id: string | null; splitwise_response: unknown };
 
 function App() {
+  if (
+    window.location.pathname === "/sandbox-lab" ||
+    window.location.pathname === "/sandbox" ||
+    window.location.pathname === "/dev/sandbox"
+  ) {
+    return <SandboxLabPage />;
+  }
+
   const [transactions, setTransactions] = useState<Transaction[]>([]);
   const [recentTransactions, setRecentTransactions] = useState<Transaction[]>([]);
   const [allTransactions, setAllTransactions] = useState<Transaction[]>([]);

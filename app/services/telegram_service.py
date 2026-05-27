@@ -9,6 +9,7 @@ from typing import Any
 import httpx
 
 from app.config import Settings, get_settings
+from app.logging_config import log_event
 from app.models import ExpenseTransaction
 from app.services.agent_service import friend_display_name, transaction_display_name
 from app.services.recommendation_service import classify_transaction_recommendation
@@ -25,8 +26,8 @@ class TelegramService:
     def is_configured(self) -> bool:
         return bool(self.settings.telegram_bot_token and self.settings.telegram_chat_id)
 
-    def send_ask_user_transaction(self, tx: ExpenseTransaction) -> None:
-        self.send_message(
+    def send_ask_user_transaction(self, tx: ExpenseTransaction) -> bool:
+        return self.send_message(
             format_ask_user_transaction_message(tx),
             reply_markup=build_review_inline_keyboard(tx.id),
         )
@@ -36,12 +37,15 @@ class TelegramService:
         message: str,
         reply_markup: dict[str, Any] | None = None,
         chat_id: str | None = None,
-    ) -> None:
+    ) -> bool:
         if not self.is_configured:
-            logger.info(
-                "Telegram notification skipped: TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID missing."
+            log_event(
+                logger,
+                "telegram_message_skipped",
+                reason="telegram_not_configured",
+                chat_id_set=bool(chat_id or self.settings.telegram_chat_id),
             )
-            return
+            return False
 
         url = f"https://api.telegram.org/bot{self.settings.telegram_bot_token}/sendMessage"
         payload: dict[str, Any] = {
@@ -56,8 +60,23 @@ class TelegramService:
             with httpx.Client(timeout=10.0) as client:
                 response = client.post(url, json=payload)
                 response.raise_for_status()
+            log_event(
+                logger,
+                "telegram_message_sent",
+                chat_id=chat_id or self.settings.telegram_chat_id,
+                has_reply_markup=bool(reply_markup),
+            )
+            return True
         except Exception as exc:
-            logger.warning("Telegram notification failed: %s", self._safe_error(exc))
+            log_event(
+                logger,
+                "telegram_message_failed",
+                level=logging.WARNING,
+                error_type=type(exc).__name__,
+                safe_error=self._safe_error(exc),
+                chat_id=chat_id or self.settings.telegram_chat_id,
+            )
+            return False
 
     def edit_message(
         self,

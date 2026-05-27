@@ -22,4 +22,4 @@ stamp-db:
 	$(PYTHON) -c "from alembic.config import main; main()" stamp head
 
 lint:
-	$(PYTHON) -m ruff check app tests
+	$(PYTHON) -m ruff check app tests sandbox

@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import json
 import logging
+from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.config import Settings, get_settings
@@ -33,6 +35,17 @@ logger = logging.getLogger(__name__)
 
 class TransactionError(RuntimeError):
     pass
+
+
+@dataclass(frozen=True)
+class TransactionUpsertResult:
+    created: bool
+    notification_eligible: bool
+    notification_sent: bool
+    tx_id: int | None = None
+
+    def __bool__(self) -> bool:
+        return self.created
 
 
 def can_undo_transaction(tx: ExpenseTransaction) -> bool:
@@ -68,15 +81,29 @@ class TransactionService:
         added_count = 0
         modified_count = 0
         removed_count = 0
+        notification_eligible_count = 0
+        notification_sent_count = 0
+        notification_skipped_count = 0
 
         while True:
             response = plaid.transactions_sync(access_token=access_token, cursor=cursor)
             for tx_data in response.get("added", []):
-                created = self.upsert_transaction(item, tx_data)
-                if created:
+                self._log_added_transaction_seen(tx_data)
+                result = self._upsert_transaction_with_result(item, tx_data)
+                notification_eligible_count += int(result.notification_eligible)
+                notification_sent_count += int(result.notification_sent)
+                notification_skipped_count += int(
+                    result.notification_eligible and not result.notification_sent
+                )
+                if result.created:
                     added_count += 1
             for tx_data in response.get("modified", []):
-                self.upsert_transaction(item, tx_data)
+                result = self._upsert_transaction_with_result(item, tx_data)
+                notification_eligible_count += int(result.notification_eligible)
+                notification_sent_count += int(result.notification_sent)
+                notification_skipped_count += int(
+                    result.notification_eligible and not result.notification_sent
+                )
                 modified_count += 1
             for removed in response.get("removed", []):
                 self.mark_removed(str(removed.get("transaction_id")))
@@ -96,11 +123,21 @@ class TransactionService:
             logger,
             "plaid_sync_completed",
             plaid_item_db_id=item.id,
-            added=added_count,
-            modified=modified_count,
-            removed=removed_count,
+            added_count=added_count,
+            modified_count=modified_count,
+            removed_count=removed_count,
+            notification_eligible_count=notification_eligible_count,
+            notification_sent_count=notification_sent_count,
+            notification_skipped_count=notification_skipped_count,
         )
-        return {"added": added_count, "modified": modified_count, "removed": removed_count}
+        return {
+            "added": added_count,
+            "modified": modified_count,
+            "removed": removed_count,
+            "notification_eligible": notification_eligible_count,
+            "notification_sent": notification_sent_count,
+            "notification_skipped": notification_skipped_count,
+        }
 
     def sync_all_items(self) -> dict[str, dict[str, int | str]]:
         results: dict[str, dict[str, int | str]] = {}
@@ -127,15 +164,47 @@ class TransactionService:
                 "in the current Plaid environment."
             )
 
-    def upsert_transaction(self, item: PlaidItem, tx_data: dict[str, Any]) -> bool:
+    def upsert_transaction(
+        self,
+        item: PlaidItem,
+        tx_data: dict[str, Any],
+    ) -> bool:
+        return self._upsert_transaction_with_result(item, tx_data).created
+
+    def _upsert_transaction_with_result(
+        self,
+        item: PlaidItem,
+        tx_data: dict[str, Any],
+    ) -> TransactionUpsertResult:
         plaid_transaction_id = str(tx_data["transaction_id"])
-        tx = self.db.execute(
-            select(ExpenseTransaction).where(
-                ExpenseTransaction.plaid_transaction_id == plaid_transaction_id
+        try:
+            return self._upsert_transaction_with_result_once(item, tx_data)
+        except IntegrityError as exc:
+            self.db.rollback()
+            detail = _safe_integrity_error_details(exc)
+            log_event(
+                logger,
+                "transaction_upsert_integrity_error",
+                level=logging.WARNING,
+                plaid_item_db_id=item.id,
+                plaid_transaction_id=plaid_transaction_id,
+                account_id=tx_data.get("account_id"),
+                **detail,
             )
-        ).scalar_one_or_none()
+            if _is_unique_transaction_race(detail):
+                return self._retry_duplicate_transaction_upsert(item, tx_data)
+            raise
+
+    def _upsert_transaction_with_result_once(
+        self,
+        item: PlaidItem,
+        tx_data: dict[str, Any],
+    ) -> TransactionUpsertResult:
+        plaid_transaction_id = str(tx_data["transaction_id"])
+        tx = self._get_transaction_by_plaid_id(plaid_transaction_id)
 
         created = tx is None
+        previous_pending = bool(tx.pending) if tx is not None else None
         if tx is None:
             tx = ExpenseTransaction(
                 plaid_item_id=item.id,
@@ -145,6 +214,116 @@ class TransactionService:
             )
             self.db.add(tx)
 
+        self._apply_plaid_transaction_fields(tx, item, tx_data)
+
+        if created:
+            self.db.flush()
+            log_event(
+                logger,
+                "transaction_classification_started",
+                tx_id=tx.id,
+                plaid_item_db_id=item.id,
+            )
+            classification = classify_transaction(tx)
+            tx.status = classification.status.value
+            tx.agent_question = classification.question
+            log_event(
+                logger,
+                "transaction_classified",
+                tx_id=tx.id,
+                status=tx.status,
+                reason=classification.reason,
+                source="rule",
+            )
+
+        notification_eligible = self._should_notify_transaction_needs_review(
+            tx,
+            created=created,
+            previous_pending=previous_pending,
+        )
+        self.db.commit()
+        self.db.refresh(tx)
+
+        notification_sent = False
+        if notification_eligible:
+            notification_sent = self._attempt_review_notification(tx)
+            if previous_pending is True and not tx.pending:
+                log_event(
+                    logger,
+                    "pending_transaction_settled_notification_sent",
+                    tx_id=tx.id,
+                    plaid_transaction_id=tx.plaid_transaction_id,
+                )
+            self.db.commit()
+        else:
+            log_event(
+                logger,
+                "transaction_notification_skipped",
+                tx_id=tx.id,
+                reason=self._notification_skip_reason(tx),
+                status=tx.status,
+                pending=tx.pending,
+            )
+        return TransactionUpsertResult(
+            created=created,
+            notification_eligible=notification_eligible,
+            notification_sent=notification_sent,
+            tx_id=tx.id,
+        )
+
+    def _retry_duplicate_transaction_upsert(
+        self,
+        item: PlaidItem,
+        tx_data: dict[str, Any],
+    ) -> TransactionUpsertResult:
+        plaid_transaction_id = str(tx_data["transaction_id"])
+        tx = self._get_transaction_by_plaid_id(plaid_transaction_id)
+        if tx is None:
+            raise TransactionError(
+                "Transaction insert conflicted, but the existing transaction could not be loaded."
+            )
+        previous_pending = bool(tx.pending)
+        self._apply_plaid_transaction_fields(tx, item, tx_data)
+        notification_eligible = self._should_notify_transaction_needs_review(
+            tx,
+            created=False,
+            previous_pending=previous_pending,
+        )
+        self.db.commit()
+        self.db.refresh(tx)
+        notification_sent = False
+        if notification_eligible:
+            notification_sent = self._attempt_review_notification(tx)
+            self.db.commit()
+        else:
+            log_event(
+                logger,
+                "transaction_upsert_skipped_duplicate",
+                tx_id=tx.id,
+                plaid_transaction_id=plaid_transaction_id,
+                reason=self._notification_skip_reason(tx),
+            )
+        return TransactionUpsertResult(
+            created=False,
+            notification_eligible=notification_eligible,
+            notification_sent=notification_sent,
+            tx_id=tx.id,
+        )
+
+    def _get_transaction_by_plaid_id(self, plaid_transaction_id: str) -> ExpenseTransaction | None:
+        return self.db.execute(
+            select(ExpenseTransaction).where(
+                ExpenseTransaction.plaid_transaction_id == plaid_transaction_id
+            )
+        ).scalar_one_or_none()
+
+    def _apply_plaid_transaction_fields(
+        self,
+        tx: ExpenseTransaction,
+        item: PlaidItem,
+        tx_data: dict[str, Any],
+    ) -> None:
+        tx.plaid_item_id = item.id
         tx.account_id = tx_data.get("account_id")
         tx.merchant_name = tx_data.get("merchant_name")
         tx.name = tx_data.get("name") or tx.merchant_name or "Unknown transaction"
@@ -164,16 +343,185 @@ class TransactionService:
         tx.raw_json = json.dumps(tx_data, default=str)
         tx.updated_at = utc_now()
 
-        if created:
-            classification = classify_transaction(tx)
-            tx.status = classification.status.value
-            tx.agent_question = classification.question
-            self.db.flush()
-            if classification.status == TransactionStatus.ASK_USER:
-                self.notification_service.notify_transaction_needs_review(tx)
+    def _should_notify_transaction_needs_review(
+        self,
+        tx: ExpenseTransaction,
+        *,
+        created: bool,
+        previous_pending: bool | None,
+    ) -> bool:
+        if tx.status != TransactionStatus.ASK_USER.value:
+            return False
+        if tx.pending:
+            return False
+        if tx.review_notification_sent_at is not None:
+            return False
+        return created or previous_pending is True
 
+    def _notification_skip_reason(self, tx: ExpenseTransaction) -> str:
+        if tx.status != TransactionStatus.ASK_USER.value:
+            return "status_not_ask_user"
+        if tx.pending:
+            return "transaction_pending"
+        if tx.review_notification_sent_at is not None:
+            return "review_notification_already_sent"
+        return "not_new_or_pending_transition"
+
+    def _notify_ready_transactions_for_item(
+        self,
+        item: PlaidItem,
+        *,
+        exclude_tx_ids: set[int] | None = None,
+    ) -> dict[str, int]:
+        exclude_tx_ids = exclude_tx_ids or set()
+        rows = (
+            self.db.execute(
+                select(ExpenseTransaction)
+                .where(ExpenseTransaction.plaid_item_id == item.id)
+                .where(ExpenseTransaction.status == TransactionStatus.ASK_USER.value)
+                .where(ExpenseTransaction.pending.is_(False))
+                .where(ExpenseTransaction.review_notification_sent_at.is_(None))
+                .order_by(ExpenseTransaction.created_at.asc())
+            )
+            .scalars()
+            .all()
+        )
+        sent = 0
+        skipped = 0
+        for tx in rows:
+            if tx.id in exclude_tx_ids:
+                continue
+            if self._attempt_review_notification(tx):
+                sent += 1
+            else:
+                skipped += 1
+        eligible = len([tx for tx in rows if tx.id not in exclude_tx_ids])
+        if eligible:
+            self.db.commit()
+        return {"eligible": eligible, "sent": sent, "skipped": skipped}
+
+    def _attempt_review_notification(self, tx: ExpenseTransaction) -> bool:
+        log_event(
+            logger,
+            "telegram_notification_claim_started",
+            transaction_id=tx.id,
+            plaid_transaction_id=tx.plaid_transaction_id,
+            status=tx.status,
+            pending=tx.pending,
+        )
+        claimed_at = utc_now()
+        result = self.db.execute(
+            update(ExpenseTransaction)
+            .where(ExpenseTransaction.id == tx.id)
+            .where(ExpenseTransaction.review_notification_sent_at.is_(None))
+            .where(ExpenseTransaction.status == TransactionStatus.ASK_USER.value)
+            .where(ExpenseTransaction.pending.is_(False))
+            .values(review_notification_sent_at=claimed_at, updated_at=utc_now())
+        )
+        if result.rowcount != 1:
+            self.db.rollback()
+            self.db.refresh(tx)
+            log_event(
+                logger,
+                "telegram_notification_skipped_duplicate",
+                transaction_id=tx.id,
+                plaid_transaction_id=tx.plaid_transaction_id,
+                reason="review_notification_already_claimed",
+                status=tx.status,
+                pending=tx.pending,
+                review_notification_sent_at=tx.review_notification_sent_at,
+            )
+            self._sandbox_telegram_event(
+                tx,
+                event_type="sandbox_telegram_send_skipped_duplicate",
+                status="info",
+                payload={"reason": "review_notification_already_claimed"},
+            )
+            return False
         self.db.commit()
-        return created
+        self.db.refresh(tx)
+        log_event(
+            logger,
+            "telegram_notification_claim_succeeded",
+            transaction_id=tx.id,
+            plaid_transaction_id=tx.plaid_transaction_id,
+            review_notification_sent_at=tx.review_notification_sent_at,
+        )
+        log_event(
+            logger,
+            "telegram_notification_send_started",
+            transaction_id=tx.id,
+            plaid_transaction_id=tx.plaid_transaction_id,
+        )
+        self._sandbox_telegram_event(
+            tx,
+            event_type="sandbox_telegram_send_started",
+            status="started",
+        )
+        notification_result = self.notification_service.notify_transaction_needs_review(tx)
+        notification_sent = notification_result is not False
+        if notification_sent:
+            log_event(
+                logger,
+                "telegram_notification_send_succeeded",
+                transaction_id=tx.id,
+                plaid_transaction_id=tx.plaid_transaction_id,
+            )
+            self._sandbox_telegram_event(
+                tx,
+                event_type="sandbox_telegram_send_succeeded",
+                status="succeeded",
+            )
+        else:
+            log_event(
+                logger,
+                "telegram_notification_send_failed",
+                level=logging.WARNING,
+                transaction_id=tx.id,
+                plaid_transaction_id=tx.plaid_transaction_id,
+                reason="telegram_send_returned_false",
+            )
+            self._sandbox_telegram_event(
+                tx,
+                event_type="sandbox_telegram_send_failed",
+                status="failed",
+                payload={"reason": "telegram_send_returned_false"},
+            )
+        return notification_sent
+
+    def _sandbox_telegram_event(
+        self,
+        tx: ExpenseTransaction,
+        *,
+        event_type: str,
+        status: str,
+        payload: dict[str, Any] | None = None,
+    ) -> None:
+        try:
+            from sandbox.backend.webhook_hooks import maybe_log_sandbox_telegram_event
+
+            maybe_log_sandbox_telegram_event(
+                tx,
+                event_type=event_type,
+                status=status,
+                payload=payload,
+            )
+        except Exception:
+            return
+
+    def _log_added_transaction_seen(self, tx_data: dict[str, Any]) -> None:
+        if self.settings.environment != "local":
+            return
+        log_event(
+            logger,
+            "plaid_sync_added_transaction_seen",
+            transaction_id=tx_data.get("transaction_id"),
+            name=tx_data.get("name"),
+            merchant=tx_data.get("merchant_name"),
+            pending=bool(tx_data.get("pending", False)),
+            amount=tx_data.get("amount"),
+            date=tx_data.get("date"),
+        )
 
     def mark_removed(self, plaid_transaction_id: str) -> None:
         tx = self.db.execute(
@@ -437,6 +785,43 @@ def _plaid_token_environment(access_token: str) -> str | None:
     if access_token.startswith("access-development-"):
         return "development"
     return None
+
+
+def _safe_integrity_error_details(exc: IntegrityError) -> dict[str, str | None]:
+    original = str(getattr(exc, "orig", "") or exc)
+    sanitized = " ".join(original.split())
+    details: dict[str, str | None] = {
+        "exception_class": type(exc).__name__,
+        "original_error": sanitized[:500],
+        "constraint_name": None,
+        "table_name": None,
+        "column_name": None,
+    }
+    marker = "UNIQUE constraint failed:"
+    if marker in sanitized:
+        details["constraint_name"] = "unique"
+        target = sanitized.split(marker, 1)[1].strip().split()[0].strip(",")
+        table, _, column = target.partition(".")
+        details["table_name"] = table or None
+        details["column_name"] = column or None
+    marker = "NOT NULL constraint failed:"
+    if marker in sanitized:
+        details["constraint_name"] = "not_null"
+        target = sanitized.split(marker, 1)[1].strip().split()[0].strip(",")
+        table, _, column = target.partition(".")
+        details["table_name"] = table or None
+        details["column_name"] = column or None
+    if "FOREIGN KEY constraint failed" in sanitized:
+        details["constraint_name"] = "foreign_key"
+    return details
+
+
+def _is_unique_transaction_race(details: dict[str, str | None]) -> bool:
+    return (
+        details.get("constraint_name") == "unique"
+        and details.get("table_name") == "expense_transactions"
+        and details.get("column_name") == "plaid_transaction_id"
+    )
 
 
 def transaction_amount_string(tx: ExpenseTransaction) -> str:
