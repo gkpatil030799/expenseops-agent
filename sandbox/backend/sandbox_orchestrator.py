@@ -686,6 +686,18 @@ class SandboxOrchestrator:
     ) -> SandboxState:
         actual_webhook_url = self.plaid.get_item_webhook(access_token=state.access_token or "")
         if not actual_webhook_url and not state.webhook_attached and not state.webhook_url:
+            self._event(
+                trace_id,
+                "sandbox_webhook_already_detached",
+                "info",
+                plaid_item_id=state.item_id,
+                payload={
+                    "reason": "create_only_boundary",
+                    "actual_webhook_attached": False,
+                    "state_webhook_attached": False,
+                },
+                source_action="create_only",
+            )
             return state
         self._event(
             trace_id,
@@ -726,13 +738,21 @@ class SandboxOrchestrator:
 
     def _ensure_webhook_attached(self, state: SandboxState, trace_id: str) -> SandboxState:
         webhook_url = self._require_webhook_url()
-        if state.webhook_attached and state.webhook_url == webhook_url:
+        actual_webhook_url = self.plaid.get_item_webhook(access_token=state.access_token or "")
+        if (
+            actual_webhook_url == webhook_url
+            and state.webhook_attached
+            and state.webhook_url == webhook_url
+        ):
             self._event(
                 trace_id,
                 "sandbox_webhook_already_attached",
                 "info",
                 plaid_item_id=state.item_id,
-                payload={"webhook_url_configured": True},
+                payload={
+                    "webhook_url_configured": True,
+                    "actual_webhook_matches": True,
+                },
                 source_action="fire_webhook",
             )
             return state
@@ -741,6 +761,11 @@ class SandboxOrchestrator:
             "sandbox_item_webhook_attach_started",
             "started",
             plaid_item_id=state.item_id,
+            payload={
+                "actual_webhook_attached": bool(actual_webhook_url),
+                "actual_webhook_matches": actual_webhook_url == webhook_url,
+                "state_webhook_attached": state.webhook_attached,
+            },
             source_action="fire_webhook",
         )
         self.plaid.update_webhook(access_token=state.access_token or "", webhook_url=webhook_url)

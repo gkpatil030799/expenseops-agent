@@ -319,6 +319,11 @@ function WebhookFlowPage({
         title="Webhook Flow"
         description="Test the production-style Plaid webhook path without automatically running manual sync."
       />
+      <Card className="p-4 text-sm leading-6 text-slate-600">
+        Sandbox Lab detaches the webhook before create-only so Plaid does not auto-import the
+        transaction. When you click Ask Plaid to Fire Webhook, it re-attaches the webhook and fires
+        SYNC_UPDATES_AVAILABLE.
+      </Card>
       <SandboxFlowStepper steps={steps} />
       <div className="grid gap-5 xl:grid-cols-[minmax(0,1fr)_420px]">
         <div className="space-y-5">
@@ -326,7 +331,7 @@ function WebhookFlowPage({
             loading={loading === "create-transaction" || blocked}
             response={transactionResponse}
             title="Step 1: Create in Plaid Sandbox"
-            helperText="Creates a fake Plaid transaction. Depending on webhook configuration, Plaid may still emit webhook updates. Use the timeline to confirm what happened."
+            helperText="Creates a fake Plaid transaction while keeping the webhook detached until you explicitly ask Plaid to fire one."
             submitLabel="Create in Plaid Sandbox"
             onCreate={onCreate}
             onTrace={onShowEvents}

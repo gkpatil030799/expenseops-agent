@@ -206,6 +206,7 @@ def test_create_transaction_does_not_mutate_webhook_when_already_detached(tmp_pa
     assert fake_plaid.fire_webhook_calls == 0
     assert fake_plaid.transactions_sync_calls == 0
     event_types = {event["event_type"] for event in events}
+    assert "sandbox_webhook_already_detached" in event_types
     assert "sandbox_item_webhook_detached" not in event_types
     assert "plaid_transactions_sync_started" not in event_types
     db.close()
@@ -295,6 +296,7 @@ def test_fire_webhook_reuses_attached_webhook_without_reattaching(tmp_path):
         enable_expenseops_sandbox_lab=True,
         sandbox_public_webhook_url="https://example.ngrok-free.app/plaid/webhook",
     )
+    fake_plaid.current_webhook = settings.webhook_url
     state_store.save(
         SandboxState(
             item_id="sandbox-item",
@@ -321,6 +323,84 @@ def test_fire_webhook_reuses_attached_webhook_without_reattaching(tmp_path):
     event_types = {event["event_type"] for event in events}
     assert "sandbox_webhook_already_attached" in event_types
     assert "sandbox_webhook_fire_succeeded" in event_types
+    db.close()
+
+
+def test_fire_webhook_attaches_when_state_says_attached_but_plaid_is_detached(tmp_path):
+    db = _sqlite_session(tmp_path)
+    fake_plaid = FakePlaid()
+    state_store = SandboxStateStore(tmp_path / "state.json")
+    event_store = SandboxEventStore(tmp_path / "events.jsonl")
+    settings = SandboxSettings(
+        enable_expenseops_sandbox_lab=True,
+        sandbox_public_webhook_url="https://example.ngrok-free.app/plaid/webhook",
+    )
+    state_store.save(
+        SandboxState(
+            item_id="sandbox-item",
+            access_token="access-sandbox-token",
+            latest_trace_id="trace-stale-attach",
+            webhook_url=settings.webhook_url,
+            webhook_attached=True,
+        )
+    )
+    orchestrator = SandboxOrchestrator(
+        db=db,
+        settings=settings,
+        state_store=state_store,
+        event_store=event_store,
+        plaid=fake_plaid,
+    )
+
+    result = orchestrator.fire_webhook(trace_id="trace-stale-attach")
+    events = event_store.read(trace_id="trace-stale-attach")
+
+    assert result["trace_id"] == "trace-stale-attach"
+    assert fake_plaid.webhook_updates == [settings.webhook_url]
+    assert fake_plaid.fire_webhook_calls == 1
+    event_types = {event["event_type"] for event in events}
+    assert "sandbox_item_webhook_attached" in event_types
+    assert "sandbox_webhook_already_attached" not in event_types
+    db.close()
+
+
+def test_fire_webhook_attaches_when_plaid_has_wrong_webhook(tmp_path):
+    db = _sqlite_session(tmp_path)
+    fake_plaid = FakePlaid()
+    fake_plaid.current_webhook = "https://wrong.example/plaid/webhook"
+    state_store = SandboxStateStore(tmp_path / "state.json")
+    event_store = SandboxEventStore(tmp_path / "events.jsonl")
+    settings = SandboxSettings(
+        enable_expenseops_sandbox_lab=True,
+        sandbox_public_webhook_url="https://example.ngrok-free.app/plaid/webhook",
+    )
+    state_store.save(
+        SandboxState(
+            item_id="sandbox-item",
+            access_token="access-sandbox-token",
+            latest_trace_id="trace-wrong-attach",
+            webhook_url=settings.webhook_url,
+            webhook_attached=True,
+        )
+    )
+    orchestrator = SandboxOrchestrator(
+        db=db,
+        settings=settings,
+        state_store=state_store,
+        event_store=event_store,
+        plaid=fake_plaid,
+    )
+
+    result = orchestrator.fire_webhook(trace_id="trace-wrong-attach")
+    events = event_store.read(trace_id="trace-wrong-attach")
+
+    assert result["trace_id"] == "trace-wrong-attach"
+    assert fake_plaid.webhook_updates == [settings.webhook_url]
+    assert fake_plaid.current_webhook == settings.webhook_url
+    assert fake_plaid.fire_webhook_calls == 1
+    event_types = {event["event_type"] for event in events}
+    assert "sandbox_item_webhook_attached" in event_types
+    assert "sandbox_webhook_already_attached" not in event_types
     db.close()
 
 
