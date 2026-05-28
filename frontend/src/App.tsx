@@ -464,8 +464,8 @@ function App() {
   }
 
   return (
-    <main className="min-h-screen bg-[linear-gradient(180deg,#f8fafc_0%,#f1f5f9_42%,#f8fafc_100%)]">
-      <section className="mx-auto flex w-full max-w-[1500px] flex-col gap-5 px-4 py-5 sm:px-6 lg:px-8">
+    <main className="min-h-screen bg-[#f5f7fb]">
+      <section className="mx-auto flex w-full max-w-[1500px] flex-col gap-4 px-4 py-4 sm:px-6 lg:px-8">
         <Header onPlaid={openPlaidLink} onSync={syncTransactions} busy={busy} />
 
         <div className="grid gap-3 md:grid-cols-3 xl:grid-cols-4">
@@ -473,13 +473,15 @@ function App() {
             icon={Clock3}
             label="Pending approvals"
             value={String(transactions.length)}
-            tone="emerald"
+            detail="Awaiting classification"
+            tone={transactions.length ? "amber" : "teal"}
           />
           <MetricCard
             icon={BadgeDollarSign}
             label="Pending amount"
-            value={`$${pendingTotal.toFixed(2)}`}
-            tone="blue"
+            value={formatCurrency(pendingTotal)}
+            detail="Open card spend"
+            tone="indigo"
           />
           <OperationalState
             pendingCount={transactions.length}
@@ -496,11 +498,15 @@ function App() {
           onDaysChange={setAnalyticsDays}
         />
 
-        <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_360px]">
+        <div className="grid gap-5 xl:grid-cols-[minmax(0,1fr)_360px]">
           <section className="space-y-4">
             <div className="flex flex-wrap items-center justify-between gap-3">
               <div>
-                <h2 className="text-xl font-semibold text-slate-950">Pending transactions</h2>
+                <div className="inline-flex items-center gap-2 text-xs font-semibold uppercase text-slate-500">
+                  <WalletCards className="h-3.5 w-3.5 text-slate-500" />
+                  Review queue
+                </div>
+                <h2 className="mt-1 text-xl font-semibold text-slate-950">Pending transactions</h2>
                 <p className="mt-1 text-sm text-slate-500">
                   Search Splitwise friends by name, select them, then approve the split.
                 </p>
@@ -579,11 +585,11 @@ function App() {
                 ))}
               </div>
             ) : (
-              <Card>
-                <CardContent className="flex min-h-40 items-center justify-center text-sm text-slate-500">
-                  No transactions waiting for review.
-                </CardContent>
-              </Card>
+              <EmptyState
+                icon={CheckCircle2}
+                title="Review queue is clear"
+                description="New card activity will appear here after sync when ExpenseOps needs a decision."
+              />
             )}
           </section>
 
@@ -620,6 +626,52 @@ function splitwiseUserDisplayName(user: SplitwiseUser | null) {
   return [user.first_name, user.last_name].filter(Boolean).join(" ") || user.email || "You";
 }
 
+function statusDisplay(status: string) {
+  const labels: Record<string, string> = {
+    ask_user: "Needs review",
+    personal: "Personal",
+    posted: "Posted",
+    shared_draft: "Draft split",
+    removed: "Removed",
+  };
+  return labels[status] || status.replace(/_/g, " ");
+}
+
+function statusBadgeClass(status: string) {
+  const classes: Record<string, string> = {
+    ask_user: "border-amber-200 bg-amber-50 text-amber-700",
+    personal: "border-slate-200 bg-slate-100 text-slate-700",
+    posted: "border-emerald-200 bg-emerald-50 text-emerald-700",
+    shared_draft: "border-indigo-200 bg-indigo-50 text-indigo-700",
+  };
+  return classes[status] || "border-slate-200 bg-slate-100 text-slate-700";
+}
+
+function amountTone(transaction: Transaction) {
+  const amount = Math.abs(transaction.amount_cents) / 100;
+  if (amount >= 100) return "text-rose-700";
+  if (amount >= 50) return "text-amber-700";
+  return "text-slate-950";
+}
+
+function formatCurrency(value: number) {
+  return new Intl.NumberFormat("en-US", {
+    style: "currency",
+    currency: "USD",
+  }).format(value);
+}
+
+function formatTransactionAmount(transaction: Pick<Transaction, "amount_cents" | "amount">) {
+  const amount = Number(transaction.amount);
+  if (Number.isFinite(amount)) return formatCurrency(amount);
+  return formatCurrency(Math.abs(transaction.amount_cents) / 100);
+}
+
+function formatDashboardAmount(amount: string) {
+  const parsed = Number(amount);
+  return Number.isFinite(parsed) ? formatCurrency(parsed) : amount;
+}
+
 function SearchFilters({
   filters,
   onChange,
@@ -628,42 +680,46 @@ function SearchFilters({
   onChange: <K extends keyof DashboardFilters>(key: K, value: DashboardFilters[K]) => void;
 }) {
   return (
-    <div className="rounded-lg border border-slate-200/80 bg-white/85 p-2 shadow-sm shadow-slate-950/[0.03] backdrop-blur">
+    <div className="rounded-lg border border-slate-200 bg-white p-3 shadow-sm shadow-slate-950/[0.025]">
+      <div className="mb-2 flex items-center gap-2 text-xs font-semibold uppercase text-slate-500">
+        <Search className="h-3.5 w-3.5 text-slate-500" />
+        Transaction controls
+      </div>
       <div className="grid gap-2 md:grid-cols-[1.15fr_1fr_160px_150px_150px]">
         <div className="relative">
           <Search className="pointer-events-none absolute left-3 top-2.5 h-4 w-4 text-slate-400" />
           <Input
-            className="h-9 pl-9"
+            className="h-9 border-slate-200 bg-white pl-9 focus:border-indigo-300 focus:ring-indigo-100"
             value={filters.merchant}
             onChange={(event) => onChange("merchant", event.target.value)}
-            placeholder="Merchant"
+            placeholder="Search merchant"
           />
         </div>
         <Input
-          className="h-9"
+          className="h-9 border-slate-200 bg-white focus:border-indigo-300 focus:ring-indigo-100"
           value={filters.group}
           onChange={(event) => onChange("group", event.target.value)}
           placeholder="Group"
         />
         <select
-          className="h-9 rounded-md border border-slate-200 bg-white px-3 text-sm text-slate-700 outline-none transition focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500/20"
+          className="h-9 rounded-md border border-slate-200 bg-white px-3 text-sm text-slate-700 outline-none transition focus:border-indigo-300 focus:ring-2 focus:ring-indigo-100"
           value={filters.status}
           onChange={(event) => onChange("status", event.target.value)}
         >
           <option value="">All statuses</option>
-          <option value="ask_user">ask_user</option>
-          <option value="personal">personal</option>
-          <option value="posted">posted</option>
-          <option value="shared_draft">shared_draft</option>
+          <option value="ask_user">Needs review</option>
+          <option value="personal">Personal</option>
+          <option value="posted">Posted</option>
+          <option value="shared_draft">Draft split</option>
         </select>
         <Input
-          className="h-9"
+          className="h-9 border-slate-200 bg-white focus:border-indigo-300 focus:ring-indigo-100"
           type="date"
           value={filters.dateFrom}
           onChange={(event) => onChange("dateFrom", event.target.value)}
         />
         <Input
-          className="h-9"
+          className="h-9 border-slate-200 bg-white focus:border-indigo-300 focus:ring-indigo-100"
           type="date"
           value={filters.dateTo}
           onChange={(event) => onChange("dateTo", event.target.value)}
@@ -684,18 +740,19 @@ function AnalyticsDashboard({
 }) {
   const ratioTotal = analytics.personalCount + analytics.sharedCount || 1;
   const sharedPercent = Math.round((analytics.sharedCount / ratioTotal) * 100);
+  const personalPercent = 100 - sharedPercent;
 
   return (
-    <section className="grid gap-4 xl:grid-cols-[340px_minmax(0,1fr)]">
-      <Card className="overflow-hidden">
-        <CardHeader>
+    <section className="grid gap-4 xl:grid-cols-[320px_minmax(0,1fr)]">
+      <Card className="overflow-hidden border-slate-200 bg-white shadow-sm shadow-slate-950/[0.025]">
+        <CardHeader className="p-4 pb-3">
           <div className="flex items-center justify-between gap-3">
             <div>
-              <CardTitle className="text-base">Analytics</CardTitle>
-              <CardDescription>Shared spend and behavior patterns</CardDescription>
+              <CardTitle className="text-base">Spend intelligence</CardTitle>
+              <CardDescription>Shared spend and review mix</CardDescription>
             </div>
             <select
-              className="h-8 rounded-md border border-slate-200 bg-white px-2 text-xs text-slate-700"
+              className="h-8 rounded-md border border-slate-200 bg-white px-2 text-xs font-medium text-slate-700"
               value={days}
               onChange={(event) => onDaysChange(Number(event.target.value))}
             >
@@ -705,22 +762,24 @@ function AnalyticsDashboard({
             </select>
           </div>
         </CardHeader>
-        <CardContent className="grid gap-4">
-          <div className="rounded-lg border border-emerald-100 bg-emerald-50/80 p-4">
-            <p className="text-xs font-medium uppercase tracking-wide text-emerald-700">
+        <CardContent className="grid gap-3 p-4 pt-0">
+          <div className="rounded-md border border-slate-200 bg-slate-50 p-4">
+            <p className="text-xs font-semibold uppercase text-slate-500">
               Total shared spend
             </p>
-            <p className="mt-1 text-4xl font-semibold tracking-normal text-emerald-950">
-              ${(analytics.totalSharedSpend / 100).toFixed(2)}
+            <p className="mt-1 text-3xl font-semibold tracking-normal text-slate-950">
+              {formatCurrency(analytics.totalSharedSpend / 100)}
             </p>
+            <p className="mt-2 text-xs text-slate-500">Posted and draft splits in this window</p>
           </div>
           <div>
-            <div className="mb-2 flex items-center gap-2 text-xs font-medium uppercase tracking-wide text-slate-500">
+            <div className="mb-2 flex items-center gap-2 text-xs font-semibold uppercase text-slate-500">
               <PieChart className="h-3.5 w-3.5" />
               Personal vs shared
             </div>
-            <div className="h-2 overflow-hidden rounded-full bg-slate-100">
-              <div className="h-full bg-emerald-600" style={{ width: `${sharedPercent}%` }} />
+            <div className="flex h-2 overflow-hidden rounded-full bg-slate-100">
+              <div className="h-full bg-slate-400" style={{ width: `${personalPercent}%` }} />
+              <div className="h-full bg-indigo-500" style={{ width: `${sharedPercent}%` }} />
             </div>
             <div className="mt-2 flex items-center justify-between text-xs text-slate-500">
               <span>{analytics.personalCount} personal</span>
@@ -729,14 +788,14 @@ function AnalyticsDashboard({
           </div>
         </CardContent>
       </Card>
-      <Card className="bg-white/90">
-        <CardHeader>
+      <Card className="border-slate-200 bg-white shadow-sm shadow-slate-950/[0.025]">
+        <CardHeader className="p-4 pb-3">
           <div className="flex items-center gap-2">
-            <BarChart3 className="h-4 w-4 text-emerald-700" />
+            <BarChart3 className="h-4 w-4 text-slate-600" />
             <CardTitle className="text-base">Top patterns</CardTitle>
           </div>
         </CardHeader>
-        <CardContent className="grid gap-4 md:grid-cols-3">
+        <CardContent className="grid gap-4 p-4 pt-0 md:grid-cols-3">
           <MiniBarList title="Merchants" items={analytics.topMerchants} />
           <MiniBarList title="Split partners" items={analytics.topPartners} />
           <MiniBarList title="Groups" items={analytics.topGroups} />
@@ -760,14 +819,16 @@ function MiniBarList({ title, items }: { title: string; items: MemoryEntry[] }) 
             </div>
             <div className="h-1.5 overflow-hidden rounded-full bg-slate-100">
               <div
-                className="h-full bg-emerald-600"
+                className="h-full bg-indigo-500"
                 style={{ width: `${Math.max(12, (item.count / max) * 100)}%` }}
               />
             </div>
           </div>
         ))
       ) : (
-        <p className="text-sm text-slate-500">No data yet.</p>
+        <div className="rounded-md border border-dashed border-slate-200 bg-slate-50 p-3 text-sm text-slate-500">
+          No pattern data yet.
+        </div>
       )}
     </div>
   );
@@ -808,15 +869,15 @@ function ActivityTimeline({ events }: { events: DashboardEvent[] }) {
   };
 
   return (
-    <Card className="overflow-hidden">
-      <CardHeader>
+    <Card className="overflow-hidden border-slate-200 bg-white shadow-sm shadow-slate-950/[0.025]">
+      <CardHeader className="p-4 pb-3">
         <div className="flex items-center gap-2">
-          <Activity className="h-4 w-4 text-sky-600" />
+          <Activity className="h-4 w-4 text-slate-600" />
           <CardTitle>Activity timeline</CardTitle>
         </div>
         <CardDescription>Chronological transaction events</CardDescription>
       </CardHeader>
-      <CardContent className="space-y-1">
+      <CardContent className="max-h-[620px] space-y-1 overflow-auto p-4 pt-0 pr-2">
         {events.length ? (
           events.slice(0, 20).map((event) => {
             const style = eventStyles[event.type];
@@ -825,7 +886,7 @@ function ActivityTimeline({ events }: { events: DashboardEvent[] }) {
               <button
                 key={event.id}
                 type="button"
-                className="group flex w-full gap-3 rounded-md px-1.5 py-2 text-left transition hover:bg-slate-50"
+                className="group flex w-full gap-3 rounded-md border border-transparent px-2 py-2 text-left transition hover:border-slate-200 hover:bg-slate-50"
                 onClick={() => setExpanded((current) => (current === event.id ? null : event.id))}
               >
                 <span className="relative mt-1 flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-white shadow-sm ring-1 ring-slate-200">
@@ -840,7 +901,7 @@ function ActivityTimeline({ events }: { events: DashboardEvent[] }) {
                     <Badge className={style.badge}>{event.type.replace(/_/g, " ")}</Badge>
                   </span>
                   <span className="mt-1 block text-xs text-slate-500">
-                    {event.currency} {event.amount}
+                    {formatDashboardAmount(event.amount)}
                     {event.participants.length ? ` · ${event.participants.join(", ")}` : ""}
                   </span>
                   <span className="mt-1 flex items-center gap-1 text-xs text-slate-400">
@@ -857,7 +918,9 @@ function ActivityTimeline({ events }: { events: DashboardEvent[] }) {
             );
           })
         ) : (
-          <p className="text-sm text-slate-500">No activity matches the current filters.</p>
+          <div className="rounded-md border border-dashed border-slate-200 bg-slate-50 p-4 text-sm text-slate-500">
+            No activity matches the current filters.
+          </div>
         )}
       </CardContent>
     </Card>
@@ -876,8 +939,8 @@ function AgentMemoryPanel({
   onSelectGroup: (name: string) => void;
 }) {
   return (
-    <Card className="bg-white/90">
-      <CardHeader>
+    <Card className="border-slate-200 bg-white shadow-sm shadow-slate-950/[0.025]">
+      <CardHeader className="p-4 pb-3">
         <div className="flex items-center gap-2">
           <Bot className="h-4 w-4 text-indigo-600" />
           <CardTitle>Agent memory</CardTitle>
@@ -900,8 +963,8 @@ function AIFallbackMemoryPanel({
   onDelete: (id: number) => void;
 }) {
   return (
-    <Card className="bg-white/90">
-      <CardHeader>
+    <Card className="border-slate-200 bg-white shadow-sm shadow-slate-950/[0.025]">
+      <CardHeader className="p-4 pb-3">
         <div className="flex items-center gap-2">
           <Sparkles className="h-4 w-4 text-indigo-600" />
           <CardTitle>AI learned corrections</CardTitle>
@@ -940,7 +1003,7 @@ function AIFallbackMemoryPanel({
                   {memory.final_participants.map((participant) => (
                     <span
                       key={`${memory.id}-${participant}`}
-                      className="rounded-full bg-emerald-50 px-2 py-1 text-xs text-emerald-800"
+                      className="rounded-full bg-indigo-50 px-2 py-1 text-xs text-indigo-800"
                     >
                       {participant}
                     </span>
@@ -981,7 +1044,7 @@ function MemoryList({
             <button
               key={item.id}
               type="button"
-              className="rounded-md border border-slate-200 bg-white px-2.5 py-1.5 text-sm text-slate-700 transition hover:border-emerald-200 hover:bg-emerald-50 hover:text-emerald-900"
+              className="rounded-md border border-slate-200 bg-white px-2.5 py-1.5 text-sm text-slate-700 transition hover:border-indigo-200 hover:bg-indigo-50 hover:text-indigo-900"
               onClick={() => onSelect(item.name)}
             >
               {item.name}
@@ -1006,32 +1069,69 @@ function Header({
   busy: string | null;
 }) {
   return (
-    <div className="flex flex-col gap-5 rounded-lg border border-slate-200/80 bg-white/90 px-5 py-5 shadow-sm shadow-slate-950/[0.04] backdrop-blur lg:flex-row lg:items-center lg:justify-between">
-      <div>
-        <div className="flex items-center gap-2 text-sm font-medium text-emerald-700">
-          <span className="flex h-7 w-7 items-center justify-center rounded-md bg-emerald-700 text-white shadow-sm">
-            <Split className="h-4 w-4" />
-          </span>
-          ExpenseOps Agent
+    <div className="relative overflow-hidden rounded-lg border border-slate-800 bg-slate-950 px-5 py-5 text-white shadow-lg shadow-slate-950/10 lg:px-6">
+      <div className="absolute inset-0 bg-[linear-gradient(135deg,rgba(79,70,229,0.18),transparent_42%)]" />
+      <div className="relative flex flex-col gap-5 lg:flex-row lg:items-center lg:justify-between">
+        <div>
+          <div className="inline-flex items-center gap-2 rounded-full bg-white/[0.06] px-3 py-1 text-xs font-semibold text-slate-200 ring-1 ring-white/10">
+            <span className="flex h-5 w-5 items-center justify-center rounded bg-white/10 text-slate-200">
+              <Split className="h-3.5 w-3.5" />
+            </span>
+            ExpenseOps Agent
+            <span className="rounded-full bg-white/[0.06] px-2 py-0.5 text-slate-300 ring-1 ring-white/10">
+              Live review workflow
+            </span>
+          </div>
+          <h1 className="mt-3 text-3xl font-semibold tracking-normal text-white sm:text-[2rem]">
+            Shared expense command center
+          </h1>
+          <p className="mt-2 max-w-2xl text-sm leading-6 text-slate-300">
+            Review card transactions, classify personal spend, and prepare shared splits.
+          </p>
         </div>
-        <h1 className="mt-3 text-3xl font-semibold tracking-normal text-slate-950">
-          Shared expense command center
-        </h1>
-        <p className="mt-2 max-w-2xl text-sm leading-6 text-slate-500">
-          Link card transactions, review pending expenses, and post approved splits to Splitwise.
-        </p>
-      </div>
-      <div className="flex flex-wrap gap-3">
-        <Button onClick={onPlaid} disabled={busy !== null}>
-          <Link2 className="h-4 w-4" />
-          Connect Plaid
-        </Button>
-        <Button variant="secondary" onClick={onSync} disabled={busy !== null}>
-          <RefreshCw className="h-4 w-4" />
-          Manual sync
-        </Button>
+        <div className="flex flex-wrap gap-3">
+          <Button
+            onClick={onPlaid}
+            disabled={busy !== null}
+            className="bg-white text-slate-950 shadow-sm shadow-black/10 hover:bg-slate-100"
+          >
+            <Link2 className="h-4 w-4" />
+            Connect Plaid
+          </Button>
+          <Button
+            variant="secondary"
+            onClick={onSync}
+            disabled={busy !== null}
+            className="bg-white/[0.06] text-white ring-1 ring-white/15 hover:bg-white/10"
+          >
+            <RefreshCw className="h-4 w-4" />
+            Manual sync
+          </Button>
+        </div>
       </div>
     </div>
+  );
+}
+
+function EmptyState({
+  icon: Icon,
+  title,
+  description,
+}: {
+  icon: ComponentType<{ className?: string }>;
+  title: string;
+  description: string;
+}) {
+  return (
+    <Card className="border-dashed border-slate-300 bg-white">
+      <CardContent className="flex min-h-40 flex-col items-center justify-center p-7 text-center">
+        <span className="flex h-9 w-9 items-center justify-center rounded-md border border-slate-200 bg-white text-slate-500">
+          <Icon className="h-5 w-5" />
+        </span>
+        <h3 className="mt-3 text-sm font-semibold text-slate-950">{title}</h3>
+        <p className="mt-1 max-w-md text-sm leading-6 text-slate-500">{description}</p>
+      </CardContent>
+    </Card>
   );
 }
 
@@ -1039,29 +1139,32 @@ function MetricCard({
   icon: Icon,
   label,
   value,
-  tone = "emerald",
+  detail,
+  tone = "teal",
 }: {
   icon: ComponentType<{ className?: string }>;
   label: string;
   value: string;
-  tone?: "emerald" | "blue" | "amber";
+  detail: string;
+  tone?: "teal" | "indigo" | "amber";
 }) {
   const tones = {
-    emerald: "bg-emerald-50 text-emerald-700 ring-emerald-100",
-    blue: "bg-sky-50 text-sky-700 ring-sky-100",
-    amber: "bg-amber-50 text-amber-700 ring-amber-100",
+    teal: "text-teal-700",
+    indigo: "text-indigo-700",
+    amber: "text-amber-700",
   };
 
   return (
-    <Card className="bg-white/90">
-      <CardContent className="flex items-center justify-between p-4">
-        <div>
-          <p className="text-xs font-medium uppercase tracking-wide text-slate-500">{label}</p>
-          <p className="mt-1 text-2xl font-semibold tracking-normal text-slate-950">{value}</p>
+    <Card className="group overflow-hidden border-slate-200 bg-white shadow-sm shadow-slate-950/[0.025] transition hover:border-slate-300 hover:shadow-md hover:shadow-slate-950/[0.04]">
+      <CardContent className="p-4">
+        <div className="flex items-start justify-between gap-3">
+          <div>
+            <p className="text-xs font-semibold uppercase text-slate-500">{label}</p>
+            <p className="mt-1.5 text-3xl font-semibold tracking-normal text-slate-950">{value}</p>
+          </div>
+          <Icon className={`mt-0.5 h-4 w-4 ${tones[tone]}`} />
         </div>
-        <div className={`rounded-md p-2.5 ring-1 ${tones[tone]}`}>
-          <Icon className="h-5 w-5" />
-        </div>
+        <p className="mt-2 text-xs font-medium text-slate-500">{detail}</p>
       </CardContent>
     </Card>
   );
@@ -1077,15 +1180,15 @@ function OperationalState({
   lastSyncLabel: string;
 }) {
   return (
-    <Card className="md:col-span-3 xl:col-span-2">
-      <CardContent className="grid gap-3 p-4 sm:grid-cols-3">
+    <Card className="border-slate-200 bg-white shadow-sm shadow-slate-950/[0.025] md:col-span-3 xl:col-span-2">
+      <CardContent className="grid gap-0 p-0 sm:grid-cols-3">
         <StatusPill
           icon={pendingCount ? AlertCircle : CheckCircle2}
           label="Approval queue"
           value={pendingCount ? `${pendingCount} pending` : "Clear"}
           tone={pendingCount ? "amber" : "emerald"}
         />
-        <StatusPill icon={MessageCircle} label="Telegram" value="Connected" tone="blue" />
+        <StatusPill icon={MessageCircle} label="Telegram connected" value="Review alerts ready" tone="blue" />
         <StatusPill
           icon={RefreshCw}
           label="Auto-sync"
@@ -1109,21 +1212,17 @@ function StatusPill({
   tone: "emerald" | "amber" | "blue" | "slate";
 }) {
   const tones = {
-    emerald: "bg-emerald-50 text-emerald-700",
-    amber: "bg-amber-50 text-amber-700",
-    blue: "bg-sky-50 text-sky-700",
-    slate: "bg-slate-100 text-slate-600",
+    emerald: "text-emerald-700",
+    amber: "text-amber-700",
+    blue: "text-indigo-700",
+    slate: "text-slate-600",
   };
 
   return (
-    <div className="flex min-w-0 items-center gap-3">
-      <span
-        className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-md ${tones[tone]}`}
-      >
-        <Icon className="h-4 w-4" />
-      </span>
+    <div className="flex min-w-0 items-center gap-3 border-b border-slate-100 p-4 last:border-b-0 sm:border-b-0 sm:border-r sm:last:border-r-0">
+      <Icon className={`h-4 w-4 shrink-0 ${tones[tone]}`} />
       <span className="min-w-0">
-        <span className="block text-xs font-medium uppercase tracking-wide text-slate-400">
+        <span className="block text-xs font-semibold uppercase text-slate-400">
           {label}
         </span>
         <span className="block truncate text-sm font-medium text-slate-900">{value}</span>
@@ -1207,6 +1306,9 @@ function TransactionCard({
 }) {
   const title = transaction.merchant_name || transaction.name;
   const disabled = busy !== null;
+  const absoluteAmount = Math.abs(transaction.amount_cents) / 100;
+  const accentClass =
+    absoluteAmount >= 100 ? "border-l-rose-500" : absoluteAmount >= 50 ? "border-l-amber-500" : "border-l-slate-300";
   const selectedParticipantCount = selectedGroup
     ? selectedGroupMembers.length
     : selectedFriends.length;
@@ -1236,32 +1338,47 @@ function TransactionCard({
 
   return (
     <Card
-      className={`border-slate-200/70 bg-white/95 shadow-sm shadow-slate-950/[0.025] transition hover:border-emerald-200/80 hover:shadow-lg hover:shadow-emerald-950/[0.05] ${
-        isExpanded ? "border-emerald-200/80 ring-1 ring-emerald-100" : ""
+      className={`overflow-hidden border border-l-4 border-slate-200 bg-white shadow-sm shadow-slate-950/[0.025] transition hover:border-slate-300 hover:shadow-md hover:shadow-slate-950/[0.04] ${accentClass} ${
+        isExpanded ? "ring-1 ring-indigo-100" : ""
       }`}
     >
-      <CardHeader className="gap-3 pb-2">
+      <CardHeader className="gap-3 p-4 pb-3">
         <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
           <div className="min-w-0">
-            <CardTitle className="truncate text-base">{title}</CardTitle>
-            <CardDescription className="mt-1 text-xs">
-              {transaction.iso_currency_code} {transaction.amount}
-              {transaction.date ? ` · ${transaction.date}` : ""}
-            </CardDescription>
+            <div className="min-w-0">
+              <CardTitle className="truncate text-lg">{title}</CardTitle>
+              <CardDescription className="mt-1 flex flex-wrap items-center gap-2 text-xs">
+                <span>{transaction.date || "No transaction date"}</span>
+                {absoluteAmount >= 50 ? (
+                  <span className="rounded-full bg-amber-50 px-2 py-0.5 font-semibold text-amber-700">
+                    High amount
+                  </span>
+                ) : null}
+              </CardDescription>
+            </div>
           </div>
-          <div className="flex shrink-0 flex-wrap gap-1.5">
-            {transaction.pending ? (
-              <Badge className="bg-amber-50 text-amber-700">Pending</Badge>
-            ) : (
-              <Badge className="bg-emerald-50 text-emerald-700">Settled</Badge>
-            )}
-            <Badge variant="outline">{transaction.status}</Badge>
-            <ClassificationBadge transaction={transaction} />
+          <div className="flex shrink-0 flex-col items-start gap-2 sm:items-end">
+            <p className={`text-2xl font-semibold tracking-normal ${amountTone(transaction)}`}>
+              {formatTransactionAmount(transaction)}
+            </p>
+            <div className="flex flex-wrap justify-start gap-1.5 sm:justify-end">
+              {transaction.pending ? (
+                <Badge className="border border-amber-200 bg-amber-50 text-amber-700">Pending</Badge>
+              ) : (
+                <Badge className="border border-emerald-200 bg-emerald-50 text-emerald-700">
+                  Settled
+                </Badge>
+              )}
+              <Badge className={`border ${statusBadgeClass(transaction.status)}`}>
+                {statusDisplay(transaction.status)}
+              </Badge>
+              <ClassificationBadge transaction={transaction} />
+            </div>
           </div>
         </div>
 
-        <div className="flex flex-col gap-3 border-t border-slate-100 pt-3 sm:flex-row sm:items-center sm:justify-between">
-          <p className="min-w-0 text-sm text-slate-600">
+        <div className="flex flex-col gap-3 border-t border-slate-100 pt-3 lg:flex-row lg:items-center lg:justify-between">
+          <p className="min-w-0 text-sm leading-6 text-slate-600">
             {transaction.agent_question || "Review this transaction."}
           </p>
           <div className="flex shrink-0 flex-wrap items-center gap-2">
@@ -1277,7 +1394,7 @@ function TransactionCard({
             <Button
               onClick={() => onExpandedChange(true)}
               disabled={disabled}
-              className="shadow-md shadow-emerald-950/10"
+              className="bg-indigo-600 shadow-sm shadow-indigo-950/10 hover:bg-indigo-700"
             >
               <Split className="h-4 w-4" />
               Split / Review
@@ -1302,14 +1419,14 @@ function TransactionCard({
       </CardHeader>
 
       {isExpanded ? (
-        <CardContent className="space-y-3 overflow-hidden pt-0 transition-all duration-200">
-        <div className="rounded-lg border border-slate-200/80 bg-slate-50/70 p-2.5">
+        <CardContent className="space-y-3 overflow-hidden p-4 pt-0 transition-all duration-200">
+        <div className="rounded-md border border-slate-200 bg-slate-50 p-2.5">
           <div className="mb-2 grid grid-cols-2 rounded-full bg-slate-100/90 p-1 ring-1 ring-slate-200/70">
             <button
               type="button"
               className={`inline-flex items-center justify-center gap-2 rounded-full px-3 py-1.5 text-sm font-medium transition-all ${
                 splitMode === "people"
-                  ? "bg-emerald-600 text-white shadow-sm shadow-emerald-950/15"
+                  ? "bg-indigo-600 text-white shadow-sm shadow-indigo-950/15"
                   : "text-slate-600 hover:bg-white/70 hover:text-slate-950"
               }`}
               onClick={() => setSplitMode("people")}
@@ -1321,7 +1438,7 @@ function TransactionCard({
               type="button"
               className={`inline-flex items-center justify-center gap-2 rounded-full px-3 py-1.5 text-sm font-medium transition-all ${
                 splitMode === "group"
-                  ? "bg-emerald-600 text-white shadow-sm shadow-emerald-950/15"
+                  ? "bg-indigo-600 text-white shadow-sm shadow-indigo-950/15"
                   : "text-slate-600 hover:bg-white/70 hover:text-slate-950"
               }`}
               onClick={() => setSplitMode("group")}
@@ -1390,14 +1507,14 @@ function ClassificationBadge({ transaction }: { transaction: Transaction }) {
     likely_shared: "Likely shared",
     unsure: "Unsure",
   };
-  const variants = {
-    likely_personal: "secondary",
-    likely_shared: "default",
-    unsure: "outline",
-  } as const;
+  const classes = {
+    likely_personal: "border border-slate-200 bg-slate-50 text-slate-700",
+    likely_shared: "border border-indigo-200 bg-indigo-50 text-indigo-700",
+    unsure: "border border-amber-200 bg-amber-50 text-amber-700",
+  };
 
   return (
-    <Badge variant={variants[suggestion]} title={transaction.classification_reason || undefined}>
+    <Badge className={classes[suggestion]} title={transaction.classification_reason || undefined}>
       {labels[suggestion]}
     </Badge>
   );
@@ -1450,7 +1567,7 @@ function CustomSplitPanel({
               type="button"
               className={`rounded-full px-2.5 py-1 text-xs font-medium transition ${
                 mode === value
-                  ? "bg-emerald-600 text-white shadow-sm"
+                  ? "bg-indigo-600 text-white shadow-sm"
                   : "text-slate-600 hover:bg-white"
               }`}
               onClick={() => onModeChange(value as CustomSplitMode)}
@@ -1508,7 +1625,7 @@ function CustomSplitPanel({
           <span
             className={
               selectedParticipantCount > 0 && validation.valid
-                ? "text-emerald-700"
+                ? "text-teal-700"
                 : "text-amber-700"
             }
           >
@@ -1530,7 +1647,7 @@ function CustomSplitPanel({
             size="sm"
             onClick={onPost}
             disabled={!canPost}
-            className="min-w-[144px] shadow-md shadow-emerald-950/10"
+            className="min-w-[144px] bg-indigo-600 shadow-md shadow-indigo-950/10 hover:bg-indigo-700"
           >
             <CheckCircle2 className="h-4 w-4" />
             {postLabel}
@@ -1652,7 +1769,7 @@ function FriendPicker({
             <button
               key={friend.id}
               type="button"
-              className="rounded-md border border-slate-200/80 bg-white px-3 py-2 text-left text-sm shadow-sm shadow-slate-950/[0.02] transition hover:border-emerald-200 hover:bg-emerald-50/60 hover:shadow"
+              className="rounded-md border border-slate-200/80 bg-white px-3 py-2 text-left text-sm shadow-sm shadow-slate-950/[0.02] transition hover:border-indigo-200 hover:bg-indigo-50/60 hover:shadow"
               onClick={() => onSelectFriend(friend)}
             >
               <span className="block font-medium text-slate-900">{friend.display_name}</span>
@@ -1670,7 +1787,7 @@ function FriendPicker({
 function ParticipantChip({ label, onRemove }: { label: string; onRemove: () => void }) {
   return (
     <button
-      className="inline-flex max-w-full items-center gap-1.5 rounded-full bg-emerald-50 px-2.5 py-1 text-sm font-medium text-emerald-800 ring-1 ring-emerald-100 transition hover:bg-emerald-100"
+      className="inline-flex max-w-full items-center gap-1.5 rounded-full bg-indigo-50 px-2.5 py-1 text-sm font-medium text-indigo-800 ring-1 ring-indigo-100 transition hover:bg-indigo-100"
       onClick={onRemove}
       type="button"
     >
@@ -1749,7 +1866,7 @@ function GroupPicker({
             <button
               key={group.id}
               type="button"
-              className="rounded-md border border-slate-200/80 bg-white px-3 py-2 text-left text-sm shadow-sm shadow-slate-950/[0.02] transition hover:border-emerald-200 hover:bg-emerald-50/60 hover:shadow"
+              className="rounded-md border border-slate-200/80 bg-white px-3 py-2 text-left text-sm shadow-sm shadow-slate-950/[0.02] transition hover:border-indigo-200 hover:bg-indigo-50/60 hover:shadow"
               onClick={() => onSelectGroup(group)}
             >
               <span className="block font-medium text-slate-900">{group.name}</span>
@@ -1785,7 +1902,7 @@ function GroupPicker({
                   <button
                     key={member.id}
                     type="button"
-                    className="rounded-md border border-slate-200/80 bg-white px-3 py-2 text-left text-sm shadow-sm shadow-slate-950/[0.02] transition hover:border-emerald-200 hover:bg-emerald-50/60 hover:shadow disabled:bg-slate-50 disabled:shadow-none disabled:opacity-70"
+                    className="rounded-md border border-slate-200/80 bg-white px-3 py-2 text-left text-sm shadow-sm shadow-slate-950/[0.02] transition hover:border-indigo-200 hover:bg-indigo-50/60 hover:shadow disabled:bg-slate-50 disabled:shadow-none disabled:opacity-70"
                     onClick={() => onSelectMember(member)}
                     disabled={isCurrentUser || selectedMemberIds.has(member.id)}
                   >
@@ -1823,20 +1940,20 @@ function RecentActivity({
   onUndo: (id: number) => void;
 }) {
   return (
-    <Card className="overflow-hidden">
-      <CardHeader>
+    <Card className="overflow-hidden border-slate-200 bg-white shadow-sm shadow-slate-950/[0.025]">
+      <CardHeader className="p-4 pb-3">
         <div className="flex items-center gap-2">
-          <Layers3 className="h-4 w-4 text-emerald-700" />
+          <Layers3 className="h-4 w-4 text-slate-600" />
           <CardTitle>Recent activity</CardTitle>
         </div>
         <CardDescription>Completed transactions that can be moved back to review</CardDescription>
       </CardHeader>
-      <CardContent className="space-y-1">
+      <CardContent className="max-h-[520px] space-y-1 overflow-auto p-4 pt-0 pr-2">
         {transactions.length ? (
           transactions.map((transaction) => (
             <div
               key={transaction.id}
-              className="flex items-center justify-between gap-3 rounded-md px-1.5 py-2 transition hover:bg-slate-50"
+              className="group flex items-center justify-between gap-3 rounded-md border border-transparent px-2 py-2 transition hover:border-slate-200 hover:bg-slate-50"
             >
               <div className="flex min-w-0 items-center gap-3">
                 <ActivityIcon status={transaction.status} />
@@ -1844,8 +1961,9 @@ function RecentActivity({
                   <p className="truncate text-sm font-medium text-slate-900">
                     {transaction.merchant_name || transaction.name}
                   </p>
-                  <p className="text-xs text-slate-500">
-                    {transaction.iso_currency_code} {transaction.amount} · {transaction.status}
+                  <p className="text-xs font-medium text-slate-500">
+                    {formatTransactionAmount(transaction)} ·{" "}
+                    {statusDisplay(transaction.status)}
                   </p>
                   <p className="text-xs text-slate-400">
                     {new Date(transaction.updated_at).toLocaleString()}
@@ -1867,7 +1985,9 @@ function RecentActivity({
             </div>
           ))
         ) : (
-          <p className="text-sm text-slate-500">No recent completed transactions.</p>
+          <div className="rounded-md border border-dashed border-slate-200 bg-slate-50 p-4 text-sm text-slate-500">
+            No recent completed transactions yet.
+          </div>
         )}
       </CardContent>
     </Card>
@@ -1876,18 +1996,18 @@ function RecentActivity({
 
 function ActivityIcon({ status }: { status: Transaction["status"] }) {
   const styles: Record<string, string> = {
-    personal: "bg-emerald-50 text-emerald-700",
-    posted: "bg-emerald-50 text-emerald-700",
-    shared_draft: "bg-amber-50 text-amber-700",
-    ask_user: "bg-sky-50 text-sky-700",
+    personal: "border-emerald-200 text-emerald-700",
+    posted: "border-emerald-200 text-emerald-700",
+    shared_draft: "border-amber-200 text-amber-700",
+    ask_user: "border-indigo-200 text-indigo-700",
   };
   const Icon =
     status === "shared_draft" ? Clock3 : status === "ask_user" ? MessageCircle : CheckCircle2;
 
   return (
     <span
-      className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-full ${
-        styles[status] || "bg-slate-100 text-slate-600"
+      className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-full border bg-white ${
+        styles[status] || "border-slate-200 text-slate-600"
       }`}
     >
       <Icon className="h-4 w-4" />
