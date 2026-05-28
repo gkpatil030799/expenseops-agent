@@ -356,6 +356,14 @@ class SandboxOrchestrator:
             },
         )
         try:
+            from sandbox.backend.fault_injection import fault_store
+
+            if fault_store.consume(
+                name="fail_next_transactions_sync",
+                trace_id=trace_id,
+                event_store=self.event_store,
+            ):
+                raise RuntimeError("Sandbox fault: fail_next_transactions_sync")
             app_item = self.sync_adapter.ensure_app_plaid_item(
                 item_id=state.item_id or "",
                 access_token=state.access_token or "",

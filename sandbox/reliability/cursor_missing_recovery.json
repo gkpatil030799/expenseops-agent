@@ -1,0 +1,15 @@
+{
+  "id": "cursor_missing_recovery",
+  "name": "Cursor missing recovery",
+  "description": "Simulates missing Sandbox Lab cursor state and verifies init-sync recovery is available.",
+  "type": "cursor_missing_recovery",
+  "parameters": {},
+  "expectations": {
+    "cursor_not_corrupted": true,
+    "telegram_sent_max": 0,
+    "no_integrity_error": true
+  },
+  "tags": ["cursor", "recovery"],
+  "uses_real_plaid": true,
+  "uses_fault_injection": true
+}

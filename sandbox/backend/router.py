@@ -7,6 +7,7 @@ from sandbox.backend.config import SandboxSettings
 from sandbox.backend.event_store import SandboxEventStore, new_trace_id
 from sandbox.backend.guards import require_sandbox_plaid_env
 from sandbox.backend.plaid_sandbox_service import SandboxPlaidError
+from sandbox.backend.reliability_runner import ReliabilityRunner
 from sandbox.backend.sandbox_orchestrator import SandboxOrchestrator
 from sandbox.backend.scenario_runner import ScenarioRunner
 from sandbox.backend.schemas import (
@@ -17,6 +18,10 @@ from sandbox.backend.schemas import (
     FireWebhookRequest,
     FireWebhookResponse,
     InitSyncResponse,
+    ReliabilityDefinition,
+    ReliabilityResult,
+    ReliabilityRunAggregateResponse,
+    ReliabilityRunsResponse,
     ResetEventsResponse,
     RunE2EResponse,
     SandboxStatusResponse,
@@ -38,6 +43,10 @@ def _orchestrator(db: DbSession, settings: SandboxSettings) -> SandboxOrchestrat
 
 def _scenario_runner(db: DbSession, settings: SandboxSettings) -> ScenarioRunner:
     return ScenarioRunner(db=db, settings=settings)
+
+
+def _reliability_runner(db: DbSession, settings: SandboxSettings) -> ReliabilityRunner:
+    return ReliabilityRunner(db=db, settings=settings)
 
 
 @router.get("/status", response_model=SandboxStatusResponse)
@@ -206,4 +215,85 @@ def reset_scenario_runs(
     settings: SandboxSettings = Depends(require_sandbox_plaid_env),
 ) -> dict:
     _scenario_runner(db, settings).clear_results()
+    return {"cleared": True}
+
+
+@router.get("/reliability-tests", response_model=list[ReliabilityDefinition])
+def list_reliability_tests(
+    db: DbSession,
+    settings: SandboxSettings = Depends(require_sandbox_plaid_env),
+) -> list[ReliabilityDefinition]:
+    return _reliability_runner(db, settings).list_tests()
+
+
+@router.get("/reliability-tests/{test_id}", response_model=ReliabilityDefinition)
+def get_reliability_test(
+    test_id: str,
+    db: DbSession,
+    settings: SandboxSettings = Depends(require_sandbox_plaid_env),
+) -> ReliabilityDefinition:
+    try:
+        return _reliability_runner(db, settings).get_test(test_id)
+    except KeyError as exc:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Reliability test not found: {test_id}",
+        ) from exc
+
+
+@router.post("/reliability-tests/{test_id}/run", response_model=ReliabilityResult)
+def run_reliability_test(
+    test_id: str,
+    db: DbSession,
+    settings: SandboxSettings = Depends(require_sandbox_plaid_env),
+) -> ReliabilityResult:
+    try:
+        return _reliability_runner(db, settings).run_test(test_id)
+    except KeyError as exc:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Reliability test not found: {test_id}",
+        ) from exc
+
+
+@router.post("/reliability-tests/run-all", response_model=ReliabilityRunAggregateResponse)
+def run_all_reliability_tests(
+    db: DbSession,
+    settings: SandboxSettings = Depends(require_sandbox_plaid_env),
+) -> ReliabilityRunAggregateResponse:
+    return _reliability_runner(db, settings).run_all()
+
+
+@router.get("/reliability-runs", response_model=ReliabilityRunsResponse)
+def list_reliability_runs(
+    db: DbSession,
+    limit: int = Query(default=50, ge=1, le=500),
+    settings: SandboxSettings = Depends(require_sandbox_plaid_env),
+) -> ReliabilityRunsResponse:
+    return ReliabilityRunsResponse(
+        results=_reliability_runner(db, settings).list_results(limit=limit)
+    )
+
+
+@router.get("/reliability-runs/{reliability_run_id}", response_model=ReliabilityResult)
+def get_reliability_run(
+    reliability_run_id: str,
+    db: DbSession,
+    settings: SandboxSettings = Depends(require_sandbox_plaid_env),
+) -> ReliabilityResult:
+    try:
+        return _reliability_runner(db, settings).get_result(reliability_run_id)
+    except KeyError as exc:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Reliability run not found: {reliability_run_id}",
+        ) from exc
+
+
+@router.post("/reliability-runs/reset", response_model=ResetEventsResponse)
+def reset_reliability_runs(
+    db: DbSession,
+    settings: SandboxSettings = Depends(require_sandbox_plaid_env),
+) -> dict:
+    _reliability_runner(db, settings).clear_results()
     return {"cleared": True}

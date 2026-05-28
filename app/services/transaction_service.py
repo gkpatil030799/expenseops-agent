@@ -34,6 +34,7 @@ from app.services.splitwise_service import SplitwiseAPIError, SplitwiseService
 logger = logging.getLogger(__name__)
 
 _SCENARIO_TRACE_PATTERN = re.compile(r"\[trace:(scenario_([a-z0-9_]+)_\d{8}_[a-f0-9]+)\]")
+_SANDBOX_TRACE_PATTERN = re.compile(r"\[trace:((?:scenario|reliability)_[^\]]+)\]")
 _NO_NOTIFY_SCENARIO_IDS = {"create_only_no_import"}
 
 
@@ -498,6 +499,22 @@ class TransactionService:
             event_type="sandbox_telegram_send_started",
             status="started",
         )
+        if _consume_sandbox_transaction_fault(tx, "fail_next_telegram_send"):
+            log_event(
+                logger,
+                "telegram_notification_send_failed",
+                level=logging.WARNING,
+                transaction_id=tx.id,
+                plaid_transaction_id=tx.plaid_transaction_id,
+                reason="sandbox_fault_fail_next_telegram_send",
+            )
+            self._sandbox_telegram_event(
+                tx,
+                event_type="sandbox_telegram_send_failed",
+                status="failed",
+                payload={"reason": "sandbox_fault_fail_next_telegram_send"},
+            )
+            return False
         notification_result = self.notification_service.notify_transaction_needs_review(tx)
         notification_sent = notification_result is not False
         if notification_sent:
@@ -835,6 +852,37 @@ def _scenario_trace_metadata(tx: ExpenseTransaction) -> tuple[str | None, str | 
         if match:
             return match.group(1), match.group(2)
     return None, None
+
+
+def _sandbox_trace_id_from_transaction(tx: ExpenseTransaction) -> str | None:
+    for value in (tx.name, tx.merchant_name):
+        if not value:
+            continue
+        match = _SANDBOX_TRACE_PATTERN.search(str(value))
+        if match:
+            return match.group(1)
+    return None
+
+
+def _consume_sandbox_transaction_fault(tx: ExpenseTransaction, fault_name: str) -> bool:
+    trace_id = _sandbox_trace_id_from_transaction(tx)
+    if not trace_id:
+        return False
+    try:
+        from sandbox.backend.config import get_sandbox_settings
+        from sandbox.backend.event_store import SandboxEventStore
+        from sandbox.backend.fault_injection import fault_store
+
+        settings = get_sandbox_settings()
+        if not settings.enabled or settings.plaid_env != "sandbox":
+            return False
+        return fault_store.consume(
+            name=fault_name,
+            trace_id=trace_id,
+            event_store=SandboxEventStore(),
+        )
+    except Exception:
+        return False
 
 
 def _scenario_id_for_no_notify(tx: ExpenseTransaction) -> str | None:

@@ -10,8 +10,15 @@ from sqlalchemy.orm import sessionmaker
 from app.db import Base
 from sandbox.backend.config import SandboxSettings
 from sandbox.backend.event_store import SandboxEventStore, new_trace_id
+from sandbox.backend.fault_injection import SandboxFaultStore
 from sandbox.backend.guards import require_sandbox_lab_enabled, require_sandbox_plaid_env
 from sandbox.backend.plaid_sandbox_service import SandboxPlaidError
+from sandbox.backend.reliability_runner import (
+    ReliabilityLoadError,
+    ReliabilityRunner,
+    assert_reliability_expectations,
+    summarize_reliability_events,
+)
 from sandbox.backend.sandbox_orchestrator import SandboxOrchestrator, _parse_integrity_error_text
 from sandbox.backend.scenario_runner import (
     ScenarioLoadError,
@@ -20,7 +27,7 @@ from sandbox.backend.scenario_runner import (
     is_retryable_sandbox_error,
     summarize_events,
 )
-from sandbox.backend.schemas import ScenarioDefinition
+from sandbox.backend.schemas import ReliabilityDefinition, ScenarioDefinition
 from sandbox.backend.state import SandboxState, SandboxStateStore, redact_cursor, redact_token
 from sandbox.backend.webhook_hooks import sandbox_sync_guard_finish, sandbox_sync_guard_start
 
@@ -805,6 +812,201 @@ def test_run_all_counts_rate_limit_errors(tmp_path):
     assert result.rate_limit_errors == 1
 
 
+def test_reliability_loader_reads_json_definitions(tmp_path):
+    reliability_dir = tmp_path / "reliability"
+    reliability_dir.mkdir()
+    (reliability_dir / "duplicate.json").write_text(
+        """
+        {
+          "id": "duplicate_webhook",
+          "name": "Duplicate webhook",
+          "description": "Duplicate webhook",
+          "type": "duplicate_webhook",
+          "transaction": {"description": "Coffee", "amount": 1.23, "currency": "USD"}
+        }
+        """,
+        encoding="utf-8",
+    )
+    runner, _fake = _reliability_runner(tmp_path, tests_path=reliability_dir)
+
+    tests = runner.list_tests()
+
+    assert [test.id for test in tests] == ["duplicate_webhook"]
+    assert tests[0].transaction.iso_currency_code == "USD"
+
+
+def test_invalid_reliability_definition_is_rejected(tmp_path):
+    reliability_dir = tmp_path / "reliability"
+    reliability_dir.mkdir()
+    (reliability_dir / "bad.json").write_text('{"id": "bad"}', encoding="utf-8")
+    runner, _fake = _reliability_runner(tmp_path, tests_path=reliability_dir)
+
+    with pytest.raises(ReliabilityLoadError):
+        runner.list_tests()
+
+
+def test_reliability_result_persists_to_jsonl(tmp_path):
+    runner, _fake = _reliability_runner(
+        tmp_path,
+        _reliability_test("repeated_manual_sync", "repeated_manual_sync"),
+    )
+
+    result = runner.run_test("repeated_manual_sync")
+    persisted = runner.get_result(result.reliability_run_id)
+
+    assert persisted.reliability_run_id == result.reliability_run_id
+    assert len(runner.list_results()) == 1
+
+
+def test_duplicate_webhook_assertion_logic():
+    test = _reliability_test("duplicate_webhook", "duplicate_webhook")
+    summary = summarize_reliability_events(
+        [
+            {"event_type": "sandbox_webhook_fire_succeeded"},
+            {"event_type": "sandbox_webhook_fire_succeeded"},
+            {"event_type": "sandbox_webhook_fire_succeeded"},
+            {"event_type": "plaid_webhook_received"},
+            {"event_type": "sandbox_telegram_send_succeeded"},
+        ],
+        trace_id="trace",
+    )
+
+    assertions = assert_reliability_expectations(test, summary)
+
+    assert all(assertion.status == "passed" for assertion in assertions)
+
+
+def test_repeated_sync_assertion_fails_when_unbounded():
+    test = _reliability_test("repeated_manual_sync", "repeated_manual_sync")
+    summary = summarize_reliability_events(
+        [{"event_type": "plaid_transactions_sync_started"} for _ in range(6)],
+        trace_id="trace",
+    )
+
+    assertions = assert_reliability_expectations(test, summary)
+
+    assert any(
+        assertion.name == "sync_attempts_bounded" and assertion.status == "failed"
+        for assertion in assertions
+    )
+
+
+def test_concurrent_sync_guard_assertion(tmp_path):
+    runner, _fake = _reliability_runner(
+        tmp_path,
+        _reliability_test("concurrent_sync", "concurrent_sync"),
+    )
+
+    result = runner.run_test("concurrent_sync")
+
+    assert result.status == "passed"
+    assert result.event_summary["sync_skipped_already_running_count"] == 1
+
+
+def test_fault_store_consumes_fault_once(tmp_path):
+    store = SandboxFaultStore()
+    event_store = SandboxEventStore(tmp_path / "events.jsonl")
+
+    store.enable(name="fail_next_telegram_send", trace_id="trace-1", event_store=event_store)
+
+    assert store.consume(
+        name="fail_next_telegram_send",
+        trace_id="trace-1",
+        event_store=event_store,
+    )
+    assert not store.consume(
+        name="fail_next_telegram_send",
+        trace_id="trace-1",
+        event_store=event_store,
+    )
+    assert not store.consume(
+        name="fail_next_telegram_send",
+        trace_id="trace-2",
+        event_store=event_store,
+    )
+
+
+def test_plaid_sync_failure_assertion_logic():
+    test = _reliability_test(
+        "plaid_sync_failure_simulation",
+        "plaid_sync_failure_simulation",
+    )
+    summary = summarize_reliability_events(
+        [
+            {"event_type": "sandbox_fault_consumed"},
+            {"event_type": "plaid_transactions_sync_failed"},
+        ],
+        trace_id="trace",
+    )
+
+    assertions = assert_reliability_expectations(test, summary)
+
+    assert any(
+        assertion.name == "failure_logged" and assertion.status == "passed"
+        for assertion in assertions
+    )
+
+
+def test_cursor_missing_simulation_assertion_logic():
+    test = _reliability_test("cursor_missing_recovery", "cursor_missing_recovery")
+    summary = summarize_reliability_events(
+        [{"event_type": "reliability_cursor_missing_simulated"}],
+        trace_id="trace",
+    )
+
+    assertions = assert_reliability_expectations(test, summary)
+
+    assert any(
+        assertion.name == "cursor_not_corrupted" and assertion.status == "passed"
+        for assertion in assertions
+    )
+
+
+def test_loop_guard_assertion_logic():
+    test = _reliability_test("loop_guard", "loop_guard")
+    summary = summarize_reliability_events(
+        [{"event_type": "sandbox_loop_guard_triggered"}],
+        trace_id="trace",
+    )
+
+    assertions = assert_reliability_expectations(test, summary)
+
+    assert any(
+        assertion.name == "loop_guard_triggered" and assertion.status == "passed"
+        for assertion in assertions
+    )
+
+
+def test_reliability_run_all_aggregates_counts(tmp_path):
+    runner, _fake = _reliability_runner(
+        tmp_path,
+        _reliability_test("repeated_manual_sync", "repeated_manual_sync"),
+        _reliability_test("webhook_observation_timeout", "webhook_observation_timeout"),
+    )
+
+    result = runner.run_all()
+
+    assert result.total == 2
+    assert result.passed == 1
+    assert result.partial == 1
+    assert result.partial_count == 1
+
+
+def test_reliability_rate_limit_retry_reuses_classification(tmp_path):
+    runner, fake = _reliability_runner(
+        tmp_path,
+        _reliability_test("repeated_manual_sync", "repeated_manual_sync"),
+    )
+    fake.create_failures = [
+        SandboxPlaidError("rate limit exceeded, please try again later", request_id="plaid-1")
+    ]
+
+    result = runner.run_test("repeated_manual_sync")
+
+    assert result.status == "passed"
+    assert fake.create_calls == 2
+
+
 class FakePlaid:
     def __init__(self):
         self.create_transaction_calls = 0
@@ -917,6 +1119,11 @@ class FakeScenarioOrchestrator:
         self.sync_calls += 1
         self.event_store.append(
             trace_id=trace_id,
+            event_type="plaid_transactions_sync_cursor_saved",
+            status="info",
+        )
+        self.event_store.append(
+            trace_id=trace_id,
             event_type="plaid_transactions_sync_completed",
             status="succeeded",
         )
@@ -985,6 +1192,35 @@ def _scenario_runner(
     return runner, fake
 
 
+def _reliability_runner(
+    tmp_path,
+    *tests,
+    tests_path=None,
+    sleep_func=lambda _seconds: None,
+    jitter_func=lambda: 0,
+):
+    event_store = SandboxEventStore(tmp_path / "reliability-events.jsonl")
+    reliability_dir = tests_path or tmp_path / "reliability"
+    reliability_dir.mkdir(exist_ok=True)
+    for test in tests:
+        (reliability_dir / f"{test.id}.json").write_text(
+            test.model_dump_json(),
+            encoding="utf-8",
+        )
+    fake = FakeScenarioOrchestrator(event_store)
+    runner = ReliabilityRunner(
+        db=object(),
+        settings=SandboxSettings(enable_expenseops_sandbox_lab=True),
+        tests_path=reliability_dir,
+        result_path=tmp_path / "reliability_runs.jsonl",
+        event_store=event_store,
+        orchestrator=fake,
+        sleep_func=sleep_func,
+        jitter_func=jitter_func,
+    )
+    return runner, fake
+
+
 def _scenario(scenario_id, flow, **expectation_overrides):
     expectations = {
         "transaction_created": True,
@@ -1015,6 +1251,68 @@ def _scenario(scenario_id, flow, **expectation_overrides):
                 "amount": "1.23",
                 "iso_currency_code": "USD",
             },
+            "expectations": expectations,
+            "timeout_seconds": 1,
+        }
+    )
+
+
+def _reliability_test(test_id, test_type, **expectation_overrides):
+    expectations = {
+        "telegram_sent_max": 1,
+        "no_integrity_error": True,
+        "sync_attempts_bounded": True,
+        "no_loop_runaway": True,
+    }
+    parameters = {"max_sync_attempts": 4}
+    if test_type == "duplicate_webhook":
+        parameters["webhook_fire_count"] = 3
+        expectations["webhook_received"] = True
+    if test_type == "repeated_manual_sync":
+        parameters["sync_count"] = 3
+        expectations["cursor_not_corrupted"] = True
+        expectations["no_duplicate_transaction"] = True
+    if test_type == "concurrent_sync":
+        expectations["no_duplicate_transaction"] = True
+    if test_type == "webhook_observation_timeout":
+        expectations = {
+            "telegram_sent_max": 0,
+            "webhook_timeout_reported": True,
+            "webhook_received": False,
+            "no_integrity_error": True,
+        }
+    if test_type == "plaid_sync_failure_simulation":
+        expectations = {
+            "telegram_sent_max": 0,
+            "failure_logged": True,
+            "no_integrity_error": True,
+        }
+    if test_type == "cursor_missing_recovery":
+        expectations = {
+            "telegram_sent_max": 0,
+            "cursor_not_corrupted": True,
+            "no_integrity_error": True,
+        }
+    if test_type == "loop_guard":
+        expectations = {
+            "telegram_sent_max": 0,
+            "loop_guard_triggered": True,
+            "no_loop_runaway": True,
+            "no_integrity_error": True,
+        }
+    expectations.update(expectation_overrides)
+    return ReliabilityDefinition.model_validate(
+        {
+            "id": test_id,
+            "name": test_id.replace("_", " ").title(),
+            "description": "Reliability test",
+            "type": test_type,
+            "transaction": {
+                "description": "Reliability Coffee",
+                "amount": "1.23",
+                "iso_currency_code": "USD",
+            },
+            "parameters": parameters,
             "expectations": expectations,
             "timeout_seconds": 1,
         }

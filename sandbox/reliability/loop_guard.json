@@ -1,0 +1,18 @@
+{
+  "id": "loop_guard",
+  "name": "Loop guard",
+  "description": "Simulates repeated sync starts and verifies the Sandbox Lab loop guard event is emitted.",
+  "type": "loop_guard",
+  "parameters": {
+    "max_sync_attempts": 4
+  },
+  "expectations": {
+    "loop_guard_triggered": true,
+    "telegram_sent_max": 0,
+    "no_loop_runaway": true,
+    "no_integrity_error": true
+  },
+  "tags": ["loop-guard", "sync"],
+  "uses_real_plaid": false,
+  "uses_fault_injection": true
+}

@@ -133,10 +133,27 @@ export function humanizeEventType(type: string) {
     sandbox_telegram_send_succeeded: "Telegram sent",
     sandbox_telegram_send_skipped_duplicate: "Telegram duplicate skipped",
     sandbox_integrity_error: "Integrity error",
+    reliability_run_started: "Reliability run started",
+    reliability_run_completed: "Reliability run completed",
+    reliability_run_failed: "Reliability run failed",
+    reliability_assertion_passed: "Reliability assertion passed",
+    reliability_assertion_failed: "Reliability assertion failed",
+    reliability_duplicate_webhook_started: "Duplicate webhook test started",
+    reliability_repeated_manual_sync_started: "Repeated sync test started",
+    reliability_concurrent_sync_started: "Concurrent sync test started",
+    reliability_webhook_timeout_simulated: "Webhook timeout simulated",
+    reliability_telegram_failure_simulated: "Telegram failure simulated",
+    reliability_plaid_sync_failure_simulated: "Plaid sync failure simulated",
+    reliability_cursor_missing_simulated: "Cursor missing simulated",
+    reliability_loop_guard_verified: "Loop guard verified",
+    sandbox_fault_enabled: "Sandbox fault enabled",
+    sandbox_fault_consumed: "Sandbox fault consumed",
+    sandbox_fault_expired: "Sandbox fault expired",
+    sandbox_fault_cleared: "Sandbox fault cleared",
   };
   return labels[type] || type.replace(/_/g, " ");
 }
 
 export function traceFromName(name?: string | null) {
-  return name?.match(/\[trace:(sandbox_[^\]]+)\]/)?.[1] || null;
+  return name?.match(/\[trace:((?:sandbox|scenario|reliability)_[^\]]+)\]/)?.[1] || null;
 }

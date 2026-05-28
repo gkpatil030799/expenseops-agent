@@ -155,3 +155,65 @@ export type SandboxScenarioRunAggregate = {
   rate_limit_error_count: number;
   results: SandboxScenarioResult[];
 };
+
+export type SandboxReliabilityDefinition = {
+  id: string;
+  name: string;
+  description: string;
+  type: string;
+  transaction?: {
+    description: string;
+    amount: string | number;
+    iso_currency_code: string;
+    date_transacted?: string | null;
+    date_posted?: string | null;
+  } | null;
+  parameters: Record<string, unknown>;
+  expectations: Record<string, unknown>;
+  timeout_seconds: number;
+  tags: string[];
+  uses_real_plaid: boolean;
+  uses_telegram: boolean;
+  uses_fault_injection: boolean;
+  enabled: boolean;
+};
+
+export type SandboxReliabilityAssertion = {
+  name: string;
+  status: "passed" | "failed" | "skipped";
+  expected?: unknown;
+  actual?: unknown;
+  message: string;
+};
+
+export type SandboxReliabilityResult = {
+  reliability_run_id: string;
+  test_id: string;
+  test_name: string;
+  trace_id: string;
+  status: "passed" | "failed" | "partial" | "error";
+  started_at: string;
+  completed_at: string;
+  duration_ms: number;
+  assertions: SandboxReliabilityAssertion[];
+  event_summary: Record<string, unknown>;
+  raw_events: SandboxEvent[];
+  error_message?: string | null;
+  error_details: Record<string, unknown>;
+};
+
+export type SandboxReliabilityRunAggregate = {
+  status: "passed" | "failed" | "partial" | "error";
+  total: number;
+  passed: number;
+  failed: number;
+  partial: number;
+  errors: number;
+  rate_limit_errors: number;
+  passed_count: number;
+  failed_count: number;
+  partial_count: number;
+  error_count: number;
+  rate_limit_error_count: number;
+  results: SandboxReliabilityResult[];
+};

@@ -1,0 +1,21 @@
+{
+  "id": "webhook_observation_timeout",
+  "name": "Webhook observation timeout",
+  "description": "Simulates a webhook fired but not observed before timeout and verifies partial guidance.",
+  "type": "webhook_observation_timeout",
+  "transaction": {
+    "description": "ExpenseOps Reliability Webhook Timeout",
+    "amount": 12.34,
+    "currency": "USD"
+  },
+  "parameters": {},
+  "expectations": {
+    "telegram_sent_max": 0,
+    "webhook_timeout_reported": true,
+    "webhook_received": false,
+    "no_integrity_error": true
+  },
+  "tags": ["webhook", "timeout"],
+  "uses_real_plaid": true,
+  "uses_fault_injection": true
+}

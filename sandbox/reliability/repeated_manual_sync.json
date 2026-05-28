@@ -1,0 +1,25 @@
+{
+  "id": "repeated_manual_sync",
+  "name": "Repeated manual sync",
+  "description": "Runs manual sync repeatedly and verifies transaction and Telegram idempotency.",
+  "type": "repeated_manual_sync",
+  "transaction": {
+    "description": "ExpenseOps Reliability Repeated Sync",
+    "amount": 12.34,
+    "currency": "USD"
+  },
+  "parameters": {
+    "sync_count": 3,
+    "max_sync_attempts": 4
+  },
+  "expectations": {
+    "telegram_sent_max": 1,
+    "no_integrity_error": true,
+    "sync_attempts_bounded": true,
+    "cursor_not_corrupted": true,
+    "no_duplicate_transaction": true
+  },
+  "tags": ["sync", "idempotency"],
+  "uses_real_plaid": true,
+  "uses_telegram": true
+}
