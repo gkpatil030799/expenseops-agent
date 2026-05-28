@@ -12,6 +12,8 @@ STATE_PATH = SANDBOX_ROOT / "state" / "sandbox_state.local.json"
 EVENT_LOG_PATH = SANDBOX_ROOT / "logs" / "sandbox_events.jsonl"
 SCENARIO_RUN_LOG_PATH = SANDBOX_ROOT / "logs" / "scenario_runs.jsonl"
 SCENARIOS_PATH = SANDBOX_ROOT / "scenarios"
+RELIABILITY_RUN_LOG_PATH = SANDBOX_ROOT / "logs" / "reliability_runs.jsonl"
+RELIABILITY_TESTS_PATH = SANDBOX_ROOT / "reliability"
 
 
 class SandboxSettings(BaseSettings):
@@ -20,6 +22,7 @@ class SandboxSettings(BaseSettings):
     enable_expenseops_sandbox_lab: bool = False
     sandbox_public_webhook_url: str = ""
     sandbox_scenario_run_all_delay_seconds: int = 8
+    sandbox_reliability_run_all_delay_seconds: int = 8
 
     @property
     def app_settings(self):

@@ -1,6 +1,9 @@
 import type {
   SandboxCreateTransactionResponse,
   SandboxEventsResponse,
+  SandboxReliabilityDefinition,
+  SandboxReliabilityResult,
+  SandboxReliabilityRunAggregate,
   SandboxRunResponse,
   SandboxScenarioDefinition,
   SandboxScenarioResult,
@@ -25,6 +28,19 @@ export const sandboxApiClient = {
   status: () => sandboxApi<SandboxStatus>("/status"),
   scenarios: () => sandboxApi<SandboxScenarioDefinition[]>("/scenarios"),
   scenarioRuns: () => sandboxApi<{ results: SandboxScenarioResult[] }>("/scenario-runs"),
+  reliabilityTests: () => sandboxApi<SandboxReliabilityDefinition[]>("/reliability-tests"),
+  reliabilityRuns: () =>
+    sandboxApi<{ results: SandboxReliabilityResult[] }>("/reliability-runs"),
+  runReliabilityTest: (testId: string) =>
+    sandboxApi<SandboxReliabilityResult>(`/reliability-tests/${testId}/run`, {
+      method: "POST",
+    }),
+  runAllReliabilityTests: () =>
+    sandboxApi<SandboxReliabilityRunAggregate>("/reliability-tests/run-all", {
+      method: "POST",
+    }),
+  resetReliabilityRuns: () =>
+    sandboxApi<{ cleared: boolean }>("/reliability-runs/reset", { method: "POST" }),
   runScenario: (scenarioId: string) =>
     sandboxApi<SandboxScenarioResult>(`/scenarios/${scenarioId}/run`, { method: "POST" }),
   runAllScenarios: () =>

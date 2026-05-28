@@ -1,0 +1,24 @@
+{
+  "id": "concurrent_sync",
+  "name": "Concurrent sync",
+  "description": "Exercises overlapping sync behavior and verifies duplicate notifications are avoided.",
+  "type": "concurrent_sync",
+  "transaction": {
+    "description": "ExpenseOps Reliability Concurrent Sync",
+    "amount": 12.34,
+    "currency": "USD"
+  },
+  "parameters": {
+    "max_sync_attempts": 4
+  },
+  "expectations": {
+    "telegram_sent_max": 1,
+    "no_integrity_error": true,
+    "sync_attempts_bounded": true,
+    "no_loop_runaway": true,
+    "no_duplicate_transaction": true
+  },
+  "tags": ["sync", "race"],
+  "uses_real_plaid": true,
+  "uses_telegram": true
+}

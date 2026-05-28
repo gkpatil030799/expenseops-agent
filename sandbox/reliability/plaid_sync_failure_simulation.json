@@ -1,0 +1,17 @@
+{
+  "id": "plaid_sync_failure_simulation",
+  "name": "Plaid sync failure simulation",
+  "description": "Fails the next Sandbox Lab transactions sync and verifies the cursor is not advanced silently.",
+  "type": "plaid_sync_failure_simulation",
+  "parameters": {
+    "max_sync_attempts": 2
+  },
+  "expectations": {
+    "failure_logged": true,
+    "no_integrity_error": true,
+    "telegram_sent_max": 0
+  },
+  "tags": ["plaid", "fault"],
+  "uses_real_plaid": false,
+  "uses_fault_injection": true
+}

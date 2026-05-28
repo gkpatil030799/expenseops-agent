@@ -10,6 +10,7 @@ import {
   RadioTower,
   RefreshCw,
   Send,
+  ShieldAlert,
   ShieldCheck,
   TerminalSquare,
   XCircle,
@@ -37,6 +38,9 @@ import { useSandboxApi } from "./hooks/useSandboxApi";
 import type {
   SandboxCreateTransactionResponse,
   SandboxEvent,
+  SandboxReliabilityDefinition,
+  SandboxReliabilityResult,
+  SandboxReliabilityRunAggregate,
   SandboxRunResponse,
   SandboxScenarioDefinition,
   SandboxScenarioResult,
@@ -47,7 +51,14 @@ import type {
   SandboxWebhookResponse,
 } from "./types";
 
-type SandboxSection = "overview" | "webhook" | "manual-sync" | "e2e" | "scenarios" | "events";
+type SandboxSection =
+  | "overview"
+  | "webhook"
+  | "manual-sync"
+  | "e2e"
+  | "scenarios"
+  | "reliability"
+  | "events";
 
 const navItems: Array<{ id: SandboxSection; label: string }> = [
   { id: "overview", label: "Overview" },
@@ -55,6 +66,7 @@ const navItems: Array<{ id: SandboxSection; label: string }> = [
   { id: "manual-sync", label: "Manual Sync Flow" },
   { id: "e2e", label: "Full E2E" },
   { id: "scenarios", label: "Scenario Runner" },
+  { id: "reliability", label: "Reliability Suite" },
   { id: "events", label: "Event Explorer" },
 ];
 
@@ -78,6 +90,10 @@ export function SandboxLabPage() {
   const [scenarios, setScenarios] = useState<SandboxScenarioDefinition[]>([]);
   const [scenarioResults, setScenarioResults] = useState<SandboxScenarioResult[]>([]);
   const [scenarioAggregate, setScenarioAggregate] = useState<SandboxScenarioRunAggregate | null>(null);
+  const [reliabilityTests, setReliabilityTests] = useState<SandboxReliabilityDefinition[]>([]);
+  const [reliabilityResults, setReliabilityResults] = useState<SandboxReliabilityResult[]>([]);
+  const [reliabilityAggregate, setReliabilityAggregate] =
+    useState<SandboxReliabilityRunAggregate | null>(null);
   const [scenarioRunStatus, setScenarioRunStatus] = useState<{
     mode: "idle" | "running" | "sleeping";
     scenarioName?: string;
@@ -114,6 +130,7 @@ export function SandboxLabPage() {
 
   useEffect(() => {
     void refreshScenarioData();
+    void refreshReliabilityData();
   }, []);
 
   async function refreshAll(traceId?: string) {
@@ -167,6 +184,15 @@ export function SandboxLabPage() {
     setScenarioResults(runData.results);
   }
 
+  async function refreshReliabilityData() {
+    const [testData, runData] = await Promise.all([
+      sandboxApiClient.reliabilityTests(),
+      sandboxApiClient.reliabilityRuns(),
+    ]);
+    setReliabilityTests(testData);
+    setReliabilityResults(runData.results);
+  }
+
   async function runScenario(scenarioId: string) {
     const result = await runAction(`scenario-${scenarioId}`, () =>
       sandboxApiClient.runScenario(scenarioId),
@@ -207,6 +233,38 @@ export function SandboxLabPage() {
       setScenarioAggregate(aggregateScenarioResults(results));
     } finally {
       setScenarioRunStatus({ mode: "idle" });
+    }
+  }
+
+  async function runReliabilityTest(testId: string) {
+    const result = await runAction(`reliability-${testId}`, () =>
+      sandboxApiClient.runReliabilityTest(testId),
+    );
+    setReliabilityResults((current) => [
+      result,
+      ...current.filter((item) => item.reliability_run_id !== result.reliability_run_id),
+    ]);
+    setTraceFilter(result.trace_id);
+    await refreshAll(result.trace_id);
+  }
+
+  async function runAllReliabilityTests() {
+    const result = await runAction("reliability-run-all", () =>
+      sandboxApiClient.runAllReliabilityTests(),
+    );
+    setReliabilityAggregate(result);
+    setReliabilityResults((current) => [
+      ...result.results,
+      ...current.filter(
+        (item) =>
+          !result.results.some(
+            (fresh) => fresh.reliability_run_id === item.reliability_run_id,
+          ),
+      ),
+    ]);
+    if (result.results[0]) {
+      setTraceFilter(result.results[0].trace_id);
+      await refreshAll(result.results[0].trace_id);
     }
   }
 
@@ -305,6 +363,24 @@ export function SandboxLabPage() {
           />
         ) : null}
 
+        {activeSection === "reliability" ? (
+          <ReliabilitySuitePage
+            blocked={blocked}
+            loading={loading}
+            tests={reliabilityTests}
+            results={reliabilityResults}
+            aggregate={reliabilityAggregate}
+            onRun={(testId) => void runReliabilityTest(testId)}
+            onRunAll={() => void runAllReliabilityTests()}
+            onRefresh={() => void refreshReliabilityData()}
+            onShowEvents={(traceId) => {
+              setTraceFilter(traceId);
+              setActiveSection("events");
+              void loadEvents(traceId);
+            }}
+          />
+        ) : null}
+
         {activeSection === "events" ? (
           <EventExplorerPage
             events={events}
@@ -365,6 +441,12 @@ function OverviewPage({
           description="Automated smoke test with fallback sync."
           cta="Open Full E2E"
           onClick={() => onOpen("e2e")}
+        />
+        <WorkflowCard
+          title="Reliability Suite"
+          description="Controlled failure and race simulations for Sandbox Lab."
+          cta="Open Reliability Suite"
+          onClick={() => onOpen("reliability")}
         />
       </div>
     </div>
@@ -821,6 +903,243 @@ function ScenarioResultPanel({
   );
 }
 
+function ReliabilitySuitePage({
+  blocked,
+  loading,
+  tests,
+  results,
+  aggregate,
+  onRun,
+  onRunAll,
+  onRefresh,
+  onShowEvents,
+}: {
+  blocked: boolean;
+  loading: string | null;
+  tests: SandboxReliabilityDefinition[];
+  results: SandboxReliabilityResult[];
+  aggregate: SandboxReliabilityRunAggregate | null;
+  onRun: (testId: string) => void;
+  onRunAll: () => void;
+  onRefresh: () => void;
+  onShowEvents: (traceId: string) => void;
+}) {
+  const latestByTest = new Map(results.map((result) => [result.test_id, result]));
+
+  return (
+    <div className="space-y-5">
+      <FlowHeader
+        title="Reliability Suite"
+        description="Run Sandbox Lab reliability checks for duplicate webhooks, repeated syncs, faults, timeouts, and loop guards."
+      />
+      <Card className="p-4 text-sm leading-6 text-amber-800 ring-1 ring-amber-200">
+        These tests may send Telegram notifications and call Plaid Sandbox APIs. They run
+        sequentially to avoid rate limits.
+      </Card>
+      <div className="flex flex-wrap gap-2">
+        <Button disabled={blocked || loading === "reliability-run-all"} onClick={onRunAll}>
+          <ShieldAlert className="h-4 w-4" />
+          {loading === "reliability-run-all" ? "Running..." : "Run Reliability Suite"}
+        </Button>
+        <Button variant="secondary" onClick={onRefresh}>
+          <RefreshCw className="h-4 w-4" />
+          Refresh Results
+        </Button>
+      </div>
+      {aggregate ? (
+        <Card className="p-4">
+          <div className="flex flex-wrap items-center gap-3">
+            <StatusPill value={aggregate.status} label={`Run all: ${aggregate.status}`} />
+            <span className="text-sm text-slate-600">
+              {aggregate.passed}/{aggregate.total} passed, {aggregate.partial} partial,{" "}
+              {aggregate.failed} failed, {aggregate.errors} errors,{" "}
+              {aggregate.rate_limit_errors} rate-limit errors
+            </span>
+          </div>
+        </Card>
+      ) : null}
+      <div className="grid gap-4 lg:grid-cols-2">
+        {tests.map((test) => (
+          <ReliabilityCard
+            key={test.id}
+            test={test}
+            latestResult={latestByTest.get(test.id)}
+            loading={loading === `reliability-${test.id}`}
+            blocked={blocked}
+            onRun={() => onRun(test.id)}
+            onShowEvents={onShowEvents}
+          />
+        ))}
+      </div>
+      <ReliabilityResultsList results={results.slice(0, 8)} onShowEvents={onShowEvents} />
+    </div>
+  );
+}
+
+function ReliabilityCard({
+  test,
+  latestResult,
+  loading,
+  blocked,
+  onRun,
+  onShowEvents,
+}: {
+  test: SandboxReliabilityDefinition;
+  latestResult?: SandboxReliabilityResult;
+  loading: boolean;
+  blocked: boolean;
+  onRun: () => void;
+  onShowEvents: (traceId: string) => void;
+}) {
+  return (
+    <Card className="p-5">
+      <div className="flex items-start justify-between gap-3">
+        <div>
+          <h2 className="text-base font-semibold text-slate-950">{test.name}</h2>
+          <p className="mt-1 text-sm leading-6 text-slate-500">{test.description}</p>
+        </div>
+        <StatusPill value={latestResult?.status || "unknown"} label={latestResult?.status || "not run"} />
+      </div>
+      <div className="mt-3 flex flex-wrap gap-2 text-xs">
+        <ReliabilityFlag enabled={test.uses_real_plaid} label="real Plaid" />
+        <ReliabilityFlag enabled={test.uses_telegram} label="Telegram" />
+        <ReliabilityFlag enabled={test.uses_fault_injection} label="fault injection" />
+        {test.tags.map((tag) => (
+          <span key={tag} className="rounded-full bg-white px-2 py-1 text-slate-500 ring-1 ring-slate-200">
+            {tag}
+          </span>
+        ))}
+      </div>
+      {test.uses_fault_injection ? (
+        <p className="mt-3 text-xs font-semibold text-amber-700">
+          Sandbox-only simulated failure. Production behavior is not modified.
+        </p>
+      ) : null}
+      {test.uses_telegram ? (
+        <p className="mt-2 text-xs text-slate-500">This test may send one Telegram notification.</p>
+      ) : null}
+      <div className="mt-4 flex flex-wrap gap-2">
+        <Button disabled={blocked || loading} onClick={onRun}>
+          <Play className="h-4 w-4" />
+          {loading ? "Running..." : "Run"}
+        </Button>
+        {latestResult ? (
+          <Button variant="secondary" onClick={() => onShowEvents(latestResult.trace_id)}>
+            Open events for this trace
+          </Button>
+        ) : null}
+      </div>
+      {latestResult ? <ReliabilityResultPanel result={latestResult} compact /> : null}
+    </Card>
+  );
+}
+
+function ReliabilityFlag({ enabled, label }: { enabled: boolean; label: string }) {
+  return (
+    <span
+      className={`rounded-full px-2 py-1 font-semibold ${
+        enabled ? "bg-slate-100 text-slate-700" : "bg-white text-slate-400 ring-1 ring-slate-200"
+      }`}
+    >
+      {enabled ? label : `no ${label}`}
+    </span>
+  );
+}
+
+function ReliabilityResultsList({
+  results,
+  onShowEvents,
+}: {
+  results: SandboxReliabilityResult[];
+  onShowEvents: (traceId: string) => void;
+}) {
+  if (!results.length) {
+    return <Card className="p-6 text-sm text-slate-500">No reliability runs yet.</Card>;
+  }
+  return (
+    <div className="space-y-4">
+      {results.map((result) => (
+        <ReliabilityResultPanel
+          key={result.reliability_run_id}
+          result={result}
+          onShowEvents={onShowEvents}
+        />
+      ))}
+    </div>
+  );
+}
+
+function ReliabilityResultPanel({
+  result,
+  compact = false,
+  onShowEvents,
+}: {
+  result: SandboxReliabilityResult;
+  compact?: boolean;
+  onShowEvents?: (traceId: string) => void;
+}) {
+  return (
+    <Card className={compact ? "mt-4 p-4" : "p-5"}>
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <div className="flex flex-wrap items-center gap-2">
+            <StatusPill value={result.status} label={result.status} />
+            <span className="text-sm font-semibold text-slate-950">{result.test_name}</span>
+          </div>
+          <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-slate-500">
+            <span>run {shortId(result.reliability_run_id, 12)}</span>
+            <span>trace {shortId(result.trace_id, 12)}</span>
+            <CopyButton value={result.trace_id} label="Copy trace ID" />
+            <span>{result.duration_ms} ms</span>
+          </div>
+        </div>
+        {onShowEvents ? (
+          <Button variant="secondary" onClick={() => onShowEvents(result.trace_id)}>
+            Open events for this trace
+          </Button>
+        ) : null}
+      </div>
+      {result.error_details?.rate_limit_error ? (
+        <div className="mt-4 rounded-md border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">
+          Plaid Sandbox rate limit hit. Wait a bit or rerun this reliability test individually.
+        </div>
+      ) : result.error_message ? (
+        <div className="mt-4 rounded-md border border-red-200 bg-red-50 p-3 text-sm text-red-700">
+          {result.error_message}
+        </div>
+      ) : result.status === "partial" ? (
+        <div className="mt-4 rounded-md border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">
+          Webhook was not observed before timeout. Manual sync fallback guidance is available in
+          the event summary.
+        </div>
+      ) : null}
+      <div className="mt-4 grid gap-2 md:grid-cols-2">
+        {result.assertions.map((assertion) => {
+          const Icon = assertion.status === "passed" ? CheckCircle2 : assertion.status === "failed" ? XCircle : ListChecks;
+          return (
+            <div key={assertion.name} className="rounded-md border border-slate-200 bg-white p-3 text-sm">
+              <div className="flex items-center gap-2 font-semibold text-slate-800">
+                <Icon className="h-4 w-4" />
+                {assertion.name}
+                <StatusPill value={assertion.status} />
+              </div>
+              {assertion.status === "failed" ? (
+                <p className="mt-1 text-xs text-red-700">{assertion.message}</p>
+              ) : null}
+            </div>
+          );
+        })}
+      </div>
+      {!compact ? (
+        <div className="mt-4 grid gap-3 lg:grid-cols-2">
+          <SandboxJsonViewer title="Event summary" data={result.event_summary} />
+          <SandboxJsonViewer title="Raw reliability result JSON" data={result} />
+        </div>
+      ) : null}
+    </Card>
+  );
+}
+
 function EventExplorerPage({
   events,
   traceFilter,
@@ -935,7 +1254,7 @@ function SandboxNav({
 }) {
   return (
     <nav className="rounded-lg border border-slate-200 bg-white p-1 shadow-sm">
-      <div className="grid gap-1 md:grid-cols-5">
+      <div className="grid gap-1 md:grid-cols-7">
         {navItems.map((item) => (
           <button
             key={item.id}

@@ -1,0 +1,25 @@
+{
+  "id": "duplicate_webhook",
+  "name": "Duplicate webhook",
+  "description": "Fires the same webhook multiple times and verifies idempotent sync and Telegram behavior.",
+  "type": "duplicate_webhook",
+  "transaction": {
+    "description": "ExpenseOps Reliability Duplicate Webhook",
+    "amount": 12.34,
+    "currency": "USD"
+  },
+  "parameters": {
+    "webhook_fire_count": 3,
+    "max_sync_attempts": 4
+  },
+  "expectations": {
+    "telegram_sent_max": 1,
+    "no_integrity_error": true,
+    "sync_attempts_bounded": true,
+    "no_loop_runaway": true,
+    "webhook_received": true
+  },
+  "tags": ["webhook", "idempotency"],
+  "uses_real_plaid": true,
+  "uses_telegram": true
+}

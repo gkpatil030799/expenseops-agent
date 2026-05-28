@@ -1,0 +1,24 @@
+{
+  "id": "telegram_failure_simulation",
+  "name": "Telegram failure simulation",
+  "description": "Fails the next Sandbox Lab Telegram send and verifies sync does not crash or retry endlessly.",
+  "type": "telegram_failure_simulation",
+  "transaction": {
+    "description": "ExpenseOps Reliability Telegram Failure",
+    "amount": 12.34,
+    "currency": "USD"
+  },
+  "parameters": {
+    "max_sync_attempts": 3
+  },
+  "expectations": {
+    "telegram_sent_max": 0,
+    "failure_logged": true,
+    "no_integrity_error": true,
+    "no_loop_runaway": true
+  },
+  "tags": ["telegram", "fault"],
+  "uses_real_plaid": true,
+  "uses_telegram": true,
+  "uses_fault_injection": true
+}

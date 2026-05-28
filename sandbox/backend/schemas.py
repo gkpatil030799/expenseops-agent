@@ -197,3 +197,98 @@ class ScenarioRunAggregateResponse(BaseModel):
     error_count: int = 0
     rate_limit_error_count: int = 0
     results: list[ScenarioResult]
+
+
+class ReliabilityTransaction(BaseModel):
+    description: str
+    amount: Decimal
+    iso_currency_code: str = "USD"
+    date_transacted: date | None = None
+    date_posted: date | None = None
+
+    @field_validator("iso_currency_code", mode="before")
+    @classmethod
+    def normalize_reliability_currency(cls, value: str | None) -> str:
+        return (value or "USD").upper()
+
+
+class ReliabilityExpectations(BaseModel):
+    telegram_sent_max: int | None = None
+    no_integrity_error: bool | None = None
+    sync_attempts_bounded: bool | None = None
+    no_loop_runaway: bool | None = None
+    loop_guard_triggered: bool | None = None
+    webhook_received: bool | None = None
+    webhook_timeout_reported: bool | None = None
+    failure_logged: bool | None = None
+    cursor_not_corrupted: bool | None = None
+    no_duplicate_transaction: bool | None = None
+
+
+class ReliabilityDefinition(BaseModel):
+    id: str
+    name: str
+    description: str
+    type: Literal[
+        "duplicate_webhook",
+        "repeated_manual_sync",
+        "concurrent_sync",
+        "webhook_observation_timeout",
+        "telegram_failure_simulation",
+        "plaid_sync_failure_simulation",
+        "cursor_missing_recovery",
+        "loop_guard",
+    ]
+    transaction: ReliabilityTransaction | None = None
+    parameters: dict[str, Any] = Field(default_factory=dict)
+    expectations: ReliabilityExpectations = Field(default_factory=ReliabilityExpectations)
+    timeout_seconds: int = Field(default=30, ge=1, le=300)
+    tags: list[str] = Field(default_factory=list)
+    uses_real_plaid: bool = True
+    uses_telegram: bool = False
+    uses_fault_injection: bool = False
+    enabled: bool = True
+
+
+class ReliabilityAssertionResult(BaseModel):
+    name: str
+    status: Literal["passed", "failed", "skipped"]
+    expected: Any = None
+    actual: Any = None
+    message: str = ""
+
+
+class ReliabilityResult(BaseModel):
+    reliability_run_id: str
+    test_id: str
+    test_name: str
+    trace_id: str
+    status: Literal["passed", "failed", "partial", "error"]
+    started_at: str
+    completed_at: str
+    duration_ms: int
+    assertions: list[ReliabilityAssertionResult] = Field(default_factory=list)
+    event_summary: dict[str, Any] = Field(default_factory=dict)
+    raw_events: list[dict[str, Any]] = Field(default_factory=list)
+    error_message: str | None = None
+    error_details: dict[str, Any] = Field(default_factory=dict)
+
+
+class ReliabilityRunsResponse(BaseModel):
+    results: list[ReliabilityResult]
+
+
+class ReliabilityRunAggregateResponse(BaseModel):
+    status: Literal["passed", "failed", "partial", "error"]
+    total: int
+    passed: int
+    failed: int
+    partial: int
+    errors: int
+    rate_limit_errors: int = 0
+    passed_count: int = 0
+    failed_count: int = 0
+    partial_count: int = 0
+    error_count: int = 0
+    rate_limit_error_count: int = 0
+    results: list[ReliabilityResult]
