@@ -343,6 +343,230 @@ def test_existing_settled_transaction_update_does_not_duplicate_review_notificat
     db.close()
 
 
+def test_personal_transaction_is_not_notified_again_after_plaid_modified_sync(
+    tmp_path,
+    monkeypatch,
+    caplog,
+):
+    db = _sqlite_session(tmp_path)
+    item = db.get(PlaidItem, 1)
+    tx = ExpenseTransaction(
+        plaid_transaction_id="tx-personal-modified",
+        plaid_item_id=item.id,
+        name="Old merchant",
+        amount_cents=1200,
+        pending=False,
+        status=TransactionStatus.PERSONAL.value,
+    )
+    db.add(tx)
+    db.commit()
+    notifications = FakeNotificationService()
+
+    class FakePlaidService:
+        def transactions_sync(self, *, access_token, cursor):
+            return {
+                "added": [],
+                "modified": [_plaid_tx("tx-personal-modified", pending=False, name="Updated")],
+                "removed": [],
+                "next_cursor": "cursor",
+                "has_more": False,
+            }
+
+    monkeypatch.setattr(transaction_service, "decrypt_secret", lambda _encrypted: "access-token")
+    service = TransactionService(
+        db,
+        plaid_service=FakePlaidService(),
+        splitwise_service=object(),
+        notification_service=notifications,
+    )
+
+    with caplog.at_level(logging.INFO):
+        result = service.sync_item(item)
+
+    db.refresh(tx)
+    assert result["modified"] == 1
+    assert result["notification_eligible"] == 0
+    assert notifications.review_notifications == []
+    assert tx.status == TransactionStatus.PERSONAL.value
+    assert tx.name == "Updated"
+    assert any(
+        getattr(record, "event", None) == "transaction_status_preserved_on_plaid_update"
+        and record.log_metadata["status"] == TransactionStatus.PERSONAL.value
+        for record in caplog.records
+    )
+    assert any(
+        getattr(record, "event", None) == "transaction_notification_skipped_personal"
+        for record in caplog.records
+    )
+    db.close()
+
+
+def test_posted_transaction_is_not_notified_again_after_plaid_modified_sync(
+    tmp_path,
+    monkeypatch,
+    caplog,
+):
+    db = _sqlite_session(tmp_path)
+    item = db.get(PlaidItem, 1)
+    tx = ExpenseTransaction(
+        plaid_transaction_id="tx-posted-modified",
+        plaid_item_id=item.id,
+        name="Old posted",
+        amount_cents=1200,
+        pending=False,
+        status=TransactionStatus.POSTED.value,
+        splitwise_expense_id="splitwise-expense-1",
+    )
+    db.add(tx)
+    db.commit()
+    notifications = FakeNotificationService()
+
+    class FakePlaidService:
+        def transactions_sync(self, *, access_token, cursor):
+            return {
+                "added": [],
+                "modified": [_plaid_tx("tx-posted-modified", pending=False, name="Updated posted")],
+                "removed": [],
+                "next_cursor": "cursor",
+                "has_more": False,
+            }
+
+    monkeypatch.setattr(transaction_service, "decrypt_secret", lambda _encrypted: "access-token")
+    service = TransactionService(
+        db,
+        plaid_service=FakePlaidService(),
+        splitwise_service=object(),
+        notification_service=notifications,
+    )
+
+    with caplog.at_level(logging.INFO):
+        result = service.sync_item(item)
+
+    db.refresh(tx)
+    assert result["modified"] == 1
+    assert result["notification_eligible"] == 0
+    assert notifications.review_notifications == []
+    assert tx.status == TransactionStatus.POSTED.value
+    assert tx.splitwise_expense_id == "splitwise-expense-1"
+    assert tx.name == "Updated posted"
+    assert any(
+        getattr(record, "event", None) == "transaction_notification_skipped_posted"
+        for record in caplog.records
+    )
+    db.close()
+
+
+def test_pending_to_settled_personal_transaction_does_not_notify(tmp_path):
+    db = _sqlite_session(tmp_path)
+    notifications = FakeNotificationService()
+    service = TransactionService(
+        db,
+        splitwise_service=object(),
+        notification_service=notifications,
+    )
+
+    service.upsert_transaction(
+        db.get(PlaidItem, 1),
+        _plaid_tx("tx-personal-pending-settled", pending=True),
+    )
+    tx = db.query(ExpenseTransaction).filter_by(
+        plaid_transaction_id="tx-personal-pending-settled"
+    ).one()
+    tx.status = TransactionStatus.PERSONAL.value
+    db.commit()
+
+    service.upsert_transaction(
+        db.get(PlaidItem, 1),
+        _plaid_tx("tx-personal-pending-settled", pending=False),
+    )
+    db.refresh(tx)
+
+    assert tx.pending is False
+    assert tx.status == TransactionStatus.PERSONAL.value
+    assert notifications.review_notifications == []
+    db.close()
+
+
+def test_shared_draft_ready_transaction_can_notify_once(tmp_path):
+    db = _sqlite_session(tmp_path)
+    item = db.get(PlaidItem, 1)
+    tx = ExpenseTransaction(
+        plaid_transaction_id="tx-shared-draft-ready",
+        plaid_item_id=item.id,
+        name="Draft merchant",
+        amount_cents=2200,
+        pending=False,
+        status=TransactionStatus.SHARED_DRAFT.value,
+        splitwise_payload_json="{}",
+    )
+    db.add(tx)
+    db.commit()
+    notifications = FakeNotificationService()
+    service = TransactionService(
+        db,
+        splitwise_service=object(),
+        notification_service=notifications,
+    )
+
+    first = service._notify_ready_transactions_for_item(item)
+    second = service._notify_ready_transactions_for_item(item)
+    db.refresh(tx)
+
+    assert first == {"eligible": 1, "sent": 1, "skipped": 0}
+    assert second == {"eligible": 0, "sent": 0, "skipped": 0}
+    assert notifications.review_notifications == [tx.id]
+    assert tx.review_notification_sent_at is not None
+    db.close()
+
+
+def test_duplicate_webhook_does_not_renotify_resolved_transaction(tmp_path, monkeypatch):
+    db = _sqlite_session(tmp_path)
+    item = db.get(PlaidItem, 1)
+    tx = ExpenseTransaction(
+        plaid_transaction_id="tx-resolved-repeat",
+        plaid_item_id=item.id,
+        name="Resolved merchant",
+        amount_cents=3300,
+        pending=False,
+        status=TransactionStatus.POSTED.value,
+        splitwise_expense_id="expense-repeat",
+    )
+    db.add(tx)
+    db.commit()
+    notifications = FakeNotificationService()
+
+    class FakePlaidService:
+        def transactions_sync(self, *, access_token, cursor):
+            return {
+                "added": [],
+                "modified": [_plaid_tx("tx-resolved-repeat", pending=False)],
+                "removed": [],
+                "next_cursor": "cursor",
+                "has_more": False,
+            }
+
+    monkeypatch.setattr(transaction_service, "decrypt_secret", lambda _encrypted: "access-token")
+    service = TransactionService(
+        db,
+        plaid_service=FakePlaidService(),
+        splitwise_service=object(),
+        notification_service=notifications,
+    )
+
+    first = service.sync_item(item)
+    second = service.sync_item(item)
+    db.refresh(tx)
+
+    assert first["modified"] == 1
+    assert second["modified"] == 1
+    assert first["notification_eligible"] == 0
+    assert second["notification_eligible"] == 0
+    assert notifications.review_notifications == []
+    assert tx.status == TransactionStatus.POSTED.value
+    assert tx.splitwise_expense_id == "expense-repeat"
+    db.close()
+
+
 def test_repeated_sync_same_transaction_is_idempotent(tmp_path, monkeypatch):
     db = _sqlite_session(tmp_path)
     item = db.get(PlaidItem, 1)

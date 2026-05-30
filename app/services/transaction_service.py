@@ -36,6 +36,20 @@ logger = logging.getLogger(__name__)
 _SCENARIO_TRACE_PATTERN = re.compile(r"\[trace:(scenario_([a-z0-9_]+)_\d{8}_[a-f0-9]+)\]")
 _SANDBOX_TRACE_PATTERN = re.compile(r"\[trace:((?:scenario|reliability)_[^\]]+)\]")
 _NO_NOTIFY_SCENARIO_IDS = {"create_only_no_import"}
+ACTIONABLE_REVIEW_STATUSES = {
+    TransactionStatus.ASK_USER.value,
+    TransactionStatus.SHARED_DRAFT.value,
+}
+RESOLVED_TRANSACTION_STATUSES = {
+    TransactionStatus.PERSONAL.value,
+    TransactionStatus.POSTED.value,
+    TransactionStatus.REMOVED.value,
+    TransactionStatus.ERROR.value,
+    "settled",
+    "splitwise_posted",
+    "ignored",
+    "resolved",
+}
 
 
 class TransactionError(RuntimeError):
@@ -210,6 +224,7 @@ class TransactionService:
 
         created = tx is None
         previous_pending = bool(tx.pending) if tx is not None else None
+        previous_status = str(tx.status) if tx is not None else None
         if tx is None:
             tx = ExpenseTransaction(
                 plaid_item_id=item.id,
@@ -220,6 +235,16 @@ class TransactionService:
             self.db.add(tx)
 
         self._apply_plaid_transaction_fields(tx, item, tx_data)
+        if not created and previous_status and _is_resolved_transaction_status(previous_status):
+            log_event(
+                logger,
+                "transaction_status_preserved_on_plaid_update",
+                tx_id=tx.id,
+                plaid_transaction_id=tx.plaid_transaction_id,
+                status=tx.status,
+                previous_status=previous_status,
+                splitwise_expense_id=tx.splitwise_expense_id,
+            )
 
         if created:
             self.db.flush()
@@ -265,6 +290,7 @@ class TransactionService:
             if skip_reason == "scenario_create_only_no_import":
                 self._skip_scenario_create_only_notification(tx)
                 self.db.commit()
+            self._log_notification_skip(tx, skip_reason)
             log_event(
                 logger,
                 "transaction_notification_skipped",
@@ -292,7 +318,18 @@ class TransactionService:
                 "Transaction insert conflicted, but the existing transaction could not be loaded."
             )
         previous_pending = bool(tx.pending)
+        previous_status = str(tx.status)
         self._apply_plaid_transaction_fields(tx, item, tx_data)
+        if _is_resolved_transaction_status(previous_status):
+            log_event(
+                logger,
+                "transaction_status_preserved_on_plaid_update",
+                tx_id=tx.id,
+                plaid_transaction_id=tx.plaid_transaction_id,
+                status=tx.status,
+                previous_status=previous_status,
+                splitwise_expense_id=tx.splitwise_expense_id,
+            )
         notification_eligible = self._should_notify_transaction_needs_review(
             tx,
             created=False,
@@ -305,6 +342,7 @@ class TransactionService:
             notification_sent = self._attempt_review_notification(tx)
             self.db.commit()
         else:
+            self._log_notification_skip(tx, self._notification_skip_reason(tx))
             log_event(
                 logger,
                 "transaction_upsert_skipped_duplicate",
@@ -359,26 +397,57 @@ class TransactionService:
         created: bool,
         previous_pending: bool | None,
     ) -> bool:
-        if tx.status != TransactionStatus.ASK_USER.value:
+        if not self.should_notify_for_review(tx):
             return False
+        return created or previous_pending is True
+
+    def should_notify_for_review(self, tx: ExpenseTransaction) -> bool:
         if tx.pending:
             return False
         if tx.review_notification_sent_at is not None:
             return False
+        if tx.splitwise_expense_id:
+            return False
         if _scenario_id_for_no_notify(tx):
             return False
-        return created or previous_pending is True
+        return str(tx.status) in ACTIONABLE_REVIEW_STATUSES
 
     def _notification_skip_reason(self, tx: ExpenseTransaction) -> str:
         if _scenario_id_for_no_notify(tx):
             return "scenario_create_only_no_import"
-        if tx.status != TransactionStatus.ASK_USER.value:
-            return "status_not_ask_user"
         if tx.pending:
             return "transaction_pending"
+        if tx.status == TransactionStatus.PERSONAL.value:
+            return "personal"
+        if tx.status == TransactionStatus.POSTED.value or tx.splitwise_expense_id:
+            return "posted"
+        if _is_resolved_transaction_status(str(tx.status)):
+            return "resolved"
+        if str(tx.status) not in ACTIONABLE_REVIEW_STATUSES:
+            return "not_actionable"
         if tx.review_notification_sent_at is not None:
             return "review_notification_already_sent"
         return "not_new_or_pending_transition"
+
+    def _log_notification_skip(self, tx: ExpenseTransaction, skip_reason: str) -> None:
+        event_by_reason = {
+            "resolved": "transaction_notification_skipped_resolved",
+            "personal": "transaction_notification_skipped_personal",
+            "posted": "transaction_notification_skipped_posted",
+            "not_actionable": "transaction_notification_skipped_not_actionable",
+        }
+        event_type = event_by_reason.get(skip_reason)
+        if not event_type:
+            return
+        log_event(
+            logger,
+            event_type,
+            tx_id=tx.id,
+            plaid_transaction_id=tx.plaid_transaction_id,
+            status=tx.status,
+            pending=tx.pending,
+            splitwise_expense_id=tx.splitwise_expense_id,
+        )
 
     def _notify_ready_transactions_for_item(
         self,
@@ -391,8 +460,9 @@ class TransactionService:
             self.db.execute(
                 select(ExpenseTransaction)
                 .where(ExpenseTransaction.plaid_item_id == item.id)
-                .where(ExpenseTransaction.status == TransactionStatus.ASK_USER.value)
+                .where(ExpenseTransaction.status.in_(ACTIONABLE_REVIEW_STATUSES))
                 .where(ExpenseTransaction.pending.is_(False))
+                .where(ExpenseTransaction.splitwise_expense_id.is_(None))
                 .where(ExpenseTransaction.review_notification_sent_at.is_(None))
                 .order_by(ExpenseTransaction.created_at.asc())
             )
@@ -455,8 +525,9 @@ class TransactionService:
             update(ExpenseTransaction)
             .where(ExpenseTransaction.id == tx.id)
             .where(ExpenseTransaction.review_notification_sent_at.is_(None))
-            .where(ExpenseTransaction.status == TransactionStatus.ASK_USER.value)
+            .where(ExpenseTransaction.status.in_(ACTIONABLE_REVIEW_STATUSES))
             .where(ExpenseTransaction.pending.is_(False))
+            .where(ExpenseTransaction.splitwise_expense_id.is_(None))
             .values(review_notification_sent_at=claimed_at, updated_at=utc_now())
         )
         if result.rowcount != 1:
@@ -832,6 +903,10 @@ def _category_to_string(category: Any, personal_finance_category: Any) -> str | 
     if isinstance(category, list):
         return " / ".join(map(str, category))
     return str(category) if category else None
+
+
+def _is_resolved_transaction_status(status: str | None) -> bool:
+    return bool(status) and status in RESOLVED_TRANSACTION_STATUSES
 
 
 def _plaid_token_environment(access_token: str) -> str | None:
