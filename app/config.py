@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from functools import lru_cache
 from typing import Annotated, Literal
 
@@ -38,6 +39,7 @@ class Settings(BaseSettings):
     plaid_products: Annotated[list[str], NoDecode] = Field(default_factory=lambda: ["transactions"])
     plaid_days_requested: int = 30
     plaid_verify_webhooks: bool = False
+    allow_unverified_plaid_webhooks_for_local_test: bool = False
 
     splitwise_base_url: str = "https://secure.splitwise.com/api/v3.0"
     splitwise_api_key: str = ""
@@ -80,6 +82,22 @@ class Settings(BaseSettings):
     @property
     def has_splitwise_oauth1_consumer(self) -> bool:
         return bool(self.splitwise_consumer_key and self.splitwise_consumer_secret)
+
+    @property
+    def plaid_webhook_verification_required(self) -> bool:
+        return self.plaid_env == "production" or self.plaid_verify_webhooks
+
+    @property
+    def allow_plaid_webhook_verification_bypass_for_local_test(self) -> bool:
+        app_env = os.environ.get("APP_ENV", "").strip().lower()
+        environment = self.environment.strip().lower()
+        if app_env == "production" or environment == "production":
+            return False
+        return (
+            self.plaid_env == "production"
+            and self.allow_unverified_plaid_webhooks_for_local_test
+            and (app_env == "local" or environment == "local")
+        )
 
 
 @lru_cache(maxsize=1)
