@@ -781,22 +781,6 @@ running and testing the local/private-beta MVP.
   environment, not only local ngrok.
 - More dashboard components can be extracted from the main frontend file.
 
-## Demo Guide
-
-Suggested demo flow for reviewers or interviews:
-
-1. Show the main dashboard and pending review queue.
-2. Explain Plaid ingestion and webhook flow.
-3. Show a pending transaction card.
-4. Show Telegram review notification.
-5. Mark one transaction personal or create a split draft.
-6. Open Sandbox Lab.
-7. Create a Sandbox transaction.
-8. Fire a Plaid Sandbox webhook.
-9. Show Event Timeline with webhook received and sync completed.
-10. Open Scenario Runner and run `webhook_basic`.
-11. Open Reliability Suite and show duplicate webhook / repeated sync coverage.
-
 ## Project Status
 
 ExpenseOps is a working MVP and private-beta style prototype. It demonstrates
