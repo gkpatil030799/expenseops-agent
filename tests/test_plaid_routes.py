@@ -28,7 +28,11 @@ def default_plaid_route_settings(monkeypatch):
     monkeypatch.setattr(
         plaid_routes,
         "get_settings",
-        lambda: Settings(plaid_env="sandbox", plaid_verify_webhooks=False),
+        lambda: Settings(
+            plaid_env="sandbox",
+            plaid_verify_webhooks=False,
+            plaid_verify_webhooks_in_sandbox=False,
+        ),
     )
 
 
@@ -288,7 +292,11 @@ def test_plaid_webhook_verification_disabled_allows_webhook(monkeypatch):
     monkeypatch.setattr(
         plaid_routes,
         "get_settings",
-        lambda: Settings(plaid_env="sandbox", plaid_verify_webhooks=False),
+        lambda: Settings(
+            plaid_env="sandbox",
+            plaid_verify_webhooks=False,
+            plaid_verify_webhooks_in_sandbox=False,
+        ),
     )
 
     class RaisingPlaidService:
@@ -336,6 +344,7 @@ def test_plaid_webhook_verification_enabled_rejects_missing_header(monkeypatch):
 
 def test_plaid_webhook_verification_enabled_rejects_invalid_header(monkeypatch, caplog):
     caplog.set_level(logging.WARNING)
+    sandbox_events = []
     monkeypatch.setattr(
         plaid_routes,
         "get_settings",
@@ -354,6 +363,11 @@ def test_plaid_webhook_verification_enabled_rejects_invalid_header(monkeypatch, 
             raise PlaidWebhookVerificationError("jwt_signature_invalid")
 
     monkeypatch.setattr(plaid_routes, "PlaidService", FailingPlaidService)
+    monkeypatch.setattr(
+        plaid_routes,
+        "maybe_log_sandbox_webhook_verification_event",
+        lambda **kwargs: sandbox_events.append(kwargs),
+    )
     app.dependency_overrides[get_db] = lambda: object()
 
     try:
@@ -372,6 +386,11 @@ def test_plaid_webhook_verification_enabled_rejects_invalid_header(monkeypatch, 
         and record.log_metadata["reason"] == "jwt_signature_invalid"
         for record in caplog.records
     )
+    assert [event["event_type"] for event in sandbox_events] == [
+        "plaid_webhook_verification_started",
+        "plaid_webhook_verification_failed",
+    ]
+    assert sandbox_events[-1]["payload"]["reason"] == "jwt_signature_invalid"
 
 
 def test_plaid_webhook_production_requires_verification_even_when_flag_false(monkeypatch):
@@ -514,15 +533,19 @@ def test_plaid_webhook_verification_failure_is_audited(tmp_path, monkeypatch):
     assert event.plaid_item_id == "item-1"
 
 
-def test_plaid_webhook_verification_enabled_accepts_valid_header(monkeypatch):
+def test_plaid_webhook_verification_enabled_accepts_valid_header(monkeypatch, caplog):
     calls = []
+    sandbox_events = []
+    caplog.set_level(logging.INFO)
+    raw_body = b'{"webhook_type":"ITEM","webhook_code":"ERROR","item_id":"item-1"}'
+    token, _jwk = _signed_webhook_jwt(raw_body)
     monkeypatch.setattr(
         plaid_routes,
         "get_settings",
         lambda: Settings(
             plaid_verify_webhooks=True,
             plaid_client_id="client-id",
-            plaid_secret="secret",
+            plaid_secret="super-secret-value",
         ),
     )
 
@@ -534,13 +557,18 @@ def test_plaid_webhook_verification_enabled_accepts_valid_header(monkeypatch):
             calls.append((raw_body, verification_header))
 
     monkeypatch.setattr(plaid_routes, "PlaidService", SuccessfulPlaidService)
+    monkeypatch.setattr(
+        plaid_routes,
+        "maybe_log_sandbox_webhook_verification_event",
+        lambda **kwargs: sandbox_events.append(kwargs),
+    )
     app.dependency_overrides[get_db] = lambda: object()
 
     try:
         response = TestClient(app).post(
             "/plaid/webhook",
-            headers={"Plaid-Verification": "valid-jwt"},
-            json={"webhook_type": "ITEM", "webhook_code": "ERROR", "item_id": "item-1"},
+            headers={"Plaid-Verification": token, "Content-Type": "application/json"},
+            content=raw_body,
         )
     finally:
         app.dependency_overrides.clear()
@@ -548,7 +576,25 @@ def test_plaid_webhook_verification_enabled_accepts_valid_header(monkeypatch):
     assert response.status_code == 200
     assert response.json()["message"] == "Webhook ignored: ITEM/ERROR"
     assert calls
-    assert calls[0][1] == "valid-jwt"
+    assert calls[0][1] == token
+    assert [event["event_type"] for event in sandbox_events] == [
+        "plaid_webhook_verification_started",
+        "plaid_webhook_verification_succeeded",
+    ]
+    assert sandbox_events[-1]["payload"] == {
+        "plaid_env": "sandbox",
+        "verification_required": True,
+        "header_present": True,
+        "kid_present": True,
+    }
+    serialized_events = str(sandbox_events)
+    serialized_logs = "\n".join(
+        str(getattr(record, "log_metadata", "")) for record in caplog.records
+    )
+    assert token not in serialized_events
+    assert token not in serialized_logs
+    assert "super-secret-value" not in serialized_events
+    assert "super-secret-value" not in serialized_logs
 
 
 def test_plaid_webhook_verifies_before_ignoring_unrelated_webhook(monkeypatch):
@@ -593,6 +639,7 @@ def test_plaid_webhook_local_only_bypass_allows_sync_when_app_env_local(
 ):
     item = PlaidItem(id=123, item_id="item-1", access_token_encrypted="encrypted")
     synced = []
+    sandbox_events = []
     caplog.set_level(logging.WARNING)
     monkeypatch.setenv("APP_ENV", "local")
     monkeypatch.setattr(
@@ -625,6 +672,11 @@ def test_plaid_webhook_local_only_bypass_allows_sync_when_app_env_local(
     monkeypatch.setattr(plaid_routes, "PlaidService", FailingPlaidService)
     monkeypatch.setattr(
         plaid_routes,
+        "maybe_log_sandbox_webhook_verification_event",
+        lambda **kwargs: sandbox_events.append(kwargs),
+    )
+    monkeypatch.setattr(
+        plaid_routes,
         "_sync_item_by_db_id",
         lambda item_id, event_id=None: synced.append(item_id),
     )
@@ -650,6 +702,11 @@ def test_plaid_webhook_local_only_bypass_allows_sync_when_app_env_local(
         == "plaid_webhook_verification_bypassed_for_local_test"
         for record in caplog.records
     )
+    assert [event["event_type"] for event in sandbox_events] == [
+        "plaid_webhook_verification_started",
+        "plaid_webhook_verification_bypassed_for_local_test",
+    ]
+    assert sandbox_events[-1]["payload"]["reason"] == "jwt_signature_invalid"
 
 
 def test_plaid_webhook_local_bypass_denied_when_app_env_production(monkeypatch):
