@@ -399,6 +399,14 @@ Each transaction card shows a recommendation-only classification:
 `likely_personal`, `likely_shared`, or `unsure`. The app never auto-posts based
 on this suggestion.
 
+### Plaid webhook verification
+
+Production Plaid webhooks always require a valid `Plaid-Verification` JWT. For
+Sandbox Lab verification testing, set `PLAID_ENV=sandbox` and
+`PLAID_VERIFY_WEBHOOKS_IN_SANDBOX=true`; the app verifies Sandbox webhooks
+against Plaid Sandbox verification keys. Leave it false for the default local
+Sandbox Lab flow.
+
 ## Useful API endpoints
 
 ### Create Plaid Link token

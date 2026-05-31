@@ -143,6 +143,132 @@ def test_plaid_webhook_signature_rejects_raw_body_hash_mismatch():
     assert exc.value.reason == "request_body_hash_mismatch"
 
 
+def test_plaid_webhook_sandbox_verification_disabled_by_default(monkeypatch):
+    monkeypatch.delenv("PLAID_VERIFY_WEBHOOKS", raising=False)
+    monkeypatch.delenv("PLAID_VERIFY_WEBHOOKS_IN_SANDBOX", raising=False)
+    settings = Settings(plaid_env="sandbox", _env_file=None)
+
+    assert settings.plaid_verify_webhooks_in_sandbox is False
+    assert settings.plaid_webhook_verification_required is False
+
+
+@pytest.mark.parametrize("value", ["true", "1", "yes", "on"])
+def test_plaid_webhook_sandbox_verification_flag_accepts_true_values(
+    monkeypatch,
+    value,
+):
+    monkeypatch.setenv("PLAID_ENV", "sandbox")
+    monkeypatch.setenv("PLAID_VERIFY_WEBHOOKS_IN_SANDBOX", value)
+
+    settings = Settings(_env_file=None)
+
+    assert settings.plaid_verify_webhooks_in_sandbox is True
+    assert settings.plaid_webhook_verification_required is True
+
+
+def test_plaid_webhook_sandbox_verification_enabled_requires_header(monkeypatch):
+    monkeypatch.setattr(
+        plaid_routes,
+        "get_settings",
+        lambda: Settings(
+            plaid_env="sandbox",
+            plaid_verify_webhooks_in_sandbox=True,
+            plaid_client_id="client-id",
+            plaid_secret="secret",
+        ),
+    )
+    app.dependency_overrides[get_db] = lambda: object()
+
+    try:
+        response = TestClient(app).post(
+            "/plaid/webhook",
+            json={"webhook_type": "ITEM", "webhook_code": "ERROR", "item_id": "item-1"},
+        )
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Plaid webhook verification failed"
+
+
+def test_plaid_webhook_sandbox_verification_enabled_accepts_valid_jwt(monkeypatch):
+    raw_body = b'{"webhook_type":"ITEM","webhook_code":"ERROR","item_id":"item-1"}'
+    token, jwk = _signed_webhook_jwt(raw_body)
+    service_settings = []
+
+    monkeypatch.setattr(
+        plaid_routes,
+        "get_settings",
+        lambda: Settings(
+            plaid_env="sandbox",
+            plaid_verify_webhooks_in_sandbox=True,
+            plaid_client_id="client-id",
+            plaid_secret="secret",
+        ),
+    )
+
+    class SandboxPlaidService(PlaidService):
+        def __init__(self, settings=None):
+            self.settings = settings
+            service_settings.append(settings)
+
+        def get_webhook_verification_key(self, key_id):
+            assert key_id == "test-kid"
+            return {"key": jwk}
+
+    monkeypatch.setattr(plaid_routes, "PlaidService", SandboxPlaidService)
+    app.dependency_overrides[get_db] = lambda: object()
+
+    try:
+        response = TestClient(app).post(
+            "/plaid/webhook",
+            headers={"Plaid-Verification": token, "Content-Type": "application/json"},
+            content=raw_body,
+        )
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    assert response.json()["message"] == "Webhook ignored: ITEM/ERROR"
+    assert service_settings
+    assert service_settings[0].plaid_env == "sandbox"
+
+
+def test_plaid_webhook_sandbox_verification_enabled_rejects_invalid_jwt(monkeypatch):
+    monkeypatch.setattr(
+        plaid_routes,
+        "get_settings",
+        lambda: Settings(
+            plaid_env="sandbox",
+            plaid_verify_webhooks_in_sandbox=True,
+            plaid_client_id="client-id",
+            plaid_secret="secret",
+        ),
+    )
+
+    class FailingPlaidService:
+        def __init__(self, settings=None):
+            pass
+
+        def verify_webhook_signature(self, *, raw_body, verification_header):
+            raise PlaidWebhookVerificationError("jwt_signature_invalid")
+
+    monkeypatch.setattr(plaid_routes, "PlaidService", FailingPlaidService)
+    app.dependency_overrides[get_db] = lambda: object()
+
+    try:
+        response = TestClient(app).post(
+            "/plaid/webhook",
+            headers={"Plaid-Verification": "bad-jwt"},
+            json={"webhook_type": "ITEM", "webhook_code": "ERROR", "item_id": "item-1"},
+        )
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Plaid webhook verification failed"
+
+
 def test_plaid_webhook_ignores_unrelated_webhook_types():
     app.dependency_overrides[get_db] = lambda: object()
 
@@ -896,6 +1022,36 @@ def _override_db(SessionLocal):
             db.close()
 
     return override
+
+
+def _signed_webhook_jwt(raw_body: bytes):
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric import ec
+    from jose import jwt
+
+    private_key = ec.generate_private_key(ec.SECP256R1())
+    private_pem = private_key.private_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PrivateFormat.PKCS8,
+        encryption_algorithm=serialization.NoEncryption(),
+    )
+    public_numbers = private_key.public_key().public_numbers()
+    jwk = {
+        "kty": "EC",
+        "crv": "P-256",
+        "kid": "test-kid",
+        "use": "sig",
+        "alg": "ES256",
+        "x": _base64url_uint(public_numbers.x),
+        "y": _base64url_uint(public_numbers.y),
+    }
+    token = jwt.encode(
+        {"request_body_sha256": hashlib.sha256(raw_body).hexdigest()},
+        private_pem,
+        algorithm="ES256",
+        headers={"kid": "test-kid"},
+    )
+    return token, jwk
 
 
 def _base64url_uint(value: int) -> str:

@@ -39,6 +39,7 @@ class Settings(BaseSettings):
     plaid_products: Annotated[list[str], NoDecode] = Field(default_factory=lambda: ["transactions"])
     plaid_days_requested: int = 30
     plaid_verify_webhooks: bool = False
+    plaid_verify_webhooks_in_sandbox: bool = False
     allow_unverified_plaid_webhooks_for_local_test: bool = False
 
     splitwise_base_url: str = "https://secure.splitwise.com/api/v3.0"
@@ -85,7 +86,11 @@ class Settings(BaseSettings):
 
     @property
     def plaid_webhook_verification_required(self) -> bool:
-        return self.plaid_env == "production" or self.plaid_verify_webhooks
+        return (
+            self.plaid_env == "production"
+            or self.plaid_verify_webhooks
+            or (self.plaid_env == "sandbox" and self.plaid_verify_webhooks_in_sandbox)
+        )
 
     @property
     def allow_plaid_webhook_verification_bypass_for_local_test(self) -> bool:
