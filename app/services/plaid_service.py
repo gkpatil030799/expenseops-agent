@@ -21,6 +21,9 @@ class PlaidWebhookVerificationError(RuntimeError):
     reason: str
 
 
+_WEBHOOK_VERIFICATION_KEY_CACHE: dict[tuple[str, str], dict[str, Any]] = {}
+
+
 class PlaidService:
     """Thin wrapper around Plaid's generated Python client.
 
@@ -112,6 +115,10 @@ class PlaidService:
         return response.to_dict()
 
     def get_webhook_verification_key(self, key_id: str) -> dict[str, Any]:
+        cache_key = (self.settings.plaid_env, key_id)
+        if cache_key in _WEBHOOK_VERIFICATION_KEY_CACHE:
+            return _WEBHOOK_VERIFICATION_KEY_CACHE[cache_key]
+
         from plaid.model.webhook_verification_key_get_request import (
             WebhookVerificationKeyGetRequest,
         )
@@ -122,31 +129,39 @@ class PlaidService:
             )
         except Exception as exc:
             raise PlaidRequestError(_plaid_error_message(exc)) from exc
-        return response.to_dict()
+        data = response.to_dict()
+        _WEBHOOK_VERIFICATION_KEY_CACHE[cache_key] = data
+        return data
 
     def verify_webhook_signature(self, *, raw_body: bytes, verification_header: str) -> None:
         """Verify Plaid's webhook JWT and exact request-body hash."""
         if not verification_header:
-            raise PlaidWebhookVerificationError("missing_header")
+            raise PlaidWebhookVerificationError("missing_plaid_verification_header")
 
         try:
             from jose import jwt
         except Exception as exc:  # pragma: no cover - dependency/config failure
-            raise PlaidWebhookVerificationError("jwt_dependency_unavailable") from exc
+            raise PlaidWebhookVerificationError("verification_unexpected_error") from exc
 
         try:
             unverified_header = jwt.get_unverified_header(verification_header)
         except Exception as exc:
-            raise PlaidWebhookVerificationError("invalid_jwt_header") from exc
+            raise PlaidWebhookVerificationError("jwt_header_parse_failed") from exc
 
+        algorithm = unverified_header.get("alg")
+        if algorithm != "ES256":
+            raise PlaidWebhookVerificationError("unsupported_algorithm")
         key_id = unverified_header.get("kid")
         if not key_id:
-            raise PlaidWebhookVerificationError("missing_key_id")
+            raise PlaidWebhookVerificationError("missing_kid")
 
-        key_response = self.get_webhook_verification_key(str(key_id))
+        try:
+            key_response = self.get_webhook_verification_key(str(key_id))
+        except PlaidRequestError as exc:
+            raise PlaidWebhookVerificationError("webhook_key_fetch_failed") from exc
         jwk = key_response.get("key") or key_response
         if not isinstance(jwk, dict):
-            raise PlaidWebhookVerificationError("invalid_verification_key")
+            raise PlaidWebhookVerificationError("webhook_key_fetch_failed")
 
         try:
             claims = jwt.decode(
@@ -156,15 +171,17 @@ class PlaidService:
                 options={"verify_aud": False},
             )
         except Exception as exc:
-            raise PlaidWebhookVerificationError("invalid_signature") from exc
+            if type(exc).__name__ in {"ExpiredSignatureError", "JWTClaimsError"}:
+                raise PlaidWebhookVerificationError("jwt_expired_or_not_yet_valid") from exc
+            raise PlaidWebhookVerificationError("jwt_signature_invalid") from exc
 
         expected_hash = claims.get("request_body_sha256")
         if not expected_hash:
-            raise PlaidWebhookVerificationError("missing_body_hash")
+            raise PlaidWebhookVerificationError("request_body_hash_mismatch")
 
         actual_hash = hashlib.sha256(raw_body).hexdigest()
         if not hmac.compare_digest(str(expected_hash), actual_hash):
-            raise PlaidWebhookVerificationError("body_hash_mismatch")
+            raise PlaidWebhookVerificationError("request_body_hash_mismatch")
 
 
 def _plaid_error_message(exc: Exception) -> str:

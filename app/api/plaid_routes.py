@@ -28,6 +28,7 @@ from app.services.transaction_service import TransactionService
 from sandbox.backend.event_store import SandboxEventStore
 from sandbox.backend.webhook_hooks import (
     maybe_log_sandbox_webhook,
+    maybe_log_sandbox_webhook_verification_event,
     sandbox_sync_guard_finish,
     sandbox_sync_guard_start,
 )
@@ -101,7 +102,7 @@ async def plaid_webhook(
     request: Request, background_tasks: BackgroundTasks, db: DbSession
 ) -> WebhookAck:
     raw_body = await request.body()
-    _verify_plaid_webhook_if_enabled(request, raw_body)
+    _verify_plaid_webhook_if_enabled(request, raw_body, db)
     try:
         payload = json.loads(raw_body)
     except json.JSONDecodeError as exc:
@@ -314,41 +315,225 @@ def _mark_webhook_event_failed(
     _safe_commit(db)
 
 
+def _mark_webhook_event_verification_failed(
+    db: DbSession,
+    event: PlaidWebhookEvent,
+    error_message: str,
+) -> None:
+    event.processing_status = "verification_failed"
+    event.error_message = error_message
+    event.processed_at = utc_now()
+    _safe_commit(db)
+
+
 def _safe_commit(db: DbSession) -> None:
     if hasattr(db, "commit"):
         db.commit()
 
 
-def _verify_plaid_webhook_if_enabled(request: Request, raw_body: bytes) -> None:
+def _verify_plaid_webhook_if_enabled(request: Request, raw_body: bytes, db: DbSession) -> None:
     settings = get_settings()
-    if not settings.plaid_verify_webhooks:
+    if not settings.plaid_webhook_verification_required:
         return
 
+    metadata = _safe_webhook_metadata(raw_body)
     verification_header = request.headers.get("Plaid-Verification", "")
+    verification_metadata = {
+        "plaid_env": settings.plaid_env,
+        "verification_required": True,
+        "header_present": bool(verification_header),
+        "kid_present": _plaid_verification_kid_present(verification_header),
+    }
+    _log_plaid_webhook_verification_event(
+        "plaid_webhook_verification_started",
+        status="started",
+        metadata=metadata,
+        payload=verification_metadata,
+    )
     if not verification_header:
-        raise HTTPException(status_code=401, detail="Missing Plaid webhook verification")
+        _handle_plaid_webhook_verification_failure(
+            db,
+            raw_body,
+            reason="missing_plaid_verification_header",
+            settings=settings,
+            header_present=verification_metadata["header_present"],
+            kid_present=verification_metadata["kid_present"],
+        )
+        return
 
     try:
         PlaidService(settings=settings).verify_webhook_signature(
             raw_body=raw_body,
             verification_header=verification_header,
         )
+        _log_plaid_webhook_verification_event(
+            "plaid_webhook_verification_succeeded",
+            status="succeeded",
+            metadata=metadata,
+            payload=verification_metadata,
+        )
         log_event(logger, "plaid_webhook_verified")
     except PlaidWebhookVerificationError as exc:
-        log_event(
-            logger,
-            "plaid_webhook_verification_failed",
-            level=logging.WARNING,
-            reason="plaid_verification_failed",
-            verification_reason=exc.reason,
+        _handle_plaid_webhook_verification_failure(
+            db,
+            raw_body,
+            reason=exc.reason,
+            settings=settings,
+            header_present=verification_metadata["header_present"],
+            kid_present=verification_metadata["kid_present"],
         )
-        raise HTTPException(status_code=401, detail="Invalid Plaid webhook verification") from exc
+        return
     except (PlaidConfigurationError, PlaidRequestError) as exc:
-        log_event(
-            logger,
-            "plaid_webhook_verification_failed",
-            level=logging.WARNING,
-            reason="plaid_verification_failed",
+        _handle_plaid_webhook_verification_failure(
+            db,
+            raw_body,
+            reason="webhook_key_fetch_failed",
+            settings=settings,
             error_type=type(exc).__name__,
+            header_present=verification_metadata["header_present"],
+            kid_present=verification_metadata["kid_present"],
         )
-        raise HTTPException(status_code=403, detail="Plaid webhook verification failed") from exc
+        return
+
+
+def _handle_plaid_webhook_verification_failure(
+    db: DbSession,
+    raw_body: bytes,
+    *,
+    reason: str,
+    settings,
+    error_type: str | None = None,
+    header_present: bool | None = None,
+    kid_present: bool | None = None,
+) -> None:
+    metadata = _safe_webhook_metadata(raw_body)
+    verification_payload = {
+        "plaid_env": settings.plaid_env,
+        "verification_required": True,
+        "header_present": bool(header_present),
+        "kid_present": bool(kid_present),
+        "reason": reason,
+    }
+    if _allow_unverified_plaid_webhook_for_local_test(settings, reason):
+        _log_plaid_webhook_verification_event(
+            "plaid_webhook_verification_bypassed_for_local_test",
+            status="warning",
+            metadata=metadata,
+            payload=verification_payload,
+        )
+        return
+
+    _log_plaid_webhook_verification_event(
+        "plaid_webhook_verification_failed",
+        status="failed",
+        metadata=metadata,
+        payload=verification_payload,
+    )
+    event = _create_plaid_webhook_event(
+        db,
+        webhook_type=metadata["webhook_type"],
+        webhook_code=metadata["webhook_code"],
+        plaid_item_id=metadata["item_id"],
+        payload_hash=sha256(raw_body).hexdigest(),
+    )
+    _mark_webhook_event_verification_failed(db, event, reason)
+    log_kwargs = {
+        "reason": reason,
+        "webhook_type": metadata["webhook_type"],
+        "webhook_code": metadata["webhook_code"],
+        "plaid_item_id": metadata["item_id"],
+    }
+    if error_type:
+        log_kwargs["error_type"] = error_type
+    log_event(
+        logger,
+        "plaid_webhook_verification_failed",
+        level=logging.WARNING,
+        **log_kwargs,
+    )
+    raise HTTPException(status_code=403, detail="Plaid webhook verification failed")
+
+
+def _allow_unverified_plaid_webhook_for_local_test(settings, verification_reason: str) -> bool:
+    if not settings.allow_plaid_webhook_verification_bypass_for_local_test:
+        if settings.allow_unverified_plaid_webhooks_for_local_test:
+            log_event(
+                logger,
+                "plaid_webhook_verification_bypass_denied",
+                level=logging.WARNING,
+                reason="local_test_bypass_requested_outside_local_environment",
+                plaid_env=settings.plaid_env,
+                environment=settings.environment,
+                verification_reason=verification_reason,
+            )
+        return False
+    log_event(
+        logger,
+        "plaid_webhook_verification_bypassed_for_local_test",
+        level=logging.WARNING,
+        reason="verification_bypassed_for_local_test",
+        plaid_env=settings.plaid_env,
+        environment=settings.environment,
+        verification_reason=verification_reason,
+    )
+    return True
+
+
+def _safe_webhook_metadata(raw_body: bytes) -> dict[str, str | None]:
+    try:
+        payload = json.loads(raw_body)
+    except json.JSONDecodeError:
+        return {
+            "webhook_type": "unknown",
+            "webhook_code": "unknown",
+            "item_id": None,
+        }
+    return {
+        "webhook_type": str(payload.get("webhook_type") or "unknown"),
+        "webhook_code": str(payload.get("webhook_code") or "unknown"),
+        "item_id": str(payload.get("item_id")) if payload.get("item_id") else None,
+    }
+
+
+def _plaid_verification_kid_present(verification_header: str) -> bool:
+    if not verification_header:
+        return False
+    try:
+        from jose import jwt
+
+        return bool(jwt.get_unverified_header(verification_header).get("kid"))
+    except Exception:
+        return False
+
+
+def _log_plaid_webhook_verification_event(
+    event_type: str,
+    *,
+    status: str,
+    metadata: dict[str, str | None],
+    payload: dict[str, object],
+) -> None:
+    safe_payload = {
+        "plaid_env": payload.get("plaid_env"),
+        "verification_required": payload.get("verification_required"),
+        "header_present": payload.get("header_present"),
+        "kid_present": payload.get("kid_present"),
+    }
+    if payload.get("reason"):
+        safe_payload["reason"] = payload["reason"]
+    log_event(
+        logger,
+        event_type,
+        webhook_type=metadata["webhook_type"],
+        webhook_code=metadata["webhook_code"],
+        plaid_item_id=metadata["item_id"],
+        **safe_payload,
+    )
+    maybe_log_sandbox_webhook_verification_event(
+        event_type=event_type,
+        status=status,
+        webhook_type=metadata["webhook_type"],
+        webhook_code=metadata["webhook_code"],
+        item_id=metadata["item_id"],
+        payload=safe_payload,
+    )

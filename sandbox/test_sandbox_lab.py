@@ -7,8 +7,9 @@ from fastapi import HTTPException
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
+from app.config import get_settings
 from app.db import Base
-from sandbox.backend.config import SandboxSettings
+from sandbox.backend.config import SandboxSettings, get_sandbox_settings
 from sandbox.backend.event_store import SandboxEventStore, new_trace_id
 from sandbox.backend.fault_injection import SandboxFaultStore
 from sandbox.backend.guards import require_sandbox_lab_enabled, require_sandbox_plaid_env
@@ -32,9 +33,21 @@ from sandbox.backend.state import SandboxState, SandboxStateStore, redact_cursor
 from sandbox.backend.webhook_hooks import sandbox_sync_guard_finish, sandbox_sync_guard_start
 
 
+@pytest.fixture(autouse=True)
+def default_sandbox_test_env(monkeypatch):
+    monkeypatch.setenv("PLAID_ENV", "sandbox")
+    monkeypatch.setenv("ENABLE_EXPENSEOPS_SANDBOX_LAB", "true")
+    get_settings.cache_clear()
+    get_sandbox_settings.cache_clear()
+    try:
+        yield
+    finally:
+        get_settings.cache_clear()
+        get_sandbox_settings.cache_clear()
+
+
 def test_sandbox_lab_disabled_guard(monkeypatch):
     monkeypatch.setenv("ENABLE_EXPENSEOPS_SANDBOX_LAB", "false")
-    from sandbox.backend.config import get_sandbox_settings
 
     get_sandbox_settings.cache_clear()
     try:

@@ -124,6 +124,38 @@ def maybe_log_sandbox_webhook(payload: dict[str, Any]) -> None:
         return
 
 
+def maybe_log_sandbox_webhook_verification_event(
+    *,
+    event_type: str,
+    status: str,
+    webhook_type: str | None,
+    webhook_code: str | None,
+    item_id: str | None,
+    payload: dict[str, Any],
+) -> None:
+    try:
+        settings = get_sandbox_settings()
+        if not settings.enabled:
+            return
+        state = SandboxStateStore().load()
+        if state.item_id and item_id != state.item_id:
+            return
+        SandboxEventStore().append(
+            trace_id=state.latest_trace_id or "sandbox_unknown",
+            event_type=event_type,
+            status=status,
+            payload={
+                "webhook_type": webhook_type,
+                "webhook_code": webhook_code,
+                "item_id": item_id,
+                **payload,
+            },
+            plaid_item_id=item_id,
+        )
+    except Exception:
+        return
+
+
 def maybe_log_sandbox_telegram_event(
     tx: Any,
     *,
