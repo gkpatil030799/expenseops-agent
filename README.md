@@ -1,27 +1,46 @@
 # ExpenseOps Agent
 
-ExpenseOps is a Plaid + Telegram-powered expense review system. It ingests card
-transactions, identifies expenses that need a decision, and lets a user classify
-them as personal or shared through a React dashboard and Telegram review flow.
+Ever paid for dinner or an Uber, said “I’ll split it later,” and then completely forgot?
 
-This repo is currently designed for local/private-beta use, not public
-multi-tenant deployment.
+Most shared expenses do not get lost because they are complicated. They get lost because they are easy to postpone.
 
-The project is intentionally approval-first: ExpenseOps can prepare shared split
-workflows, but it does not post a shared expense without explicit user action.
+ExpenseOps is designed to eliminate that friction.
+
+Instead of making users hunt through transaction histories, ExpenseOps automatically surfaces card transactions that may need attention and guides them through a simple review workflow. Shared expense decisions, transaction review, and split preparation all happen in one place.
+
+What makes the experience different is the AI layer. Users can review expenses through Telegram using natural language:
+
+```text
+"Split this with Alex and Priya 50-50 in Weekend Crew."
+"This was personal."
+"Ignore this transaction."
+
+## How It Works
+
+1. A card transaction appears.
+2. ExpenseOps brings it into the review dashboard.
+3. The user decides whether it is personal or shared.
+4. The user can also reply through Telegram using buttons or natural language.
+5. The AI-assisted review flow interprets the user’s intent and prepares the next step.
+6. If the transaction is personal, it is marked resolved.
+7. If it is shared, the user can choose friends, groups, and split rules.
+8. ExpenseOps prepares the shared expense and waits for confirmation.
+9. After approval, the expense can be posted to the shared-expense workflow.
+10. Already resolved transactions are not repeatedly shown or re-notified.
 
 ## What This Project Demonstrates
 
-- Plaid Link and public-token exchange
-- Plaid `/transactions/sync` cursor-based ingestion
-- Plaid webhooks with production verification support
-- Idempotent transaction upsert and notification claiming
-- Telegram review notifications with button and reply workflows
-- Shared expense draft/posting workflow with Splitwise-style payloads
-- A polished React dashboard for review and operational visibility
-- Sandbox Lab for safe Plaid Sandbox testing
-- Scenario Runner for repeatable QA
-- Reliability Suite for webhook, sync, notification, and failure simulations
+Although the user experience is simple, the system handles several real-world engineering challenges behind the scenes:
+
+- AI-assisted Telegram review and natural-language expense instructions
+- Bank/card transaction ingestion
+- Webhook-based transaction updates
+- Safe transaction review and state management
+- Duplicate notification prevention
+- Approval-first shared expense posting
+- A React dashboard for visibility and control
+- Sandbox testing for safe financial workflow validation
+- Scenario-based QA and reliability testing
 
 ## Why It Exists
 
