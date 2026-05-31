@@ -4,9 +4,6 @@ ExpenseOps is a Plaid + Telegram-powered expense review system. It ingests card
 transactions, identifies expenses that need a decision, and lets a user classify
 them as personal or shared through a React dashboard and Telegram review flow.
 
-This repo is currently designed for local/private-beta use, not public
-multi-tenant deployment.
-
 The project is intentionally approval-first: ExpenseOps can prepare shared split
 workflows, but it does not post a shared expense without explicit user action.
 
@@ -254,8 +251,6 @@ Notes:
 - `APP_SECRET_KEY` encrypts Plaid access tokens at rest.
 - `PLAID_ENV=sandbox` and `PLAID_ENV=production` are separate Plaid worlds.
 - Sandbox Lab should be disabled outside local development.
-- Set `PLAID_VERIFY_WEBHOOKS_IN_SANDBOX` to true only when you want to test
-  Plaid webhook JWT verification through Sandbox Lab.
 - `ALLOW_UNVERIFIED_PLAID_WEBHOOKS_FOR_LOCAL_TEST` must never be true in a real
   deployed production environment.
 - Production Plaid webhooks should be verified.
@@ -346,7 +341,7 @@ Sandbox:
 5. Use the dashboard Plaid Link flow or Sandbox Lab to create items and test
    transaction sync.
 
-Production-like local testing:
+Production-style local testing:
 
 1. Set `PLAID_ENV=production`.
 2. Use Plaid Link to connect a real account.
