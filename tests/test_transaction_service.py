@@ -336,10 +336,13 @@ def test_existing_settled_transaction_update_does_not_duplicate_review_notificat
     service.upsert_transaction(db.get(PlaidItem, 1), _plaid_tx("tx-no-duplicate", pending=False))
     tx = db.query(ExpenseTransaction).filter_by(plaid_transaction_id="tx-no-duplicate").one()
     assert notifications.review_notifications == [tx.id]
+    first_notified_at = tx.review_notification_sent_at
 
     service.upsert_transaction(db.get(PlaidItem, 1), _plaid_tx("tx-no-duplicate", pending=False))
+    db.refresh(tx)
 
     assert notifications.review_notifications == [tx.id]
+    assert tx.review_notification_sent_at == first_notified_at
     db.close()
 
 
@@ -607,6 +610,56 @@ def test_repeated_sync_same_transaction_is_idempotent(tmp_path, monkeypatch):
     db.close()
 
 
+def test_same_chase_transaction_across_three_items_sends_one_notification(
+    tmp_path,
+):
+    db = _sqlite_session(tmp_path)
+    item_1 = db.get(PlaidItem, 1)
+    item_2 = PlaidItem(
+        item_id="item-2",
+        access_token_encrypted="encrypted-2",
+        institution_name="Chase",
+    )
+    item_3 = PlaidItem(
+        item_id="item-3",
+        access_token_encrypted="encrypted-3",
+        institution_name="Chase",
+    )
+    item_1.institution_name = "Chase"
+    db.add_all([item_2, item_3])
+    db.commit()
+    notifications = FakeNotificationService()
+    service = TransactionService(
+        db,
+        splitwise_service=object(),
+        notification_service=notifications,
+    )
+
+    service.upsert_transaction(
+        item_1,
+        _plaid_tx("tx-chase-duplicate-1", pending=False, name="Circle K"),
+    )
+    service.upsert_transaction(
+        item_2,
+        _plaid_tx("tx-chase-duplicate-2", pending=False, name="Circle K"),
+    )
+    service.upsert_transaction(
+        item_3,
+        _plaid_tx("tx-chase-duplicate-3", pending=False, name="Circle K"),
+    )
+
+    rows = (
+        db.query(ExpenseTransaction)
+        .filter(ExpenseTransaction.plaid_transaction_id.like("tx-chase-duplicate-%"))
+        .order_by(ExpenseTransaction.id)
+        .all()
+    )
+    assert len(rows) == 3
+    assert notifications.review_notifications == [rows[0].id]
+    assert all(row.review_notification_sent_at is not None for row in rows)
+    db.close()
+
+
 def test_create_only_scenario_transaction_imported_later_skips_notification(
     tmp_path,
     monkeypatch,
@@ -759,6 +812,11 @@ def test_duplicate_review_notification_claim_logs_skip(tmp_path, caplog):
     assert any(
         getattr(record, "event", None) == "telegram_notification_skipped_duplicate"
         and record.log_metadata["reason"] == "review_notification_already_claimed"
+        for record in caplog.records
+    )
+    assert any(
+        getattr(record, "event", None) == "transaction_notification_claim_skipped_already_sent"
+        and record.log_metadata["reason"] == "review_notification_already_sent"
         for record in caplog.records
     )
     db.close()

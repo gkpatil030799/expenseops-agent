@@ -3,12 +3,13 @@ from __future__ import annotations
 import json
 import logging
 import re
+import threading
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from typing import Any
 
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -50,6 +51,7 @@ RESOLVED_TRANSACTION_STATUSES = {
     "ignored",
     "resolved",
 }
+_NOTIFICATION_CLAIM_LOCK = threading.Lock()
 
 
 class TransactionError(RuntimeError):
@@ -520,45 +522,9 @@ class TransactionService:
             status=tx.status,
             pending=tx.pending,
         )
-        claimed_at = utc_now()
-        result = self.db.execute(
-            update(ExpenseTransaction)
-            .where(ExpenseTransaction.id == tx.id)
-            .where(ExpenseTransaction.review_notification_sent_at.is_(None))
-            .where(ExpenseTransaction.status.in_(ACTIONABLE_REVIEW_STATUSES))
-            .where(ExpenseTransaction.pending.is_(False))
-            .where(ExpenseTransaction.splitwise_expense_id.is_(None))
-            .values(review_notification_sent_at=claimed_at, updated_at=utc_now())
-        )
-        if result.rowcount != 1:
-            self.db.rollback()
-            self.db.refresh(tx)
-            log_event(
-                logger,
-                "telegram_notification_skipped_duplicate",
-                transaction_id=tx.id,
-                plaid_transaction_id=tx.plaid_transaction_id,
-                reason="review_notification_already_claimed",
-                status=tx.status,
-                pending=tx.pending,
-                review_notification_sent_at=tx.review_notification_sent_at,
-            )
-            self._sandbox_telegram_event(
-                tx,
-                event_type="sandbox_telegram_send_skipped_duplicate",
-                status="info",
-                payload={"reason": "review_notification_already_claimed"},
-            )
+        claim_result = self._claim_review_notification(tx)
+        if not claim_result:
             return False
-        self.db.commit()
-        self.db.refresh(tx)
-        log_event(
-            logger,
-            "telegram_notification_claim_succeeded",
-            transaction_id=tx.id,
-            plaid_transaction_id=tx.plaid_transaction_id,
-            review_notification_sent_at=tx.review_notification_sent_at,
-        )
         log_event(
             logger,
             "telegram_notification_send_started",
@@ -616,6 +582,176 @@ class TransactionService:
                 payload={"reason": "telegram_send_returned_false"},
             )
         return notification_sent
+
+    def _claim_review_notification(self, tx: ExpenseTransaction) -> bool:
+        with _NOTIFICATION_CLAIM_LOCK:
+            self.db.refresh(tx)
+            if not self.should_notify_for_review(tx):
+                reason = self._notification_skip_reason(tx)
+                event_type = (
+                    "transaction_notification_claim_skipped_already_sent"
+                    if reason == "review_notification_already_sent"
+                    else "transaction_notification_skipped_not_actionable"
+                )
+                log_event(
+                    logger,
+                    event_type,
+                    transaction_id=tx.id,
+                    plaid_transaction_id=tx.plaid_transaction_id,
+                    reason=reason,
+                    status=tx.status,
+                    pending=tx.pending,
+                    splitwise_expense_id=tx.splitwise_expense_id,
+                    review_notification_sent_at=tx.review_notification_sent_at,
+                )
+                if reason == "review_notification_already_sent":
+                    log_event(
+                        logger,
+                        "telegram_notification_skipped_duplicate",
+                        transaction_id=tx.id,
+                        plaid_transaction_id=tx.plaid_transaction_id,
+                        reason="review_notification_already_claimed",
+                        status=tx.status,
+                        pending=tx.pending,
+                        review_notification_sent_at=tx.review_notification_sent_at,
+                    )
+                return False
+
+            duplicate_tx = self._already_notified_duplicate(tx)
+            if duplicate_tx:
+                claimed_at = utc_now()
+                self._mark_notification_claimed_without_send(tx, claimed_at)
+                log_event(
+                    logger,
+                    "transaction_notification_claim_skipped_already_sent",
+                    transaction_id=tx.id,
+                    plaid_transaction_id=tx.plaid_transaction_id,
+                    duplicate_transaction_id=duplicate_tx.id,
+                    duplicate_plaid_transaction_id=duplicate_tx.plaid_transaction_id,
+                    reason="duplicate_transaction_already_notified",
+                    status=tx.status,
+                    pending=tx.pending,
+                )
+                self._sandbox_telegram_event(
+                    tx,
+                    event_type="sandbox_telegram_send_skipped_duplicate",
+                    status="info",
+                    payload={"reason": "duplicate_transaction_already_notified"},
+                )
+                return False
+
+            claimed_at = utc_now()
+            result = self.db.execute(
+                update(ExpenseTransaction)
+                .where(ExpenseTransaction.id == tx.id)
+                .where(ExpenseTransaction.review_notification_sent_at.is_(None))
+                .where(ExpenseTransaction.status.in_(ACTIONABLE_REVIEW_STATUSES))
+                .where(ExpenseTransaction.pending.is_(False))
+                .where(ExpenseTransaction.splitwise_expense_id.is_(None))
+                .values(review_notification_sent_at=claimed_at, updated_at=utc_now())
+            )
+            if result.rowcount != 1:
+                self.db.rollback()
+                self.db.refresh(tx)
+                log_event(
+                    logger,
+                    "transaction_notification_skipped_concurrent_claim",
+                    transaction_id=tx.id,
+                    plaid_transaction_id=tx.plaid_transaction_id,
+                    reason="review_notification_already_claimed",
+                    status=tx.status,
+                    pending=tx.pending,
+                    review_notification_sent_at=tx.review_notification_sent_at,
+                )
+                log_event(
+                    logger,
+                    "telegram_notification_skipped_duplicate",
+                    transaction_id=tx.id,
+                    plaid_transaction_id=tx.plaid_transaction_id,
+                    reason="review_notification_already_claimed",
+                    status=tx.status,
+                    pending=tx.pending,
+                    review_notification_sent_at=tx.review_notification_sent_at,
+                )
+                self._sandbox_telegram_event(
+                    tx,
+                    event_type="sandbox_telegram_send_skipped_duplicate",
+                    status="info",
+                    payload={"reason": "review_notification_already_claimed"},
+                )
+                return False
+            self.db.commit()
+            self.db.refresh(tx)
+            log_event(
+                logger,
+                "transaction_notification_claimed",
+                transaction_id=tx.id,
+                plaid_transaction_id=tx.plaid_transaction_id,
+                review_notification_sent_at=tx.review_notification_sent_at,
+            )
+            log_event(
+                logger,
+                "telegram_notification_claim_succeeded",
+                transaction_id=tx.id,
+                plaid_transaction_id=tx.plaid_transaction_id,
+                review_notification_sent_at=tx.review_notification_sent_at,
+            )
+            return True
+
+    def _mark_notification_claimed_without_send(
+        self,
+        tx: ExpenseTransaction,
+        claimed_at: datetime,
+    ) -> None:
+        self.db.execute(
+            update(ExpenseTransaction)
+            .where(ExpenseTransaction.id == tx.id)
+            .where(ExpenseTransaction.review_notification_sent_at.is_(None))
+            .values(review_notification_sent_at=claimed_at, updated_at=utc_now())
+        )
+        self.db.commit()
+        self.db.refresh(tx)
+
+    def _already_notified_duplicate(
+        self,
+        tx: ExpenseTransaction,
+    ) -> ExpenseTransaction | None:
+        institution_name = self._institution_name_for_transaction(tx)
+        display_name = _notification_dedupe_name(tx)
+        if not institution_name or not display_name:
+            return None
+        return (
+            self.db.execute(
+                select(ExpenseTransaction)
+                .join(PlaidItem, PlaidItem.id == ExpenseTransaction.plaid_item_id)
+                .where(ExpenseTransaction.id != tx.id)
+                .where(ExpenseTransaction.review_notification_sent_at.is_not(None))
+                .where(ExpenseTransaction.amount_cents == tx.amount_cents)
+                .where(ExpenseTransaction.iso_currency_code == tx.iso_currency_code)
+                .where(ExpenseTransaction.date == tx.date)
+                .where(ExpenseTransaction.pending == tx.pending)
+                .where(func.lower(PlaidItem.institution_name) == institution_name.lower())
+                .where(
+                    func.lower(
+                        func.coalesce(
+                            ExpenseTransaction.merchant_name,
+                            ExpenseTransaction.name,
+                        )
+                    )
+                    == display_name
+                )
+                .order_by(ExpenseTransaction.review_notification_sent_at.asc())
+                .limit(1)
+            )
+            .scalars()
+            .first()
+        )
+
+    def _institution_name_for_transaction(self, tx: ExpenseTransaction) -> str | None:
+        if tx.plaid_item and tx.plaid_item.institution_name:
+            return tx.plaid_item.institution_name
+        item = self.db.get(PlaidItem, tx.plaid_item_id)
+        return item.institution_name if item else None
 
     def _sandbox_telegram_event(
         self,
@@ -907,6 +1043,12 @@ def _category_to_string(category: Any, personal_finance_category: Any) -> str | 
 
 def _is_resolved_transaction_status(status: str | None) -> bool:
     return bool(status) and status in RESOLVED_TRANSACTION_STATUSES
+
+
+def _notification_dedupe_name(tx: ExpenseTransaction) -> str | None:
+    value = tx.merchant_name or tx.name
+    normalized = " ".join(str(value or "").lower().split())
+    return normalized or None
 
 
 def _plaid_token_environment(access_token: str) -> str | None:
