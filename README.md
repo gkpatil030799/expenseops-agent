@@ -14,6 +14,7 @@ What makes the experience different is the AI layer. Users can review expenses t
 "Split this with Alex and Priya 50-50 in Weekend Crew."
 "This was personal."
 "Ignore this transaction."
+```
 
 ## How It Works
 
