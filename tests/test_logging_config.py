@@ -86,7 +86,16 @@ def test_safe_preview_collapses_whitespace_and_caps_length():
 
 
 def test_configure_logging_uses_json_in_production():
-    configure_logging(Settings(environment="production"))
+    configure_logging(
+        Settings(
+            environment="production",
+            app_secret_key="configured-fernet-key",
+            telegram_webhook_secret="configured-telegram-secret",
+            telegram_allowed_user_id="12345",
+            plaid_env="production",
+            _env_file=None,
+        )
+    )
 
     assert isinstance(logging.getLogger().handlers[0].formatter, JsonStructuredFormatter)
     assert logging.getLogger().level == logging.INFO

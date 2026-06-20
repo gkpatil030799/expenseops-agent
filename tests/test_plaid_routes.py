@@ -5,6 +5,7 @@ from datetime import UTC, datetime
 
 import pytest
 from fastapi.testclient import TestClient
+from pydantic import ValidationError
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
@@ -711,28 +712,18 @@ def test_plaid_webhook_local_only_bypass_allows_sync_when_app_env_local(
 
 def test_plaid_webhook_local_bypass_denied_when_app_env_production(monkeypatch):
     monkeypatch.setenv("APP_ENV", "production")
-    monkeypatch.setattr(
-        plaid_routes,
-        "get_settings",
-        lambda: Settings(
+    with pytest.raises(ValidationError, match="ALLOW_UNVERIFIED_PLAID_WEBHOOKS"):
+        Settings(
             plaid_env="production",
             environment="local",
             allow_unverified_plaid_webhooks_for_local_test=True,
             plaid_client_id="client-id",
             plaid_secret="secret",
-        ),
-    )
-    app.dependency_overrides[get_db] = lambda: object()
-
-    try:
-        response = TestClient(app).post(
-            "/plaid/webhook",
-            json={"webhook_type": "ITEM", "webhook_code": "ERROR", "item_id": "item-1"},
+            app_secret_key="configured-fernet-key",
+            telegram_webhook_secret="configured-telegram-secret",
+            telegram_allowed_user_id="12345",
+            _env_file=None,
         )
-    finally:
-        app.dependency_overrides.clear()
-
-    assert response.status_code == 403
 
 
 def test_plaid_webhook_verification_failure_does_not_run_sync(monkeypatch):

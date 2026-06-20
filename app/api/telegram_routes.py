@@ -102,6 +102,7 @@ async def telegram_webhook(
 ) -> dict[str, bool]:
     _verify_webhook_secret(secret)
     update = await request.json()
+    _verify_allowed_telegram_user(update)
     with telegram_split_state_store.use_db(db):
         log_event(
             logger,
@@ -123,6 +124,39 @@ def _verify_webhook_secret(incoming_secret: str | None) -> None:
     expected_secret = get_settings().telegram_webhook_secret
     if expected_secret and incoming_secret != expected_secret:
         raise HTTPException(status_code=403, detail="Invalid Telegram webhook secret")
+
+
+def _verify_allowed_telegram_user(update: dict) -> None:
+    allowed_user_id = get_settings().telegram_allowed_user_id.strip()
+    if not allowed_user_id:
+        return
+
+    callback_query = update.get("callback_query")
+    message = update.get("message")
+    if callback_query:
+        from_user = callback_query.get("from") or {}
+        chat = (callback_query.get("message") or {}).get("chat") or {}
+        update_kind = "callback"
+    else:
+        from_user = (message or {}).get("from") or {}
+        chat = (message or {}).get("chat") or {}
+        update_kind = "message" if message else "unknown"
+
+    user_id = str(from_user.get("id") or "")
+    chat_id = str(chat.get("id") or "")
+    if allowed_user_id in {user_id, chat_id}:
+        return
+
+    log_event(
+        logger,
+        "telegram_webhook_rejected",
+        level=logging.WARNING,
+        reason="disallowed_telegram_user",
+        update_kind=update_kind,
+        user_id_present=bool(user_id),
+        chat_id_present=bool(chat_id),
+    )
+    raise HTTPException(status_code=403, detail="Unauthorized Telegram user")
 
 
 def _handle_callback_query(callback_query: dict, db: DbSession) -> dict[str, bool]:

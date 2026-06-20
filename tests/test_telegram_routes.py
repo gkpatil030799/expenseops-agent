@@ -239,6 +239,70 @@ def test_telegram_webhook_rejects_missing_or_incorrect_secret(monkeypatch):
     assert incorrect.status_code == 403
 
 
+def test_telegram_webhook_allows_configured_user(monkeypatch):
+    monkeypatch.setattr(
+        telegram_routes,
+        "get_settings",
+        lambda: Settings(telegram_webhook_secret="", telegram_allowed_user_id="12345"),
+    )
+
+    response = TestClient(app).post(
+        "/telegram/webhook",
+        json={"message": {"from": {"id": 12345}, "chat": {"id": 12345}, "text": "hello"}},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"ok": True}
+
+
+def test_telegram_webhook_rejects_disallowed_user_without_sensitive_logs(monkeypatch, caplog):
+    caplog.set_level(logging.WARNING)
+    monkeypatch.setattr(
+        telegram_routes,
+        "get_settings",
+        lambda: Settings(telegram_webhook_secret="", telegram_allowed_user_id="12345"),
+    )
+
+    response = TestClient(app).post(
+        "/telegram/webhook",
+        json={
+            "message": {
+                "from": {"id": 99999, "username": "sensitive-user"},
+                "chat": {"id": 99999},
+                "text": "secret message body",
+            }
+        },
+    )
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Unauthorized Telegram user"
+    assert "secret message body" not in caplog.text
+    assert "sensitive-user" not in caplog.text
+    assert "99999" not in caplog.text
+
+
+def test_telegram_webhook_rejects_disallowed_callback_user(monkeypatch):
+    monkeypatch.setattr(
+        telegram_routes,
+        "get_settings",
+        lambda: Settings(telegram_webhook_secret="", telegram_allowed_user_id="12345"),
+    )
+
+    response = TestClient(app).post(
+        "/telegram/webhook",
+        json={
+            "callback_query": {
+                "id": "callback-1",
+                "from": {"id": 99999},
+                "message": {"chat": {"id": 99999}, "message_id": 1},
+                "data": "review:personal:123",
+            }
+        },
+    )
+
+    assert response.status_code == 403
+
+
 def test_telegram_webhook_logs_traceable_event(caplog):
     caplog.set_level(logging.INFO)
 

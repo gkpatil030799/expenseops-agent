@@ -772,17 +772,46 @@ Before using real bank production data:
 
 - Keep the app private behind auth.
 - Use `ENVIRONMENT=production`.
+- Set `APP_ENV=production` in deployed environments.
 - Use managed PostgreSQL or another production database instead of SQLite.
-- Run Alembic migrations.
+- Run `alembic upgrade head` before starting the app process.
 - Use a stable HTTPS webhook URL for Plaid and Telegram callbacks.
 - Keep Plaid webhook verification enabled.
-- Keep Sandbox Lab disabled.
+- Keep Sandbox Lab disabled for deployed MVPs.
 - Keep local webhook bypass disabled.
 - Store secrets in a deployment secret manager, not in git.
 - Keep Plaid access tokens encrypted.
 - Monitor webhook verification failures.
 - Monitor duplicate notification skips.
 - Validate the real Plaid production webhook flow before deployment.
+- Do not deploy `.env`, local SQLite databases, Sandbox Lab logs, or Sandbox Lab
+  state files.
+
+Required production environment values:
+
+```env
+APP_ENV="production"
+ENVIRONMENT="production"
+APP_SECRET_KEY="generated-fernet-key"
+DATABASE_URL="postgresql+psycopg://..."
+PLAID_CLIENT_ID="..."
+PLAID_SECRET="..."
+PLAID_ENV="production"
+PLAID_WEBHOOK_URL="https://your-deployed-domain.example/plaid/webhook"
+TELEGRAM_BOT_TOKEN="..."
+TELEGRAM_CHAT_ID="..."
+TELEGRAM_WEBHOOK_SECRET="long-random-secret"
+TELEGRAM_ALLOWED_USER_ID="your-telegram-user-id"
+ENABLE_EXPENSEOPS_SANDBOX_LAB="false"
+ALLOW_UNVERIFIED_PLAID_WEBHOOKS_FOR_LOCAL_TEST="false"
+```
+
+Startup order for deployment:
+
+```bash
+alembic upgrade head
+uvicorn app.main:app --host 0.0.0.0 --port "$PORT"
+```
 
 Deployment is future work for this repo. The current README is focused on
 running and testing the local/private-beta MVP.

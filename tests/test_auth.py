@@ -8,6 +8,19 @@ from app.config import Settings
 from app.main import app
 
 
+def _safe_production_settings(**overrides):
+    values = {
+        "environment": "production",
+        "app_secret_key": "configured-fernet-key",
+        "telegram_webhook_secret": "configured-telegram-secret",
+        "telegram_allowed_user_id": "12345",
+        "plaid_env": "production",
+        "_env_file": None,
+    }
+    values.update(overrides)
+    return Settings(**values)
+
+
 def test_health_route_is_public():
     response = TestClient(app).get("/health")
 
@@ -28,8 +41,7 @@ def test_dashboard_api_requires_auth_in_production(monkeypatch):
 def test_dashboard_api_allows_basic_auth():
     import app.auth as auth
 
-    settings = Settings(
-        environment="production",
+    settings = _safe_production_settings(
         dashboard_username="beta",
         dashboard_password="secret",
     )
@@ -45,7 +57,7 @@ def test_dashboard_api_allows_basic_auth():
 def test_dashboard_api_allows_bearer_auth():
     import app.auth as auth
 
-    settings = Settings(environment="production", dashboard_api_token="token-123")
+    settings = _safe_production_settings(dashboard_api_token="token-123")
 
     assert auth._is_authorized(
         type("Request", (), {"headers": {"Authorization": "Bearer token-123"}})(),
