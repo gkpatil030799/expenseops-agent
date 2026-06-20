@@ -4,7 +4,7 @@ import os
 from functools import lru_cache
 from typing import Annotated, Literal
 
-from pydantic import Field, field_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 
@@ -65,6 +65,35 @@ class Settings(BaseSettings):
     def parse_csv(cls, value: str | list[str]) -> list[str]:
         return _csv(value)
 
+    @model_validator(mode="after")
+    def validate_production_safety(self) -> Settings:
+        if not self.is_production_mode:
+            return self
+
+        errors: list[str] = []
+        if not self.app_secret_key or self.app_secret_key == "paste-a-generated-fernet-key-here":
+            errors.append("APP_SECRET_KEY must be configured for production.")
+        if not self.telegram_webhook_secret:
+            errors.append("TELEGRAM_WEBHOOK_SECRET must be configured for production.")
+        if not self.telegram_allowed_user_id:
+            errors.append("TELEGRAM_ALLOWED_USER_ID must be configured for production.")
+        if self.allow_unverified_plaid_webhooks_for_local_test:
+            errors.append(
+                "ALLOW_UNVERIFIED_PLAID_WEBHOOKS_FOR_LOCAL_TEST must be false in production."
+            )
+        if _env_bool("ENABLE_EXPENSEOPS_SANDBOX_LAB"):
+            errors.append("ENABLE_EXPENSEOPS_SANDBOX_LAB must be false for production deploys.")
+        if not self.plaid_webhook_verification_required:
+            errors.append("Plaid webhook verification must be enabled for production.")
+        if errors:
+            raise ValueError("Unsafe production configuration: " + " ".join(errors))
+        return self
+
+    @property
+    def is_production_mode(self) -> bool:
+        app_env = os.environ.get("APP_ENV", "").strip().lower()
+        return app_env == "production" or self.environment.strip().lower() == "production"
+
     @property
     def docs_enabled(self) -> bool:
         return self.environment != "production" or self.enable_docs
@@ -108,3 +137,7 @@ class Settings(BaseSettings):
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
     return Settings()
+
+
+def _env_bool(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
