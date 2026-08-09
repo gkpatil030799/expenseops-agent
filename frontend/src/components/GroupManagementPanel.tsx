@@ -238,17 +238,24 @@ export function GroupManagementPanel({ currentUserId }: { currentUserId: number 
             Create a group, add existing Splitwise friends, or remove settled participants.
           </CardDescription>
         </div>
-        <Button variant="outline" size="sm" onClick={loadDirectory} disabled={busy !== null}>
+        <Button
+          variant="ghost"
+          size="icon"
+          className="h-9 w-9 shrink-0 rounded-lg border border-slate-200 bg-white text-slate-600 shadow-sm hover:bg-slate-50"
+          onClick={loadDirectory}
+          disabled={busy !== null}
+          aria-label="Refresh Splitwise groups"
+          title="Refresh Splitwise groups"
+        >
           <RefreshCw className={`h-4 w-4 ${busy === "refresh" ? "animate-spin" : ""}`} />
-          Refresh
         </Button>
       </CardHeader>
       <CardContent className="space-y-4">
         {notice ? (
           <div
-            className={`flex items-start gap-2 rounded-md border px-3 py-2 text-sm ${
+            className={`flex items-start gap-2 rounded-lg border px-3 py-2 text-sm ${
               notice.tone === "success"
-                ? "border-teal-200 bg-teal-50 text-teal-800"
+                ? "border-slate-200 bg-slate-50 text-slate-800"
                 : "border-rose-200 bg-rose-50 text-rose-800"
             }`}
           >
@@ -261,59 +268,72 @@ export function GroupManagementPanel({ currentUserId }: { currentUserId: number 
           </div>
         ) : null}
 
-        <div className="grid gap-5 xl:grid-cols-2">
-          <section className="space-y-3 rounded-lg border border-slate-200 bg-slate-50/60 p-4">
+        <div className="grid items-start gap-5 xl:grid-cols-2">
+          <section className="space-y-4 rounded-xl border border-slate-200 bg-slate-50/60 p-4 sm:p-5">
             <div>
               <h3 className="font-semibold text-slate-950">Create a new group</h3>
-              <p className="text-xs text-slate-500">You are included automatically by Splitwise.</p>
+              <p className="mt-1 text-xs leading-5 text-slate-600">You are included automatically by Splitwise.</p>
             </div>
             <div className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_150px]">
-              <Input
-                value={newGroupName}
-                onChange={(event) => setNewGroupName(event.target.value)}
-                placeholder="Group name"
-                maxLength={255}
-              />
-              <select
-                className="h-9 rounded-md border border-slate-200 bg-white px-3 text-sm text-slate-800 shadow-sm outline-none focus:ring-2 focus:ring-indigo-500"
-                value={newGroupType}
-                onChange={(event) => setNewGroupType(event.target.value as GroupType)}
-              >
-                <option value="home">Home</option>
-                <option value="trip">Trip</option>
-                <option value="couple">Couple</option>
-                <option value="other">Other</option>
-              </select>
+              <label className="grid gap-1.5 text-xs font-medium text-slate-700">
+                Group name
+                <Input
+                  value={newGroupName}
+                  onChange={(event) => setNewGroupName(event.target.value)}
+                  placeholder="e.g. Arizona trip"
+                  maxLength={255}
+                />
+              </label>
+              <label className="grid gap-1.5 text-xs font-medium text-slate-700">
+                Category
+                <select
+                  className="h-10 rounded-lg border border-slate-300 bg-white px-3 text-sm text-slate-800 outline-none transition hover:border-slate-400 focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/20"
+                  value={newGroupType}
+                  onChange={(event) => setNewGroupType(event.target.value as GroupType)}
+                >
+                  <option value="home">Home</option>
+                  <option value="trip">Trip</option>
+                  <option value="couple">Couple</option>
+                  <option value="other">Other</option>
+                </select>
+              </label>
             </div>
-            <Input
-              value={friendFilter}
-              onChange={(event) => setFriendFilter(event.target.value)}
-              placeholder="Filter friends to include"
-            />
-            <div className="max-h-44 space-y-1 overflow-y-auto rounded-md border border-slate-200 bg-white p-2">
-              {visibleFriends.length ? (
+            <label className="grid gap-1.5 text-xs font-medium text-slate-700">
+              Initial participants
+              <Input
+                value={friendFilter}
+                onChange={(event) => setFriendFilter(event.target.value)}
+                placeholder="Filter friends to include"
+              />
+            </label>
+            <div className="relative overflow-hidden rounded-xl border border-slate-200 bg-white">
+              <div className="scroll-fade max-h-48 space-y-1 overflow-y-auto px-2 py-3">
+              {busy === "refresh" && !friends.length ? (
+                <GroupSkeletonRows rows={3} />
+              ) : visibleFriends.length ? (
                 visibleFriends.map((friend) => (
                   <label
                     key={friend.id}
-                    className="flex cursor-pointer items-center gap-2 rounded px-2 py-1.5 text-sm hover:bg-slate-50"
+                    className="flex cursor-pointer items-center gap-3 rounded-lg px-2 py-2 text-sm transition hover:bg-slate-50 focus-within:bg-indigo-50/60 focus-within:ring-2 focus-within:ring-indigo-500/30"
                   >
                     <input
                       type="checkbox"
                       checked={newGroupUserIds.includes(friend.id)}
                       onChange={() => toggleNewGroupFriend(friend.id)}
-                      className="h-4 w-4 rounded border-slate-300 text-indigo-600"
+                      className="h-4 w-4 rounded border-slate-300 text-indigo-600 focus:ring-indigo-500"
                     />
                     <span className="min-w-0">
                       <span className="block truncate font-medium text-slate-800">{friend.display_name}</span>
-                      {friend.email ? <span className="block truncate text-xs text-slate-500">{friend.email}</span> : null}
+                      {friend.email ? <span className="block truncate text-xs text-slate-600">{friend.email}</span> : null}
                     </span>
                   </label>
                 ))
               ) : (
-                <p className="p-2 text-xs text-slate-500">No matching Splitwise friends.</p>
+                <div className="px-2 py-4 text-center text-xs text-slate-600">No matching Splitwise friends.</div>
               )}
+              </div>
             </div>
-            <div className="flex items-center justify-between gap-3">
+            <div className="flex flex-col items-stretch gap-3 sm:flex-row sm:items-center sm:justify-between">
               <label className="inline-flex items-center gap-2 text-xs font-medium text-slate-600">
                 <input
                   type="checkbox"
@@ -323,20 +343,22 @@ export function GroupManagementPanel({ currentUserId }: { currentUserId: number 
                 />
                 Simplify group debts
               </label>
-              <Button onClick={createGroup} disabled={busy !== null || !newGroupName.trim()}>
+              <Button className="w-full sm:w-auto" onClick={createGroup} disabled={busy !== null || !newGroupName.trim()}>
                 <Plus className="h-4 w-4" />
                 Create group
               </Button>
             </div>
           </section>
 
-          <section className="space-y-3 rounded-lg border border-slate-200 bg-slate-50/60 p-4">
+          <section className="space-y-4 rounded-xl border border-slate-200 bg-slate-50/60 p-4 sm:p-5">
             <div>
               <h3 className="font-semibold text-slate-950">Existing group</h3>
-              <p className="text-xs text-slate-500">Select a group to manage its participants.</p>
+              <p className="mt-1 text-xs leading-5 text-slate-600">Select a group to manage its participants.</p>
             </div>
-            <select
-              className="h-9 w-full rounded-md border border-slate-200 bg-white px-3 text-sm text-slate-800 shadow-sm outline-none focus:ring-2 focus:ring-indigo-500"
+            <label className="grid gap-1.5 text-xs font-medium text-slate-700">
+              Group
+              <select
+              className="h-10 w-full rounded-lg border border-slate-300 bg-white px-3 text-sm text-slate-800 outline-none transition hover:border-slate-400 focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/20"
               value={selectedGroupId ?? ""}
               onChange={(event) => setSelectedGroupId(event.target.value ? Number(event.target.value) : null)}
               disabled={!groups.length}
@@ -344,9 +366,16 @@ export function GroupManagementPanel({ currentUserId }: { currentUserId: number 
               {!groups.length ? <option value="">No Splitwise groups found</option> : null}
               {groups.map((group) => <option key={group.id} value={group.id}>{group.name}</option>)}
             </select>
-            <div className="flex gap-2">
+            </label>
+            <div className="space-y-3 rounded-xl border border-slate-200 bg-white p-4">
+              <InviteMethodHeading
+                number="1"
+                title="Add an existing friend"
+                description="Choose someone already connected to your Splitwise account."
+              />
+            <div className="flex flex-col gap-2 sm:flex-row">
               <select
-                className="h-9 min-w-0 flex-1 rounded-md border border-slate-200 bg-white px-3 text-sm text-slate-800 shadow-sm outline-none focus:ring-2 focus:ring-indigo-500"
+                className="h-10 min-w-0 flex-1 rounded-lg border border-slate-300 bg-white px-3 text-sm text-slate-800 outline-none transition hover:border-slate-400 focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/20"
                 value={memberToAdd}
                 onChange={(event) => setMemberToAdd(event.target.value)}
                 disabled={selectedGroupId === null || !availableMembers.length}
@@ -359,13 +388,13 @@ export function GroupManagementPanel({ currentUserId }: { currentUserId: number 
                 Add
               </Button>
             </div>
-            <div className="space-y-2 rounded-md border border-indigo-100 bg-indigo-50/60 p-3">
-              <div>
-                <h4 className="text-sm font-semibold text-indigo-950">Invite someone new</h4>
-                <p className="text-xs text-indigo-700">
-                  Splitwise will email an invitation to someone who does not have an account yet.
-                </p>
-              </div>
+            </div>
+            <div className="space-y-3 rounded-xl border border-slate-200 bg-white p-4">
+              <InviteMethodHeading
+                number="2"
+                title="Invite by email"
+                description="Splitwise will email someone who does not have an account yet."
+              />
               <div className="grid gap-2 sm:grid-cols-2">
                 <Input
                   value={inviteFirstName}
@@ -400,13 +429,15 @@ export function GroupManagementPanel({ currentUserId }: { currentUserId: number 
                 </Button>
               </div>
             </div>
-            <div className="space-y-2 rounded-md border border-slate-200 bg-white p-3">
-              <div>
-                <h4 className="text-sm font-semibold text-slate-900">Group invitation link</h4>
-                <p className="truncate text-xs text-slate-500">
+            <div className="space-y-3 rounded-xl border border-slate-200 bg-white p-4">
+              <InviteMethodHeading
+                number="3"
+                title="Invite by link"
+                description="Copy the group link or share it through Telegram."
+              />
+                <p className="truncate rounded-lg bg-slate-50 px-3 py-2 font-mono text-xs text-slate-600">
                   {selectedGroup?.invite_link || "No invitation link returned by Splitwise."}
                 </p>
-              </div>
               <div className="flex flex-wrap gap-2">
                 <Button
                   variant="outline"
@@ -431,19 +462,24 @@ export function GroupManagementPanel({ currentUserId }: { currentUserId: number 
                 ) : null}
               </div>
             </div>
-            <div className="max-h-56 space-y-1 overflow-y-auto rounded-md border border-slate-200 bg-white p-2">
+            <div className="overflow-hidden rounded-xl border border-slate-200 bg-white">
+              <div className="border-b border-slate-100 px-4 py-3">
+                <h4 className="text-sm font-semibold text-slate-900">Current participants</h4>
+                <p className="mt-0.5 text-xs text-slate-600">Remove is available after balances are settled.</p>
+              </div>
+              <div className="scroll-fade max-h-64 space-y-1 overflow-y-auto px-2 py-3">
               {busy === "members" ? (
-                <p className="p-2 text-xs text-slate-500">Loading participants…</p>
+                <GroupSkeletonRows rows={3} />
               ) : members.length ? (
                 members.map((member) => {
                   const isCurrentUser = member.id === currentUserId;
                   return (
-                    <div key={member.id} className="flex items-center justify-between gap-3 rounded px-2 py-1.5 hover:bg-slate-50">
+                    <div key={member.id} className="flex items-center justify-between gap-3 rounded-lg px-2 py-2 transition hover:bg-slate-50">
                       <div className="min-w-0 text-sm">
                         <span className="block truncate font-medium text-slate-800">
                           {member.display_name}{isCurrentUser ? " (you)" : ""}
                         </span>
-                        <span className="block truncate text-xs text-slate-500">
+                        <span className="block truncate text-xs text-slate-600">
                           {member.email || `Splitwise ID ${member.id}`}
                           {member.registration_status && member.registration_status !== "confirmed"
                             ? ` · ${member.registration_status} invitation`
@@ -465,13 +501,53 @@ export function GroupManagementPanel({ currentUserId }: { currentUserId: number 
                   );
                 })
               ) : (
-                <p className="p-2 text-xs text-slate-500">No participants found for this group.</p>
+                <div className="px-2 py-5 text-center text-xs text-slate-600">No participants found for this group.</div>
               )}
+              </div>
             </div>
           </section>
         </div>
       </CardContent>
     </Card>
+  );
+}
+
+function InviteMethodHeading({
+  number,
+  title,
+  description,
+}: {
+  number: string;
+  title: string;
+  description: string;
+}) {
+  return (
+    <div className="flex items-start gap-3">
+      <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-slate-100 text-xs font-semibold text-slate-700">
+        {number}
+      </span>
+      <div>
+        <h4 className="text-sm font-semibold text-slate-900">{title}</h4>
+        <p className="mt-0.5 text-xs leading-5 text-slate-600">{description}</p>
+      </div>
+    </div>
+  );
+}
+
+function GroupSkeletonRows({ rows }: { rows: number }) {
+  return (
+    <div className="space-y-2" role="status" aria-label="Loading participants">
+      {Array.from({ length: rows }, (_, index) => (
+        <div key={index} className="flex items-center gap-3 rounded-lg px-2 py-2">
+          <span className="ui-skeleton h-4 w-4 shrink-0 rounded" />
+          <span className="min-w-0 flex-1 space-y-1.5">
+            <span className="ui-skeleton block h-3 w-2/5 rounded" />
+            <span className="ui-skeleton block h-2.5 w-3/5 rounded" />
+          </span>
+        </div>
+      ))}
+      <span className="sr-only">Loading</span>
+    </div>
   );
 }
 

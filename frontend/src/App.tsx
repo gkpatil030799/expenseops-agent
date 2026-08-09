@@ -465,17 +465,18 @@ function App() {
   }
 
   return (
-    <main className="min-h-screen bg-[#f5f7fb]">
-      <section className="mx-auto flex w-full max-w-[1500px] flex-col gap-4 px-4 py-4 sm:px-6 lg:px-8">
+    <main className="min-h-screen bg-[radial-gradient(circle_at_top,rgba(79,70,229,0.06),transparent_30rem)]">
+      <section className="mx-auto flex w-full max-w-[1500px] flex-col gap-5 px-3 py-3 sm:px-6 sm:py-5 lg:px-8">
         <Header onPlaid={openPlaidLink} onSync={syncTransactions} busy={busy} />
 
-        <div className="grid gap-3 md:grid-cols-3 xl:grid-cols-4">
+        <div className="grid gap-4 sm:grid-cols-2">
           <MetricCard
             icon={Clock3}
             label="Pending approvals"
             value={String(transactions.length)}
             detail="Awaiting classification"
             tone={transactions.length ? "amber" : "teal"}
+            empty={transactions.length === 0}
           />
           <MetricCard
             icon={BadgeDollarSign}
@@ -483,13 +484,15 @@ function App() {
             value={formatCurrency(pendingTotal)}
             detail="Open card spend"
             tone="indigo"
-          />
-          <OperationalState
-            pendingCount={transactions.length}
-            busy={busy}
-            lastSyncLabel={lastSyncLabel}
+            empty={transactions.length === 0}
           />
         </div>
+
+        <OperationalState
+          pendingCount={transactions.length}
+          busy={busy}
+          lastSyncLabel={lastSyncLabel}
+        />
 
         <SearchFilters filters={filters} onChange={updateFilter} />
 
@@ -497,6 +500,7 @@ function App() {
           analytics={analytics}
           days={analyticsDays}
           onDaysChange={setAnalyticsDays}
+          loading={busy !== null && allTransactions.length === 0}
         />
 
         <GroupManagementPanel currentUserId={currentSplitwiseUser?.id ?? null} />
@@ -514,9 +518,16 @@ function App() {
                   Search Splitwise friends by name, select them, then approve the split.
                 </p>
               </div>
-              <Button variant="outline" onClick={loadTransactions} disabled={busy !== null}>
-                <RefreshCw className="h-4 w-4" />
-                Refresh
+              <Button
+                variant="ghost"
+                size="icon"
+                className="h-9 w-9 rounded-lg border border-slate-200 bg-white text-slate-600 shadow-sm hover:bg-slate-50"
+                onClick={loadTransactions}
+                disabled={busy !== null}
+                aria-label="Refresh pending transactions"
+                title="Refresh pending transactions"
+              >
+                <RefreshCw className={`h-4 w-4 ${busy === "transactions" ? "animate-spin" : ""}`} />
               </Button>
             </div>
 
@@ -607,9 +618,17 @@ function App() {
               groups={memory.groups}
               onSelectFriend={selectMemoryFriend}
               onSelectGroup={selectMemoryGroup}
+              loading={busy !== null && allTransactions.length === 0}
             />
-            <AIFallbackMemoryPanel memories={aiMemories} onDelete={deleteAIMemory} />
-            <ActivityTimeline events={timelineEvents} />
+            <AIFallbackMemoryPanel
+              memories={aiMemories}
+              onDelete={deleteAIMemory}
+              loading={busy !== null && aiMemories.length === 0}
+            />
+            <ActivityTimeline
+              events={timelineEvents}
+              loading={busy !== null && allTransactions.length === 0}
+            />
             <ActivityLog log={log} />
           </aside>
         </div>
@@ -682,30 +701,41 @@ function SearchFilters({
   filters: DashboardFilters;
   onChange: <K extends keyof DashboardFilters>(key: K, value: DashboardFilters[K]) => void;
 }) {
+  const controlClass =
+    "h-10 rounded-lg border-slate-300 bg-white text-slate-800 hover:border-slate-400 focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/20";
   return (
-    <div className="rounded-lg border border-slate-200 bg-white p-3 shadow-sm shadow-slate-950/[0.025]">
-      <div className="mb-2 flex items-center gap-2 text-xs font-semibold uppercase text-slate-500">
+    <Card>
+      <CardContent className="p-5">
+      <div className="mb-4 flex items-center gap-2 text-xs font-semibold uppercase tracking-wide text-slate-600">
         <Search className="h-3.5 w-3.5 text-slate-500" />
         Transaction controls
       </div>
-      <div className="grid gap-2 md:grid-cols-[1.15fr_1fr_160px_150px_150px]">
-        <div className="relative">
-          <Search className="pointer-events-none absolute left-3 top-2.5 h-4 w-4 text-slate-400" />
+      <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-[1.15fr_1fr_160px_155px_155px]">
+        <label className="grid gap-1.5 text-xs font-medium text-slate-700">
+          Merchant
+          <div className="relative">
+          <Search className="pointer-events-none absolute left-3 top-3 h-4 w-4 text-slate-500" />
           <Input
-            className="h-9 border-slate-200 bg-white pl-9 focus:border-indigo-300 focus:ring-indigo-100"
+            className={`${controlClass} pl-9`}
             value={filters.merchant}
             onChange={(event) => onChange("merchant", event.target.value)}
             placeholder="Search merchant"
           />
-        </div>
-        <Input
-          className="h-9 border-slate-200 bg-white focus:border-indigo-300 focus:ring-indigo-100"
-          value={filters.group}
-          onChange={(event) => onChange("group", event.target.value)}
-          placeholder="Group"
-        />
-        <select
-          className="h-9 rounded-md border border-slate-200 bg-white px-3 text-sm text-slate-700 outline-none transition focus:border-indigo-300 focus:ring-2 focus:ring-indigo-100"
+          </div>
+        </label>
+        <label className="grid gap-1.5 text-xs font-medium text-slate-700">
+          Group
+          <Input
+            className={controlClass}
+            value={filters.group}
+            onChange={(event) => onChange("group", event.target.value)}
+            placeholder="Filter by group"
+          />
+        </label>
+        <label className="grid gap-1.5 text-xs font-medium text-slate-700">
+          Status
+          <select
+          className={`${controlClass} w-full px-3 text-sm outline-none transition`}
           value={filters.status}
           onChange={(event) => onChange("status", event.target.value)}
         >
@@ -715,20 +745,28 @@ function SearchFilters({
           <option value="posted">Posted</option>
           <option value="shared_draft">Draft split</option>
         </select>
-        <Input
-          className="h-9 border-slate-200 bg-white focus:border-indigo-300 focus:ring-indigo-100"
-          type="date"
-          value={filters.dateFrom}
-          onChange={(event) => onChange("dateFrom", event.target.value)}
-        />
-        <Input
-          className="h-9 border-slate-200 bg-white focus:border-indigo-300 focus:ring-indigo-100"
-          type="date"
-          value={filters.dateTo}
-          onChange={(event) => onChange("dateTo", event.target.value)}
-        />
+        </label>
+        <label className="grid gap-1.5 text-xs font-medium text-slate-700">
+          From
+          <Input
+            className={`${controlClass} date-control`}
+            type="date"
+            value={filters.dateFrom}
+            onChange={(event) => onChange("dateFrom", event.target.value)}
+          />
+        </label>
+        <label className="grid gap-1.5 text-xs font-medium text-slate-700">
+          To
+          <Input
+            className={`${controlClass} date-control`}
+            type="date"
+            value={filters.dateTo}
+            onChange={(event) => onChange("dateTo", event.target.value)}
+          />
+        </label>
       </div>
-    </div>
+      </CardContent>
+    </Card>
   );
 }
 
@@ -736,26 +774,32 @@ function AnalyticsDashboard({
   analytics,
   days,
   onDaysChange,
+  loading,
 }: {
   analytics: ReturnType<typeof analyticsForTransactions>;
   days: number;
   onDaysChange: (days: number) => void;
+  loading: boolean;
 }) {
-  const ratioTotal = analytics.personalCount + analytics.sharedCount || 1;
-  const sharedPercent = Math.round((analytics.sharedCount / ratioTotal) * 100);
-  const personalPercent = 100 - sharedPercent;
+  const ratioTotal = analytics.personalCount + analytics.sharedCount;
+  const hasRatioData = ratioTotal > 0;
+  const sharedPercent = hasRatioData
+    ? Math.round((analytics.sharedCount / ratioTotal) * 100)
+    : 0;
+  const personalPercent = hasRatioData ? 100 - sharedPercent : 0;
 
   return (
     <section className="grid gap-4 xl:grid-cols-[320px_minmax(0,1fr)]">
-      <Card className="overflow-hidden border-slate-200 bg-white shadow-sm shadow-slate-950/[0.025]">
-        <CardHeader className="p-4 pb-3">
+      <Card className="overflow-hidden">
+        <CardHeader className="pb-4">
           <div className="flex items-center justify-between gap-3">
             <div>
               <CardTitle className="text-base">Spend intelligence</CardTitle>
               <CardDescription>Shared spend and review mix</CardDescription>
             </div>
             <select
-              className="h-8 rounded-md border border-slate-200 bg-white px-2 text-xs font-medium text-slate-700"
+              className="h-9 rounded-lg border border-slate-300 bg-white px-2.5 text-xs font-medium text-slate-700 transition hover:border-slate-400 focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/20"
+              aria-label="Analytics time range"
               value={days}
               onChange={(event) => onDaysChange(Number(event.target.value))}
             >
@@ -765,79 +809,113 @@ function AnalyticsDashboard({
             </select>
           </div>
         </CardHeader>
-        <CardContent className="grid gap-3 p-4 pt-0">
-          <div className="rounded-md border border-slate-200 bg-slate-50 p-4">
-            <p className="text-xs font-semibold uppercase text-slate-500">
+        <CardContent className="grid gap-4">
+          <div className="rounded-xl border border-slate-200 bg-slate-50/80 p-4">
+            <p className="text-xs font-semibold uppercase tracking-wide text-slate-600">
               Total shared spend
             </p>
-            <p className="mt-1 text-3xl font-semibold tracking-normal text-slate-950">
-              {formatCurrency(analytics.totalSharedSpend / 100)}
+            {loading ? (
+              <div className="ui-skeleton mt-2 h-9 w-36" />
+            ) : (
+              <p className="mt-1 text-3xl font-semibold tracking-tight text-slate-950">
+                {formatCurrency(analytics.totalSharedSpend / 100)}
+              </p>
+            )}
+            <p className="mt-2 text-xs leading-5 text-slate-600">
+              {analytics.totalSharedSpend
+                ? "Posted and draft splits in this window"
+                : "Shared spending will appear after your first posted or draft split."}
             </p>
-            <p className="mt-2 text-xs text-slate-500">Posted and draft splits in this window</p>
           </div>
           <div>
-            <div className="mb-2 flex items-center gap-2 text-xs font-semibold uppercase text-slate-500">
+            <div className="mb-2 flex items-center gap-2 text-xs font-semibold uppercase tracking-wide text-slate-600">
               <PieChart className="h-3.5 w-3.5" />
               Personal vs shared
             </div>
-            <div className="flex h-2 overflow-hidden rounded-full bg-slate-100">
-              <div className="h-full bg-slate-400" style={{ width: `${personalPercent}%` }} />
-              <div className="h-full bg-indigo-500" style={{ width: `${sharedPercent}%` }} />
-            </div>
-            <div className="mt-2 flex items-center justify-between text-xs text-slate-500">
-              <span>{analytics.personalCount} personal</span>
-              <span>{sharedPercent}% shared</span>
-            </div>
+            {loading ? (
+              <div className="ui-skeleton h-2 w-full rounded-full" />
+            ) : hasRatioData ? (
+              <>
+                <div className="flex h-2 overflow-hidden rounded-full bg-slate-200">
+                  <div className="h-full bg-slate-400" style={{ width: `${personalPercent}%` }} />
+                  <div className="h-full bg-indigo-600" style={{ width: `${sharedPercent}%` }} />
+                </div>
+                <div className="mt-2 flex items-center justify-between text-xs text-slate-600">
+                  <span>{analytics.personalCount} personal</span>
+                  <span>{sharedPercent}% shared</span>
+                </div>
+              </>
+            ) : (
+              <div className="rounded-lg border border-dashed border-slate-300 bg-slate-50/70 px-3 py-3 text-center text-xs text-slate-600">
+                No classification data yet
+              </div>
+            )}
           </div>
         </CardContent>
       </Card>
-      <Card className="border-slate-200 bg-white shadow-sm shadow-slate-950/[0.025]">
-        <CardHeader className="p-4 pb-3">
+      <Card>
+        <CardHeader className="pb-4">
           <div className="flex items-center gap-2">
             <BarChart3 className="h-4 w-4 text-slate-600" />
             <CardTitle className="text-base">Top patterns</CardTitle>
           </div>
         </CardHeader>
-        <CardContent className="grid gap-4 p-4 pt-0 md:grid-cols-3">
-          <MiniBarList title="Merchants" items={analytics.topMerchants} />
-          <MiniBarList title="Split partners" items={analytics.topPartners} />
-          <MiniBarList title="Groups" items={analytics.topGroups} />
+        <CardContent className="grid gap-3 md:grid-cols-3">
+          <MiniBarList title="Merchants" items={analytics.topMerchants} loading={loading} />
+          <MiniBarList title="Split partners" items={analytics.topPartners} loading={loading} />
+          <MiniBarList title="Groups" items={analytics.topGroups} loading={loading} />
         </CardContent>
       </Card>
     </section>
   );
 }
 
-function MiniBarList({ title, items }: { title: string; items: MemoryEntry[] }) {
+function MiniBarList({
+  title,
+  items,
+  loading,
+}: {
+  title: string;
+  items: MemoryEntry[];
+  loading: boolean;
+}) {
   const max = Math.max(1, ...items.map((item) => item.count));
   return (
-    <div className="space-y-2">
-      <p className="text-sm font-medium text-slate-700">{title}</p>
-      {items.length ? (
-        items.map((item) => (
+    <div className="min-h-32 rounded-xl border border-slate-200 bg-slate-50/60 p-3.5">
+      <p className="mb-3 text-sm font-semibold text-slate-800">{title}</p>
+      {loading ? (
+        <SkeletonRows rows={3} />
+      ) : items.length ? (
+        <div className="space-y-2.5">
+        {items.map((item) => (
           <div key={item.id}>
-            <div className="mb-1 flex justify-between gap-2 text-xs text-slate-500">
+            <div className="mb-1 flex justify-between gap-2 text-xs text-slate-600">
               <span className="truncate">{item.name}</span>
               <span>{item.count}</span>
             </div>
             <div className="h-1.5 overflow-hidden rounded-full bg-slate-100">
               <div
-                className="h-full bg-indigo-500"
+                className="h-full bg-indigo-600"
                 style={{ width: `${Math.max(12, (item.count / max) * 100)}%` }}
               />
             </div>
           </div>
-        ))
-      ) : (
-        <div className="rounded-md border border-dashed border-slate-200 bg-slate-50 p-3 text-sm text-slate-500">
-          No pattern data yet.
+        ))}
         </div>
+      ) : (
+        <PanelEmptyState icon={BarChart3} title="No pattern data yet" compact />
       )}
     </div>
   );
 }
 
-function ActivityTimeline({ events }: { events: DashboardEvent[] }) {
+function ActivityTimeline({
+  events,
+  loading,
+}: {
+  events: DashboardEvent[];
+  loading: boolean;
+}) {
   const [expanded, setExpanded] = useState<string | null>(null);
   const eventStyles: Record<
     DashboardEvent["type"],
@@ -872,16 +950,18 @@ function ActivityTimeline({ events }: { events: DashboardEvent[] }) {
   };
 
   return (
-    <Card className="overflow-hidden border-slate-200 bg-white shadow-sm shadow-slate-950/[0.025]">
-      <CardHeader className="p-4 pb-3">
+    <Card className="overflow-hidden">
+      <CardHeader className="pb-4">
         <div className="flex items-center gap-2">
           <Activity className="h-4 w-4 text-slate-600" />
           <CardTitle>Activity timeline</CardTitle>
         </div>
         <CardDescription>Chronological transaction events</CardDescription>
       </CardHeader>
-      <CardContent className="max-h-[620px] space-y-1 overflow-auto p-4 pt-0 pr-2">
-        {events.length ? (
+      <CardContent className="max-h-[620px] space-y-1 overflow-auto pr-3">
+        {loading ? (
+          <SkeletonRows rows={5} />
+        ) : events.length ? (
           events.slice(0, 20).map((event) => {
             const style = eventStyles[event.type];
             const Icon = style.icon;
@@ -889,7 +969,7 @@ function ActivityTimeline({ events }: { events: DashboardEvent[] }) {
               <button
                 key={event.id}
                 type="button"
-                className="group flex w-full gap-3 rounded-md border border-transparent px-2 py-2 text-left transition hover:border-slate-200 hover:bg-slate-50"
+                className="group flex w-full gap-3 rounded-lg border border-transparent px-2 py-2 text-left transition hover:border-slate-200 hover:bg-slate-50 focus-visible:border-indigo-300 focus-visible:bg-indigo-50/40"
                 onClick={() => setExpanded((current) => (current === event.id ? null : event.id))}
               >
                 <span className="relative mt-1 flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-white shadow-sm ring-1 ring-slate-200">
@@ -907,7 +987,7 @@ function ActivityTimeline({ events }: { events: DashboardEvent[] }) {
                     {formatDashboardAmount(event.amount)}
                     {event.participants.length ? ` · ${event.participants.join(", ")}` : ""}
                   </span>
-                  <span className="mt-1 flex items-center gap-1 text-xs text-slate-400">
+                  <span className="mt-1 flex items-center gap-1 text-xs text-slate-500">
                     <CalendarDays className="h-3 w-3" />
                     {new Date(event.timestamp).toLocaleString()}
                   </span>
@@ -921,9 +1001,11 @@ function ActivityTimeline({ events }: { events: DashboardEvent[] }) {
             );
           })
         ) : (
-          <div className="rounded-md border border-dashed border-slate-200 bg-slate-50 p-4 text-sm text-slate-500">
-            No activity matches the current filters.
-          </div>
+          <PanelEmptyState
+            icon={Activity}
+            title="No matching activity"
+            description="Activity will appear here as transactions move through the workflow."
+          />
         )}
       </CardContent>
     </Card>
@@ -935,15 +1017,17 @@ function AgentMemoryPanel({
   groups,
   onSelectFriend,
   onSelectGroup,
+  loading,
 }: {
   friends: MemoryEntry[];
   groups: MemoryEntry[];
   onSelectFriend: (name: string) => void;
   onSelectGroup: (name: string) => void;
+  loading: boolean;
 }) {
   return (
-    <Card className="border-slate-200 bg-white shadow-sm shadow-slate-950/[0.025]">
-      <CardHeader className="p-4 pb-3">
+    <Card>
+      <CardHeader className="pb-4">
         <div className="flex items-center gap-2">
           <Bot className="h-4 w-4 text-indigo-600" />
           <CardTitle>Agent memory</CardTitle>
@@ -951,8 +1035,8 @@ function AgentMemoryPanel({
         <CardDescription>Frequent friends and groups from past splits</CardDescription>
       </CardHeader>
       <CardContent className="space-y-3">
-        <MemoryList title="Friends" items={friends} onSelect={onSelectFriend} />
-        <MemoryList title="Groups" items={groups} onSelect={onSelectGroup} />
+        <MemoryList title="Friends" items={friends} onSelect={onSelectFriend} loading={loading} />
+        <MemoryList title="Groups" items={groups} onSelect={onSelectGroup} loading={loading} />
       </CardContent>
     </Card>
   );
@@ -961,13 +1045,15 @@ function AgentMemoryPanel({
 function AIFallbackMemoryPanel({
   memories,
   onDelete,
+  loading,
 }: {
   memories: AIMemory[];
   onDelete: (id: number) => void;
+  loading: boolean;
 }) {
   return (
-    <Card className="border-slate-200 bg-white shadow-sm shadow-slate-950/[0.025]">
-      <CardHeader className="p-4 pb-3">
+    <Card>
+      <CardHeader className="pb-4">
         <div className="flex items-center gap-2">
           <Sparkles className="h-4 w-4 text-indigo-600" />
           <CardTitle>AI learned corrections</CardTitle>
@@ -975,7 +1061,9 @@ function AIFallbackMemoryPanel({
         <CardDescription>Fallback examples learned from Button mode completions</CardDescription>
       </CardHeader>
       <CardContent className="space-y-3">
-        {memories.length ? (
+        {loading ? (
+          <SkeletonRows rows={3} />
+        ) : memories.length ? (
           memories.map((memory) => (
             <div
               key={memory.id}
@@ -997,6 +1085,8 @@ function AIFallbackMemoryPanel({
                   variant="ghost"
                   className="h-7 w-7 shrink-0 text-slate-400 hover:text-red-600"
                   onClick={() => onDelete(memory.id)}
+                  aria-label={`Delete learned correction ${memory.original_message}`}
+                  title="Delete learned correction"
                 >
                   <X className="h-3.5 w-3.5" />
                 </Button>
@@ -1013,7 +1103,7 @@ function AIFallbackMemoryPanel({
                   ))}
                 </div>
               ) : null}
-              <p className="mt-2 text-xs text-slate-400">
+              <p className="mt-2 text-xs text-slate-500">
                 Used {memory.usage_count} times
                 {memory.last_used_at
                   ? ` · last used ${new Date(memory.last_used_at).toLocaleDateString()}`
@@ -1022,7 +1112,12 @@ function AIFallbackMemoryPanel({
             </div>
           ))
         ) : (
-          <p className="text-sm text-slate-500">No learned AI fallbacks yet.</p>
+          <PanelEmptyState
+            icon={Sparkles}
+            title="No learned corrections yet"
+            description="Corrections saved from Button mode will appear here."
+            compact
+          />
         )}
       </CardContent>
     </Card>
@@ -1033,21 +1128,25 @@ function MemoryList({
   title,
   items,
   onSelect,
+  loading,
 }: {
   title: string;
   items: MemoryEntry[];
   onSelect: (name: string) => void;
+  loading: boolean;
 }) {
   return (
     <div className="space-y-2">
       <p className="text-sm font-medium text-slate-700">{title}</p>
-      {items.length ? (
+      {loading ? (
+        <SkeletonRows rows={2} />
+      ) : items.length ? (
         <div className="flex flex-wrap gap-2">
           {items.map((item) => (
             <button
               key={item.id}
               type="button"
-              className="rounded-md border border-slate-200 bg-white px-2.5 py-1.5 text-sm text-slate-700 transition hover:border-indigo-200 hover:bg-indigo-50 hover:text-indigo-900"
+              className="rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-sm text-slate-700 transition hover:border-indigo-300 hover:bg-indigo-50 hover:text-indigo-900 focus-visible:border-indigo-400"
               onClick={() => onSelect(item.name)}
             >
               {item.name}
@@ -1056,7 +1155,7 @@ function MemoryList({
           ))}
         </div>
       ) : (
-        <p className="text-sm text-slate-500">No memory yet.</p>
+        <PanelEmptyState icon={Bot} title="No memory yet" compact />
       )}
     </div>
   );
@@ -1072,12 +1171,13 @@ function Header({
   busy: string | null;
 }) {
   return (
-    <div className="relative overflow-hidden rounded-lg border border-slate-800 bg-slate-950 px-5 py-5 text-white shadow-lg shadow-slate-950/10 lg:px-6">
-      <div className="absolute inset-0 bg-[linear-gradient(135deg,rgba(79,70,229,0.18),transparent_42%)]" />
+    <header className="relative overflow-hidden rounded-xl border border-slate-800/90 bg-slate-950 px-5 py-6 text-white shadow-sm shadow-slate-950/10 lg:px-7">
+      <div className="absolute inset-0 bg-[linear-gradient(120deg,rgba(79,70,229,0.22),transparent_48%,rgba(255,255,255,0.025))]" />
+      <div className="absolute inset-x-10 -bottom-10 h-20 rounded-full bg-indigo-500/10 blur-3xl" />
       <div className="relative flex flex-col gap-5 lg:flex-row lg:items-center lg:justify-between">
         <div>
           <div className="inline-flex items-center gap-2 rounded-full bg-white/[0.06] px-3 py-1 text-xs font-semibold text-slate-200 ring-1 ring-white/10">
-            <span className="flex h-5 w-5 items-center justify-center rounded bg-white/10 text-slate-200">
+            <span className="flex h-5 w-5 items-center justify-center rounded-md bg-indigo-500/25 text-indigo-100">
               <Split className="h-3.5 w-3.5" />
             </span>
             ExpenseOps Agent
@@ -1096,7 +1196,7 @@ function Header({
           <Button
             onClick={onPlaid}
             disabled={busy !== null}
-            className="bg-white text-slate-950 shadow-sm shadow-black/10 hover:bg-slate-100"
+            className="bg-indigo-600 text-white shadow-sm shadow-black/10 hover:bg-indigo-500"
           >
             <Link2 className="h-4 w-4" />
             Connect Plaid
@@ -1112,7 +1212,7 @@ function Header({
           </Button>
         </div>
       </div>
-    </div>
+    </header>
   );
 }
 
@@ -1138,36 +1238,80 @@ function EmptyState({
   );
 }
 
+function PanelEmptyState({
+  icon: Icon,
+  title,
+  description,
+  compact = false,
+}: {
+  icon: ComponentType<{ className?: string }>;
+  title: string;
+  description?: string;
+  compact?: boolean;
+}) {
+  return (
+    <div
+      className={`flex flex-col items-center justify-center rounded-xl border border-dashed border-slate-300 bg-slate-50/70 px-4 text-center ${compact ? "min-h-24 py-4" : "min-h-32 py-6"}`}
+    >
+      <span className="flex h-9 w-9 items-center justify-center rounded-xl border border-slate-200 bg-white text-slate-500 shadow-sm">
+        <Icon className="h-4 w-4" />
+      </span>
+      <p className="mt-2 text-sm font-semibold text-slate-800">{title}</p>
+      {description ? (
+        <p className="mt-1 max-w-xs text-xs leading-5 text-slate-600">{description}</p>
+      ) : null}
+    </div>
+  );
+}
+
+function SkeletonRows({ rows = 3 }: { rows?: number }) {
+  return (
+    <div className="space-y-3" aria-label="Loading" role="status">
+      {Array.from({ length: rows }, (_, index) => (
+        <div key={index} className="space-y-1.5">
+          <div className="ui-skeleton h-3.5" style={{ width: `${72 - index * 8}%` }} />
+          <div className="ui-skeleton h-2 w-full" />
+        </div>
+      ))}
+      <span className="sr-only">Loading content</span>
+    </div>
+  );
+}
+
 function MetricCard({
   icon: Icon,
   label,
   value,
   detail,
   tone = "teal",
+  empty = false,
 }: {
   icon: ComponentType<{ className?: string }>;
   label: string;
   value: string;
   detail: string;
   tone?: "teal" | "indigo" | "amber";
+  empty?: boolean;
 }) {
-  const tones = {
-    teal: "text-teal-700",
-    indigo: "text-indigo-700",
-    amber: "text-amber-700",
-  };
+  void tone;
 
   return (
-    <Card className="group overflow-hidden border-slate-200 bg-white shadow-sm shadow-slate-950/[0.025] transition hover:border-slate-300 hover:shadow-md hover:shadow-slate-950/[0.04]">
-      <CardContent className="p-4">
+    <Card className="group overflow-hidden transition hover:border-slate-300 hover:shadow-md hover:shadow-slate-950/[0.06]">
+      <CardContent className="p-5 sm:p-6">
         <div className="flex items-start justify-between gap-3">
           <div>
-            <p className="text-xs font-semibold uppercase text-slate-500">{label}</p>
-            <p className="mt-1.5 text-3xl font-semibold tracking-normal text-slate-950">{value}</p>
+            <p className="text-xs font-semibold uppercase tracking-wide text-slate-600">{label}</p>
+            <p className={`mt-2 text-4xl font-semibold tracking-tight ${empty ? "text-slate-500" : "text-slate-950"}`}>
+              {value}
+            </p>
           </div>
-          <Icon className={`mt-0.5 h-4 w-4 ${tones[tone]}`} />
+          <span className={`flex h-10 w-10 items-center justify-center rounded-xl ${empty ? "border border-dashed border-slate-300 bg-slate-50 text-slate-500" : "bg-indigo-50 text-indigo-700"}`}>
+            <Icon className="h-5 w-5" />
+          </span>
         </div>
-        <p className="mt-2 text-xs font-medium text-slate-500">{detail}</p>
+        <p className="mt-3 text-sm text-slate-600">
+          {empty ? (label === "Pending amount" ? "No open card spend" : "Nothing needs review") : detail}
+        </p>
       </CardContent>
     </Card>
   );
@@ -1183,20 +1327,18 @@ function OperationalState({
   lastSyncLabel: string;
 }) {
   return (
-    <Card className="border-slate-200 bg-white shadow-sm shadow-slate-950/[0.025] md:col-span-3 xl:col-span-2">
-      <CardContent className="grid gap-0 p-0 sm:grid-cols-3">
+    <Card className="bg-slate-50/70 shadow-none">
+      <CardContent className="grid gap-2 p-3 sm:grid-cols-3">
         <StatusPill
-          icon={pendingCount ? AlertCircle : CheckCircle2}
           label="Approval queue"
           value={pendingCount ? `${pendingCount} pending` : "Clear"}
-          tone={pendingCount ? "amber" : "emerald"}
+          connected={false}
         />
-        <StatusPill icon={MessageCircle} label="Telegram connected" value="Review alerts ready" tone="blue" />
+        <StatusPill label="Telegram connected" value="Review alerts ready" connected />
         <StatusPill
-          icon={RefreshCw}
           label="Auto-sync"
           value={busy ? "Working" : lastSyncLabel}
-          tone="slate"
+          connected={!busy && lastSyncLabel !== "Not synced yet"}
         />
       </CardContent>
     </Card>
@@ -1204,28 +1346,19 @@ function OperationalState({
 }
 
 function StatusPill({
-  icon: Icon,
   label,
   value,
-  tone,
+  connected,
 }: {
-  icon: ComponentType<{ className?: string }>;
   label: string;
   value: string;
-  tone: "emerald" | "amber" | "blue" | "slate";
+  connected: boolean;
 }) {
-  const tones = {
-    emerald: "text-emerald-700",
-    amber: "text-amber-700",
-    blue: "text-indigo-700",
-    slate: "text-slate-600",
-  };
-
   return (
-    <div className="flex min-w-0 items-center gap-3 border-b border-slate-100 p-4 last:border-b-0 sm:border-b-0 sm:border-r sm:last:border-r-0">
-      <Icon className={`h-4 w-4 shrink-0 ${tones[tone]}`} />
+    <div className="flex min-w-0 items-center gap-3 rounded-lg px-3 py-2.5 transition hover:bg-white">
+      <span className={`h-2.5 w-2.5 shrink-0 rounded-full ring-4 ${connected ? "bg-emerald-500 ring-emerald-100" : "bg-slate-400 ring-slate-200"}`} />
       <span className="min-w-0">
-        <span className="block text-xs font-semibold uppercase text-slate-400">
+        <span className="block text-[11px] font-semibold uppercase tracking-wide text-slate-600">
           {label}
         </span>
         <span className="block truncate text-sm font-medium text-slate-900">{value}</span>
@@ -1943,20 +2076,22 @@ function RecentActivity({
   onUndo: (id: number) => void;
 }) {
   return (
-    <Card className="overflow-hidden border-slate-200 bg-white shadow-sm shadow-slate-950/[0.025]">
-      <CardHeader className="p-4 pb-3">
+    <Card className="overflow-hidden">
+      <CardHeader className="pb-4">
         <div className="flex items-center gap-2">
           <Layers3 className="h-4 w-4 text-slate-600" />
           <CardTitle>Recent activity</CardTitle>
         </div>
         <CardDescription>Completed transactions that can be moved back to review</CardDescription>
       </CardHeader>
-      <CardContent className="max-h-[520px] space-y-1 overflow-auto p-4 pt-0 pr-2">
-        {transactions.length ? (
+      <CardContent className="max-h-[520px] space-y-1 overflow-auto pr-3">
+        {busy !== null && transactions.length === 0 ? (
+          <SkeletonRows rows={4} />
+        ) : transactions.length ? (
           transactions.map((transaction) => (
             <div
               key={transaction.id}
-              className="group flex items-center justify-between gap-3 rounded-md border border-transparent px-2 py-2 transition hover:border-slate-200 hover:bg-slate-50"
+              className="group flex items-center justify-between gap-3 rounded-lg border border-transparent px-2 py-2 transition hover:border-slate-200 hover:bg-slate-50"
             >
               <div className="flex min-w-0 items-center gap-3">
                 <ActivityIcon status={transaction.status} />
@@ -1968,7 +2103,7 @@ function RecentActivity({
                     {formatTransactionAmount(transaction)} ·{" "}
                     {statusDisplay(transaction.status)}
                   </p>
-                  <p className="text-xs text-slate-400">
+                  <p className="text-xs text-slate-500">
                     {new Date(transaction.updated_at).toLocaleString()}
                   </p>
                 </div>
@@ -1988,9 +2123,11 @@ function RecentActivity({
             </div>
           ))
         ) : (
-          <div className="rounded-md border border-dashed border-slate-200 bg-slate-50 p-4 text-sm text-slate-500">
-            No recent completed transactions yet.
-          </div>
+          <PanelEmptyState
+            icon={Layers3}
+            title="No recent activity yet"
+            description="Completed transactions will appear here with available actions."
+          />
         )}
       </CardContent>
     </Card>
@@ -2020,10 +2157,10 @@ function ActivityIcon({ status }: { status: Transaction["status"] }) {
 
 function ActivityLog({ log }: { log: unknown }) {
   return (
-    <Card className="bg-slate-950 text-white">
+    <Card>
       <CardHeader>
-        <CardTitle className="text-white">Activity log</CardTitle>
-        <CardDescription className="text-slate-400">Latest API response or error</CardDescription>
+        <CardTitle>Activity log</CardTitle>
+        <CardDescription>Latest API response or error</CardDescription>
       </CardHeader>
       <CardContent>
         <pre className="max-h-[520px] overflow-auto rounded-md bg-black/30 p-4 text-xs leading-5 text-slate-100">
