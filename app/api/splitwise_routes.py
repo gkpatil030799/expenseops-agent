@@ -3,8 +3,11 @@ from __future__ import annotations
 from fastapi import APIRouter, HTTPException, Query
 
 from app.schemas import (
+    CreateGroupRequest,
     FriendOut,
+    GroupMemberRequest,
     GroupOut,
+    InviteGroupMemberRequest,
     SplitwiseOAuthAccessTokenResponse,
     SplitwiseOAuthAuthorizeResponse,
     SplitwiseUserOut,
@@ -14,6 +17,25 @@ from app.services.splitwise_service import SplitwiseAPIError, SplitwiseService
 
 router = APIRouter(prefix="/splitwise", tags=["splitwise"])
 _oauth_request_token_secrets: dict[str, str] = {}
+
+
+def _friend_out(friend: dict) -> FriendOut:
+    return FriendOut(
+        id=int(friend["id"]),
+        first_name=friend.get("first_name"),
+        last_name=friend.get("last_name"),
+        email=friend.get("email"),
+        display_name=friend_display_name(friend),
+        registration_status=friend.get("registration_status"),
+    )
+
+
+def _group_out(group: dict) -> GroupOut:
+    return GroupOut(
+        id=int(group["id"]),
+        name=group.get("name") or str(group["id"]),
+        invite_link=group.get("invite_link"),
+    )
 
 
 @router.get("/me", response_model=SplitwiseUserOut)
@@ -73,16 +95,7 @@ def oauth_callback(
 def list_friends(q: str = Query(default="")) -> list[FriendOut]:
     try:
         friends = SplitwiseService().search_friends(q) if q else SplitwiseService().get_friends()
-        return [
-            FriendOut(
-                id=int(friend["id"]),
-                first_name=friend.get("first_name"),
-                last_name=friend.get("last_name"),
-                email=friend.get("email"),
-                display_name=friend_display_name(friend),
-            )
-            for friend in friends
-        ]
+        return [_friend_out(friend) for friend in friends]
     except SplitwiseAPIError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -91,10 +104,29 @@ def list_friends(q: str = Query(default="")) -> list[FriendOut]:
 def list_groups(q: str = Query(default="")) -> list[GroupOut]:
     try:
         groups = SplitwiseService().search_groups(q) if q else SplitwiseService().get_groups()
-        return [
-            GroupOut(id=int(group["id"]), name=group.get("name") or str(group["id"]))
-            for group in groups
-        ]
+        return [_group_out(group) for group in groups]
+    except SplitwiseAPIError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/groups", response_model=GroupOut, status_code=201)
+def create_group(request: CreateGroupRequest) -> GroupOut:
+    try:
+        group = SplitwiseService().create_group(
+            name=request.name,
+            group_type=request.group_type,
+            simplify_by_default=request.simplify_by_default,
+            user_ids=request.user_ids,
+        )
+        return _group_out(group)
+    except SplitwiseAPIError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.get("/groups/{group_id}", response_model=GroupOut)
+def get_group(group_id: int) -> GroupOut:
+    try:
+        return _group_out(SplitwiseService().get_group(group_id))
     except SplitwiseAPIError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -103,15 +135,43 @@ def list_groups(q: str = Query(default="")) -> list[GroupOut]:
 def list_group_members(group_id: int) -> list[FriendOut]:
     try:
         members = SplitwiseService().get_group_members(group_id)
-        return [
-            FriendOut(
-                id=int(member["id"]),
-                first_name=member.get("first_name"),
-                last_name=member.get("last_name"),
-                email=member.get("email"),
-                display_name=friend_display_name(member),
-            )
-            for member in members
-        ]
+        return [_friend_out(member) for member in members]
+    except SplitwiseAPIError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/groups/{group_id}/invite", response_model=list[FriendOut])
+def invite_group_member(
+    group_id: int, request: InviteGroupMemberRequest
+) -> list[FriendOut]:
+    try:
+        service = SplitwiseService()
+        friend = service.create_friend(
+            email=request.email,
+            first_name=request.first_name,
+            last_name=request.last_name,
+        )
+        service.add_user_to_group(group_id, int(friend["id"]))
+        return [_friend_out(member) for member in service.get_group_members(group_id)]
+    except SplitwiseAPIError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/groups/{group_id}/members", response_model=list[FriendOut])
+def add_group_member(group_id: int, request: GroupMemberRequest) -> list[FriendOut]:
+    try:
+        service = SplitwiseService()
+        service.add_user_to_group(group_id, request.user_id)
+        return [_friend_out(member) for member in service.get_group_members(group_id)]
+    except SplitwiseAPIError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.delete("/groups/{group_id}/members/{user_id}", response_model=list[FriendOut])
+def remove_group_member(group_id: int, user_id: int) -> list[FriendOut]:
+    try:
+        service = SplitwiseService()
+        service.remove_user_from_group(group_id, user_id)
+        return [_friend_out(member) for member in service.get_group_members(group_id)]
     except SplitwiseAPIError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

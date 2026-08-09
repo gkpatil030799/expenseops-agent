@@ -4,6 +4,7 @@ import json
 import logging
 import re
 from decimal import Decimal
+from urllib.parse import quote
 
 from fastapi import APIRouter, HTTPException, Query, Request
 from sqlalchemy import select
@@ -76,6 +77,7 @@ from app.services.telegram_service import (
     format_split_target_prompt,
     format_transaction_review_prompt,
     format_undo_success_message,
+    html,
     parse_friend_choice_callback_data,
     parse_group_choice_callback_data,
     parse_review_callback_data,
@@ -169,6 +171,40 @@ def _handle_callback_query(callback_query: dict, db: DbSession) -> dict[str, boo
     chat_id = str(chat.get("id") or "")
     user_id = str(from_user.get("id") or "")
     telegram = TelegramService()
+
+    if callback_data.startswith("gm:"):
+        try:
+            answer = _handle_group_management_callback(
+                callback_data,
+                chat_id,
+                user_id,
+                int(message_id) if message_id else None,
+                telegram,
+            )
+        except (SplitwiseAPIError, ValueError) as exc:
+            answer = "Could not complete that group action."
+            if chat_id:
+                telegram.send_message(
+                    f"⚠️ {html(str(exc))}",
+                    chat_id=chat_id,
+                )
+        except Exception as exc:
+            log_event(
+                logger,
+                "telegram_group_management_failed",
+                level=logging.WARNING,
+                action=callback_data.split(":", 2)[1] if ":" in callback_data else "unknown",
+                error_type=type(exc).__name__,
+            )
+            answer = "Could not complete that group action."
+            if chat_id:
+                telegram.send_message(
+                    "Could not complete that Splitwise group action. Please try again.",
+                    chat_id=chat_id,
+                )
+        if callback_query_id and hasattr(telegram, "answer_callback_query"):
+            telegram.answer_callback_query(callback_query_id, answer)
+        return {"ok": True}
 
     if callback_data.startswith("noop:"):
         answer = "You are already included as payer."
@@ -652,7 +688,28 @@ def _handle_text_message(message: dict, db: DbSession) -> None:
     text = str(message.get("text") or "").strip()
     telegram = TelegramService()
     pending = telegram_split_state_store.get_pending(chat_id, user_id)
-    if not pending or not text:
+    if not text:
+        return
+
+    normalized = " ".join(text.lower().split())
+    if normalized in {"/groups", "manage groups", "groups"} or normalized.startswith(
+        "/groups@"
+    ):
+        try:
+            _show_group_management_home(chat_id, user_id, telegram)
+        except SplitwiseAPIError:
+            telegram.send_message(
+                "Could not load Splitwise groups right now. Please try again.",
+                chat_id=chat_id,
+            )
+        return
+    if normalized == "/creategroup" or normalized.startswith("/creategroup@"):
+        _start_group_creation(chat_id, user_id, telegram)
+        return
+    if pending and pending.mode.startswith("group_manage_"):
+        _handle_group_management_text(pending, text, chat_id, user_id, telegram)
+        return
+    if not pending:
         return
 
     if pending.mode == "ai_chat":
@@ -717,6 +774,519 @@ def _handle_text_message(message: dict, db: DbSession) -> None:
         pending.ambiguous_matches_by_name[name] = matches
 
     _continue_or_finish_pending_split(pending, chat_id, user_id, db, telegram)
+
+
+def _show_group_management_home(
+    chat_id: str,
+    user_id: str,
+    telegram: TelegramService,
+    message_id: int | None = None,
+) -> None:
+    groups = [group for group in SplitwiseService().get_groups() if int(group.get("id") or 0) > 0]
+    pending = telegram_split_state_store.set_pending(
+        chat_id,
+        user_id,
+        0,
+        mode="group_manage_home",
+    )
+    pending.group_options = groups
+    rows = [
+        [
+            {
+                "text": str(group.get("name") or group["id"])[:50],
+                "callback_data": f"gm:open:{int(group['id'])}",
+            }
+        ]
+        for group in groups[:20]
+    ]
+    rows.append([{"text": "➕ Create group", "callback_data": "gm:create"}])
+    _edit_or_send(
+        telegram,
+        "\n".join(
+            [
+                "👥 <b>Splitwise group manager</b>",
+                "",
+                "Choose a group or create a new one.",
+            ]
+        ),
+        reply_markup={"inline_keyboard": rows},
+        chat_id=chat_id,
+        message_id=message_id,
+    )
+
+
+def _start_group_creation(chat_id: str, user_id: str, telegram: TelegramService) -> None:
+    pending = telegram_split_state_store.set_pending(
+        chat_id,
+        user_id,
+        0,
+        mode="group_manage_create_name",
+    )
+    pending.management_group_type = "home"
+    telegram.send_message(
+        "➕ <b>Create a Splitwise group</b>\n\nWhat should the group be called?",
+        chat_id=chat_id,
+    )
+
+
+def _handle_group_management_text(
+    pending: PendingTelegramSplit,
+    text: str,
+    chat_id: str,
+    user_id: str,
+    telegram: TelegramService,
+) -> None:
+    if text.strip().lower() == "cancel":
+        telegram_split_state_store.clear(chat_id, user_id)
+        telegram.send_message("Group action cancelled.", chat_id=chat_id)
+        return
+
+    if pending.mode == "group_manage_create_name":
+        name = text.strip()
+        if not name or len(name) > 255:
+            telegram.send_message(
+                "Enter a group name between 1 and 255 characters.", chat_id=chat_id
+            )
+            return
+        pending.management_group_name = name
+        pending.mode = "group_manage_create_type"
+        telegram.send_message(
+            f"Create <b>{html(name)}</b>. What type of group is it?",
+            reply_markup={
+                "inline_keyboard": [
+                    [
+                        {"text": "🏠 Home", "callback_data": "gm:create_type:home"},
+                        {"text": "✈️ Trip", "callback_data": "gm:create_type:trip"},
+                    ],
+                    [
+                        {"text": "❤️ Couple", "callback_data": "gm:create_type:couple"},
+                        {"text": "📁 Other", "callback_data": "gm:create_type:other"},
+                    ],
+                    [{"text": "Cancel", "callback_data": "gm:cancel"}],
+                ]
+            },
+            chat_id=chat_id,
+        )
+        return
+
+    if pending.mode == "group_manage_invite_details":
+        name_part, separator, email_part = text.partition("|")
+        email = email_part.strip().lower()
+        name_parts = name_part.strip().split(maxsplit=1)
+        if (
+            not separator
+            or not name_parts
+            or "@" not in email
+            or "." not in email.rsplit("@", 1)[-1]
+        ):
+            telegram.send_message(
+                "Use this format:\n<code>First Last | email@example.com</code>",
+                chat_id=chat_id,
+            )
+            return
+        pending.management_invite_first_name = name_parts[0]
+        pending.management_invite_last_name = name_parts[1] if len(name_parts) > 1 else ""
+        pending.management_invite_email = email
+        pending.mode = "group_manage_invite_confirm"
+        telegram.send_message(
+            "\n".join(
+                [
+                    "📧 <b>Confirm Splitwise invitation</b>",
+                    "",
+                    f"Name: <b>{html(name_part.strip())}</b>",
+                    f"Email: <code>{html(email)}</code>",
+                ]
+            ),
+            reply_markup={
+                "inline_keyboard": [
+                    [
+                        {
+                            "text": "Send invitation",
+                            "callback_data": f"gm:invite_confirm:{pending.management_group_id}",
+                        }
+                    ],
+                    [
+                        {
+                            "text": "Cancel",
+                            "callback_data": f"gm:open:{pending.management_group_id}",
+                        }
+                    ],
+                ]
+            },
+            chat_id=chat_id,
+        )
+        return
+
+    telegram.send_message("Use the buttons above, or send /groups to start again.", chat_id=chat_id)
+
+
+def _handle_group_management_callback(
+    callback_data: str,
+    chat_id: str,
+    user_id: str,
+    message_id: int | None,
+    telegram: TelegramService,
+) -> str:
+    parts = callback_data.split(":")
+    action = parts[1] if len(parts) > 1 else ""
+    pending = telegram_split_state_store.get_pending(chat_id, user_id)
+
+    if action == "home":
+        _show_group_management_home(chat_id, user_id, telegram, message_id)
+        return "Group list refreshed."
+    if action == "cancel":
+        telegram_split_state_store.clear(chat_id, user_id)
+        _edit_or_send(
+            telegram,
+            "Group action cancelled. Send /groups whenever you need it.",
+            chat_id=chat_id,
+            message_id=message_id,
+        )
+        return "Cancelled."
+    if action == "create":
+        _start_group_creation(chat_id, user_id, telegram)
+        return "Enter a group name."
+    if action == "create_type":
+        if not pending or pending.mode != "group_manage_create_type":
+            raise ValueError("This group creation session expired. Send /creategroup again.")
+        group_type = parts[2] if len(parts) > 2 else ""
+        if group_type not in {"home", "trip", "couple", "other"}:
+            raise ValueError("Unsupported group type")
+        pending.management_group_type = group_type
+        pending.mode = "group_manage_create_confirm"
+        telegram.send_message(
+            "\n".join(
+                [
+                    "👥 <b>Confirm new group</b>",
+                    "",
+                    f"Name: <b>{html(pending.management_group_name or '')}</b>",
+                    f"Type: {html(group_type.title())}",
+                    "You will be added automatically.",
+                ]
+            ),
+            reply_markup={
+                "inline_keyboard": [
+                    [{"text": "Create group", "callback_data": "gm:create_confirm"}],
+                    [{"text": "Cancel", "callback_data": "gm:cancel"}],
+                ]
+            },
+            chat_id=chat_id,
+        )
+        return "Confirm group creation."
+    if action == "create_confirm":
+        if not pending or pending.mode != "group_manage_create_confirm":
+            raise ValueError("This group creation session expired. Send /creategroup again.")
+        group = SplitwiseService().create_group(
+            name=pending.management_group_name or "",
+            group_type=pending.management_group_type,
+            simplify_by_default=False,
+            user_ids=[],
+        )
+        pending.management_group_id = int(group["id"])
+        _show_managed_group(int(group["id"]), chat_id, user_id, telegram, None)
+        return "Group created."
+
+    group_id = _management_callback_id(parts, 2, "group")
+    if action == "open":
+        _show_managed_group(group_id, chat_id, user_id, telegram, message_id)
+        return "Group opened."
+    if action == "add":
+        _show_add_friend_choices(group_id, chat_id, user_id, telegram, message_id)
+        return "Choose a friend."
+    if action == "add_pick":
+        friend_id = _management_callback_id(parts, 3, "friend")
+        friend = _find_splitwise_friend(friend_id)
+        state = pending or telegram_split_state_store.set_pending(chat_id, user_id, 0)
+        state.mode = "group_manage_add_confirm"
+        state.management_group_id = group_id
+        state.management_friend_id = friend_id
+        state.management_friend_name = friend_display_name(friend)
+        _send_group_mutation_confirmation(
+            telegram,
+            chat_id,
+            title="Add participant?",
+            detail=f"Add <b>{html(friend_display_name(friend))}</b> to this group?",
+            confirm_data=f"gm:add_confirm:{group_id}:{friend_id}",
+            cancel_data=f"gm:open:{group_id}",
+        )
+        return "Confirm participant."
+    if action == "add_confirm":
+        friend_id = _management_callback_id(parts, 3, "friend")
+        if (
+            not pending
+            or pending.mode != "group_manage_add_confirm"
+            or pending.management_group_id != group_id
+            or pending.management_friend_id != friend_id
+        ):
+            raise ValueError("This add-participant confirmation expired. Start again from /groups.")
+        SplitwiseService().add_user_to_group(group_id, friend_id)
+        _show_managed_group(group_id, chat_id, user_id, telegram, None)
+        return "Participant added."
+    if action == "invite":
+        state = pending or telegram_split_state_store.set_pending(chat_id, user_id, 0)
+        state.mode = "group_manage_invite_details"
+        state.management_group_id = group_id
+        telegram.send_message(
+            "📧 <b>Invite someone new</b>\n\nSend their details like this:\n"
+            "<code>First Last | email@example.com</code>\n\nSplitwise will send the invitation.",
+            chat_id=chat_id,
+        )
+        return "Enter name and email."
+    if action == "invite_confirm":
+        if not pending or pending.mode != "group_manage_invite_confirm":
+            raise ValueError("This invitation session expired. Start again from /groups.")
+        service = SplitwiseService()
+        friend = service.create_friend(
+            email=pending.management_invite_email or "",
+            first_name=pending.management_invite_first_name or "",
+            last_name=pending.management_invite_last_name or "",
+        )
+        service.add_user_to_group(group_id, int(friend["id"]))
+        _show_managed_group(group_id, chat_id, user_id, telegram, None)
+        return "Invitation sent."
+    if action == "remove_menu":
+        _show_remove_member_choices(group_id, chat_id, user_id, telegram, message_id)
+        return "Choose a participant."
+    if action == "remove_pick":
+        friend_id = _management_callback_id(parts, 3, "participant")
+        member = _find_group_member(group_id, friend_id)
+        state = pending or telegram_split_state_store.set_pending(chat_id, user_id, 0)
+        state.mode = "group_manage_remove_confirm"
+        state.management_group_id = group_id
+        state.management_friend_id = friend_id
+        state.management_friend_name = friend_display_name(member)
+        _send_group_mutation_confirmation(
+            telegram,
+            chat_id,
+            title="Remove participant?",
+            detail=(
+                f"Remove <b>{html(friend_display_name(member))}</b>? "
+                "Splitwise only permits removal when their group balance is zero."
+            ),
+            confirm_data=f"gm:remove_confirm:{group_id}:{friend_id}",
+            cancel_data=f"gm:open:{group_id}",
+        )
+        return "Confirm removal."
+    if action == "remove_confirm":
+        friend_id = _management_callback_id(parts, 3, "participant")
+        if (
+            not pending
+            or pending.mode != "group_manage_remove_confirm"
+            or pending.management_group_id != group_id
+            or pending.management_friend_id != friend_id
+        ):
+            raise ValueError("This removal confirmation expired. Start again from /groups.")
+        SplitwiseService().remove_user_from_group(group_id, friend_id)
+        _show_managed_group(group_id, chat_id, user_id, telegram, None)
+        return "Participant removed."
+    if action == "link":
+        _send_group_invite_link(group_id, chat_id, telegram)
+        return "Invitation link sent."
+    raise ValueError("Unsupported group-management action")
+
+
+def _show_managed_group(
+    group_id: int,
+    chat_id: str,
+    user_id: str,
+    telegram: TelegramService,
+    message_id: int | None,
+) -> None:
+    service = SplitwiseService()
+    group = service.get_group(group_id)
+    members = group.get("members", [])
+    pending = telegram_split_state_store.get_pending(chat_id, user_id)
+    if pending is None:
+        pending = telegram_split_state_store.set_pending(chat_id, user_id, 0)
+    pending.mode = "group_manage_detail"
+    pending.management_group_id = group_id
+    pending.management_group_name = str(group.get("name") or group_id)
+    pending.group_members = members
+    member_lines = []
+    for member in members:
+        status = str(member.get("registration_status") or "confirmed")
+        suffix = " · invite pending" if status != "confirmed" else ""
+        member_lines.append(f"• {html(friend_display_name(member))}{suffix}")
+    _edit_or_send(
+        telegram,
+        "\n".join(
+            [
+                f"👥 <b>{html(group.get('name') or group_id)}</b>",
+                f"Members: {len(members)}",
+                "",
+                *(member_lines or ["No participants found."]),
+            ]
+        ),
+        reply_markup={
+            "inline_keyboard": [
+                [
+                    {"text": "➕ Add friend", "callback_data": f"gm:add:{group_id}"},
+                    {"text": "📧 Invite email", "callback_data": f"gm:invite:{group_id}"},
+                ],
+                [
+                    {
+                        "text": "➖ Remove participant",
+                        "callback_data": f"gm:remove_menu:{group_id}",
+                    }
+                ],
+                [{"text": "🔗 Invite / copy link", "callback_data": f"gm:link:{group_id}"}],
+                [{"text": "⬅️ All groups", "callback_data": "gm:home"}],
+            ]
+        },
+        chat_id=chat_id,
+        message_id=message_id,
+    )
+
+
+def _show_add_friend_choices(
+    group_id: int,
+    chat_id: str,
+    user_id: str,
+    telegram: TelegramService,
+    message_id: int | None,
+) -> None:
+    service = SplitwiseService()
+    member_ids = {int(member["id"]) for member in service.get_group_members(group_id)}
+    friends = [friend for friend in service.get_friends() if int(friend["id"]) not in member_ids]
+    pending = telegram_split_state_store.get_pending(chat_id, user_id)
+    if pending:
+        pending.mode = "group_manage_add_select"
+        pending.management_group_id = group_id
+        pending.friend_options = friends
+    rows = [
+        [
+            {
+                "text": friend_display_name(friend)[:50],
+                "callback_data": f"gm:add_pick:{group_id}:{int(friend['id'])}",
+            }
+        ]
+        for friend in friends[:20]
+    ]
+    rows.append([{"text": "⬅️ Back", "callback_data": f"gm:open:{group_id}"}])
+    _edit_or_send(
+        telegram,
+        "Choose an existing Splitwise friend to add:",
+        reply_markup={"inline_keyboard": rows},
+        chat_id=chat_id,
+        message_id=message_id,
+    )
+
+
+def _show_remove_member_choices(
+    group_id: int,
+    chat_id: str,
+    user_id: str,
+    telegram: TelegramService,
+    message_id: int | None,
+) -> None:
+    service = SplitwiseService()
+    current_user_id = int(service.get_current_user()["id"])
+    members = [
+        member
+        for member in service.get_group_members(group_id)
+        if int(member["id"]) != current_user_id
+    ]
+    pending = telegram_split_state_store.get_pending(chat_id, user_id)
+    if pending:
+        pending.mode = "group_manage_remove_select"
+        pending.management_group_id = group_id
+        pending.group_members = members
+    rows = [
+        [
+            {
+                "text": f"Remove {friend_display_name(member)}"[:50],
+                "callback_data": f"gm:remove_pick:{group_id}:{int(member['id'])}",
+            }
+        ]
+        for member in members[:20]
+    ]
+    rows.append([{"text": "⬅️ Back", "callback_data": f"gm:open:{group_id}"}])
+    _edit_or_send(
+        telegram,
+        "Choose a settled participant to remove:",
+        reply_markup={"inline_keyboard": rows},
+        chat_id=chat_id,
+        message_id=message_id,
+    )
+
+
+def _send_group_invite_link(group_id: int, chat_id: str, telegram: TelegramService) -> None:
+    group = SplitwiseService().get_group(group_id)
+    invite_link = str(group.get("invite_link") or "").strip()
+    if not invite_link:
+        raise SplitwiseAPIError("Splitwise did not return an invitation link for this group.")
+    share_text = f"Join my {group.get('name') or 'Splitwise'} group"
+    share_url = (
+        "https://t.me/share/url?url="
+        f"{quote(invite_link, safe='')}&text="
+        f"{quote(share_text, safe='')}"
+    )
+    telegram.send_message(
+        "\n".join(
+            [
+                f"🔗 <b>{html(group.get('name') or 'Group')} invitation</b>",
+                "",
+                f"<code>{html(invite_link)}</code>",
+                "Use Copy Link, open it, or share it through Telegram.",
+            ]
+        ),
+        reply_markup={
+            "inline_keyboard": [
+                [
+                    {"text": "Copy link", "copy_text": {"text": invite_link}},
+                    {"text": "Open link", "url": invite_link},
+                ],
+                [{"text": "Share via Telegram", "url": share_url}],
+                [{"text": "⬅️ Back", "callback_data": f"gm:open:{group_id}"}],
+            ]
+        },
+        chat_id=chat_id,
+    )
+
+
+def _send_group_mutation_confirmation(
+    telegram: TelegramService,
+    chat_id: str,
+    *,
+    title: str,
+    detail: str,
+    confirm_data: str,
+    cancel_data: str,
+) -> None:
+    telegram.send_message(
+        f"⚠️ <b>{html(title)}</b>\n\n{detail}",
+        reply_markup={
+            "inline_keyboard": [
+                [{"text": "Confirm", "callback_data": confirm_data}],
+                [{"text": "Cancel", "callback_data": cancel_data}],
+            ]
+        },
+        chat_id=chat_id,
+    )
+
+
+def _management_callback_id(parts: list[str], index: int, label: str) -> int:
+    try:
+        value = int(parts[index])
+    except (IndexError, TypeError, ValueError) as exc:
+        raise ValueError(f"Invalid {label} selection") from exc
+    if value <= 0:
+        raise ValueError(f"Invalid {label} selection")
+    return value
+
+
+def _find_splitwise_friend(friend_id: int) -> dict:
+    for friend in SplitwiseService().get_friends():
+        if int(friend["id"]) == friend_id:
+            return friend
+    raise ValueError("That Splitwise friend is no longer available.")
+
+
+def _find_group_member(group_id: int, friend_id: int) -> dict:
+    for member in SplitwiseService().get_group_members(group_id):
+        if int(member["id"]) == friend_id:
+            return member
+    raise ValueError("That participant is no longer in this group.")
 
 
 def _handle_group_name_message(

@@ -172,6 +172,25 @@ class SplitwiseService:
             if query_l in f"{friend_display_name(friend)} {friend.get('email') or ''}".lower()
         ]
 
+    def create_friend(
+        self, *, email: str, first_name: str, last_name: str = ""
+    ) -> dict[str, Any]:
+        data = self._request(
+            "POST",
+            "/create_friend",
+            json_body={
+                "user_email": email,
+                "user_first_name": first_name,
+                "user_last_name": last_name,
+            },
+        )
+        if data.get("errors"):
+            raise SplitwiseAPIError("Splitwise create_friend returned errors", data)
+        friend = data.get("friend")
+        if not isinstance(friend, dict) or not friend.get("id"):
+            raise SplitwiseAPIError("Splitwise create_friend did not return a friend", data)
+        return friend
+
     def get_groups(self) -> list[dict[str, Any]]:
         data = self._request("GET", "/get_groups")
         return data.get("groups", [])
@@ -183,11 +202,58 @@ class SplitwiseService:
             return groups
         return [group for group in groups if query_l in str(group.get("name") or "").lower()]
 
+    def get_group(self, group_id: int) -> dict[str, Any]:
+        data = self._request("GET", f"/get_group/{group_id}")
+        group = data.get("group")
+        if not isinstance(group, dict):
+            raise SplitwiseAPIError("Splitwise get_group did not return a group", data)
+        return group
+
     def get_group_members(self, group_id: int) -> list[dict[str, Any]]:
-        for group in self.get_groups():
-            if int(group["id"]) == group_id:
-                return group.get("members", [])
-        return []
+        return self.get_group(group_id).get("members", [])
+
+    def create_group(
+        self,
+        *,
+        name: str,
+        group_type: str,
+        simplify_by_default: bool,
+        user_ids: list[int],
+    ) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "name": name,
+            "group_type": group_type,
+            "simplify_by_default": simplify_by_default,
+        }
+        for index, user_id in enumerate(user_ids):
+            payload[f"users__{index}__user_id"] = user_id
+        data = self._request("POST", "/create_group", json_body=payload)
+        if data.get("errors"):
+            raise SplitwiseAPIError("Splitwise create_group returned errors", data)
+        group = data.get("group")
+        if not isinstance(group, dict):
+            raise SplitwiseAPIError("Splitwise create_group did not return a group", data)
+        return group
+
+    def add_user_to_group(self, group_id: int, user_id: int) -> dict[str, Any]:
+        data = self._request(
+            "POST",
+            "/add_user_to_group",
+            json_body={"group_id": group_id, "user_id": user_id},
+        )
+        if data.get("errors") or data.get("success") is not True:
+            raise SplitwiseAPIError("Splitwise could not add the user to the group", data)
+        return data
+
+    def remove_user_from_group(self, group_id: int, user_id: int) -> dict[str, Any]:
+        data = self._request(
+            "POST",
+            "/remove_user_from_group",
+            json_body={"group_id": group_id, "user_id": user_id},
+        )
+        if data.get("errors") or data.get("success") is not True:
+            raise SplitwiseAPIError("Splitwise could not remove the user from the group", data)
+        return data
 
     def create_expense(self, payload: dict[str, Any]) -> dict[str, Any]:
         data = self._request("POST", "/create_expense", json_body=payload)

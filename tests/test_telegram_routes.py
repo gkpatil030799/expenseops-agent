@@ -5024,3 +5024,372 @@ def test_telegram_callback_unexpected_error_does_not_500(monkeypatch):
             None,
         )
     ]
+
+
+def test_telegram_groups_command_opens_group_manager(monkeypatch):
+    messages = []
+
+    class FakeSplitwiseService:
+        def get_groups(self):
+            return [
+                {"id": 0, "name": "Non-group expenses"},
+                {"id": 44, "name": "House"},
+            ]
+
+    class FakeTelegramService:
+        def send_message(self, message, reply_markup=None, chat_id=None):
+            messages.append((chat_id, message, reply_markup))
+
+    monkeypatch.setattr(telegram_routes, "SplitwiseService", FakeSplitwiseService)
+    monkeypatch.setattr(telegram_routes, "TelegramService", FakeTelegramService)
+
+    response = TestClient(app).post(
+        "/telegram/webhook",
+        json={
+            "message": {
+                "chat": {"id": "chat-1"},
+                "from": {"id": "user-1"},
+                "text": "/groups",
+            }
+        },
+    )
+
+    assert response.status_code == 200
+    assert "Splitwise group manager" in messages[0][1]
+    keyboard = messages[0][2]["inline_keyboard"]
+    assert keyboard[0][0]["callback_data"] == "gm:open:44"
+    assert keyboard[-1][0]["callback_data"] == "gm:create"
+
+
+def test_telegram_group_creation_requires_confirmation(monkeypatch):
+    messages = []
+    answers = []
+    created = []
+
+    class FakeSplitwiseService:
+        def create_group(self, **kwargs):
+            created.append(kwargs)
+            return {"id": 55, "name": kwargs["name"]}
+
+        def get_group(self, group_id):
+            assert group_id == 55
+            return {"id": 55, "name": "Arizona Trip", "members": []}
+
+    class FakeTelegramService:
+        def answer_callback_query(self, callback_query_id, text):
+            answers.append((callback_query_id, text))
+
+        def send_message(self, message, reply_markup=None, chat_id=None):
+            messages.append((chat_id, message, reply_markup))
+
+    monkeypatch.setattr(telegram_routes, "SplitwiseService", FakeSplitwiseService)
+    monkeypatch.setattr(telegram_routes, "TelegramService", FakeTelegramService)
+    client = TestClient(app)
+
+    client.post(
+        "/telegram/webhook",
+        json={
+            "message": {
+                "chat": {"id": "chat-1"},
+                "from": {"id": "user-1"},
+                "text": "/creategroup",
+            }
+        },
+    )
+    client.post(
+        "/telegram/webhook",
+        json={
+            "message": {
+                "chat": {"id": "chat-1"},
+                "from": {"id": "user-1"},
+                "text": "Arizona Trip",
+            }
+        },
+    )
+    assert created == []
+
+    client.post(
+        "/telegram/webhook",
+        json={
+            "callback_query": {
+                "id": "choose-type",
+                "data": "gm:create_type:trip",
+                "message": {"chat": {"id": "chat-1"}},
+                "from": {"id": "user-1"},
+            }
+        },
+    )
+    assert created == []
+
+    response = client.post(
+        "/telegram/webhook",
+        json={
+            "callback_query": {
+                "id": "confirm-create",
+                "data": "gm:create_confirm",
+                "message": {"chat": {"id": "chat-1"}},
+                "from": {"id": "user-1"},
+            }
+        },
+    )
+
+    assert response.status_code == 200
+    assert created == [
+        {
+            "name": "Arizona Trip",
+            "group_type": "trip",
+            "simplify_by_default": False,
+            "user_ids": [],
+        }
+    ]
+    assert answers[-1] == ("confirm-create", "Group created.")
+    assert any("Arizona Trip" in message for _chat, message, _markup in messages)
+
+
+def test_telegram_can_invite_new_person_by_email(monkeypatch):
+    messages = []
+    calls = []
+
+    class FakeSplitwiseService:
+        def create_friend(self, **kwargs):
+            calls.append(("invite", kwargs))
+            return {"id": 73}
+
+        def add_user_to_group(self, group_id, friend_id):
+            calls.append(("add", group_id, friend_id))
+
+        def get_group(self, group_id):
+            return {
+                "id": group_id,
+                "name": "House",
+                "members": [
+                    {
+                        "id": 73,
+                        "first_name": "New",
+                        "last_name": "Person",
+                        "registration_status": "dummy",
+                    }
+                ],
+            }
+
+    class FakeTelegramService:
+        def answer_callback_query(self, callback_query_id, text):
+            pass
+
+        def send_message(self, message, reply_markup=None, chat_id=None):
+            messages.append((chat_id, message, reply_markup))
+
+    monkeypatch.setattr(telegram_routes, "SplitwiseService", FakeSplitwiseService)
+    monkeypatch.setattr(telegram_routes, "TelegramService", FakeTelegramService)
+    telegram_routes.telegram_split_state_store.set_pending(
+        "chat-1", "user-1", 0, mode="group_manage_detail"
+    )
+    client = TestClient(app)
+
+    client.post(
+        "/telegram/webhook",
+        json={
+            "callback_query": {
+                "id": "invite",
+                "data": "gm:invite:44",
+                "message": {"chat": {"id": "chat-1"}},
+                "from": {"id": "user-1"},
+            }
+        },
+    )
+    client.post(
+        "/telegram/webhook",
+        json={
+            "message": {
+                "chat": {"id": "chat-1"},
+                "from": {"id": "user-1"},
+                "text": "New Person | NEW.PERSON@example.com",
+            }
+        },
+    )
+    assert calls == []
+
+    response = client.post(
+        "/telegram/webhook",
+        json={
+            "callback_query": {
+                "id": "invite-confirm",
+                "data": "gm:invite_confirm:44",
+                "message": {"chat": {"id": "chat-1"}},
+                "from": {"id": "user-1"},
+            }
+        },
+    )
+
+    assert response.status_code == 200
+    assert calls == [
+        (
+            "invite",
+            {
+                "email": "new.person@example.com",
+                "first_name": "New",
+                "last_name": "Person",
+            },
+        ),
+        ("add", 44, 73),
+    ]
+    assert any("invite pending" in message for _chat, message, _markup in messages)
+
+
+def test_telegram_group_link_has_copy_open_and_share_buttons(monkeypatch):
+    messages = []
+
+    class FakeSplitwiseService:
+        def get_group(self, group_id):
+            assert group_id == 44
+            return {
+                "id": 44,
+                "name": "House",
+                "invite_link": "https://www.splitwise.com/join/example",
+            }
+
+    class FakeTelegramService:
+        def answer_callback_query(self, callback_query_id, text):
+            pass
+
+        def send_message(self, message, reply_markup=None, chat_id=None):
+            messages.append((chat_id, message, reply_markup))
+
+    monkeypatch.setattr(telegram_routes, "SplitwiseService", FakeSplitwiseService)
+    monkeypatch.setattr(telegram_routes, "TelegramService", FakeTelegramService)
+
+    response = TestClient(app).post(
+        "/telegram/webhook",
+        json={
+            "callback_query": {
+                "id": "link",
+                "data": "gm:link:44",
+                "message": {"chat": {"id": "chat-1"}},
+                "from": {"id": "user-1"},
+            }
+        },
+    )
+
+    assert response.status_code == 200
+    keyboard = messages[0][2]["inline_keyboard"]
+    assert keyboard[0][0]["copy_text"] == {
+        "text": "https://www.splitwise.com/join/example"
+    }
+    assert keyboard[0][1]["url"] == "https://www.splitwise.com/join/example"
+    assert keyboard[1][0]["url"].startswith("https://t.me/share/url?")
+
+
+def test_telegram_add_existing_friend_requires_confirmation(monkeypatch):
+    calls = []
+
+    class FakeSplitwiseService:
+        def get_friends(self):
+            return [{"id": 7, "first_name": "Rahul", "last_name": "Shah"}]
+
+        def add_user_to_group(self, group_id, friend_id):
+            calls.append((group_id, friend_id))
+
+        def get_group(self, group_id):
+            return {
+                "id": group_id,
+                "name": "House",
+                "members": [{"id": 7, "first_name": "Rahul", "last_name": "Shah"}],
+            }
+
+    class FakeTelegramService:
+        def answer_callback_query(self, callback_query_id, text):
+            pass
+
+        def send_message(self, message, reply_markup=None, chat_id=None):
+            pass
+
+    monkeypatch.setattr(telegram_routes, "SplitwiseService", FakeSplitwiseService)
+    monkeypatch.setattr(telegram_routes, "TelegramService", FakeTelegramService)
+    telegram_routes.telegram_split_state_store.set_pending(
+        "chat-1", "user-1", 0, mode="group_manage_add_select"
+    )
+    client = TestClient(app)
+
+    client.post(
+        "/telegram/webhook",
+        json={
+            "callback_query": {
+                "id": "pick-add",
+                "data": "gm:add_pick:44:7",
+                "message": {"chat": {"id": "chat-1"}},
+                "from": {"id": "user-1"},
+            }
+        },
+    )
+    assert calls == []
+
+    response = client.post(
+        "/telegram/webhook",
+        json={
+            "callback_query": {
+                "id": "confirm-add",
+                "data": "gm:add_confirm:44:7",
+                "message": {"chat": {"id": "chat-1"}},
+                "from": {"id": "user-1"},
+            }
+        },
+    )
+
+    assert response.status_code == 200
+    assert calls == [(44, 7)]
+
+
+def test_telegram_remove_participant_requires_confirmation(monkeypatch):
+    calls = []
+
+    class FakeSplitwiseService:
+        def get_group_members(self, group_id):
+            return [{"id": 7, "first_name": "Rahul", "last_name": "Shah"}]
+
+        def remove_user_from_group(self, group_id, friend_id):
+            calls.append((group_id, friend_id))
+
+        def get_group(self, group_id):
+            return {"id": group_id, "name": "House", "members": []}
+
+    class FakeTelegramService:
+        def answer_callback_query(self, callback_query_id, text):
+            pass
+
+        def send_message(self, message, reply_markup=None, chat_id=None):
+            pass
+
+    monkeypatch.setattr(telegram_routes, "SplitwiseService", FakeSplitwiseService)
+    monkeypatch.setattr(telegram_routes, "TelegramService", FakeTelegramService)
+    telegram_routes.telegram_split_state_store.set_pending(
+        "chat-1", "user-1", 0, mode="group_manage_remove_select"
+    )
+    client = TestClient(app)
+
+    client.post(
+        "/telegram/webhook",
+        json={
+            "callback_query": {
+                "id": "pick-remove",
+                "data": "gm:remove_pick:44:7",
+                "message": {"chat": {"id": "chat-1"}},
+                "from": {"id": "user-1"},
+            }
+        },
+    )
+    assert calls == []
+
+    response = client.post(
+        "/telegram/webhook",
+        json={
+            "callback_query": {
+                "id": "confirm-remove",
+                "data": "gm:remove_confirm:44:7",
+                "message": {"chat": {"id": "chat-1"}},
+                "from": {"id": "user-1"},
+            }
+        },
+    )
+
+    assert response.status_code == 200
+    assert calls == [(44, 7)]

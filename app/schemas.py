@@ -60,11 +60,57 @@ class FriendOut(BaseModel):
     last_name: str | None = None
     email: str | None = None
     display_name: str
+    registration_status: str | None = None
 
 
 class GroupOut(BaseModel):
     id: int
     name: str
+    invite_link: str | None = None
+
+
+class CreateGroupRequest(BaseModel):
+    name: str = Field(..., min_length=1, max_length=255)
+    group_type: Literal["home", "trip", "couple", "other"] = "home"
+    simplify_by_default: bool = False
+    user_ids: list[int] = Field(default_factory=list)
+
+    @field_validator("name")
+    @classmethod
+    def strip_group_name(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("group name cannot be blank")
+        return value
+
+    @field_validator("user_ids")
+    @classmethod
+    def unique_group_user_ids(cls, value: list[int]) -> list[int]:
+        if any(user_id <= 0 for user_id in value):
+            raise ValueError("user IDs must be positive")
+        return list(dict.fromkeys(value))
+
+
+class GroupMemberRequest(BaseModel):
+    user_id: int = Field(..., gt=0)
+
+
+class InviteGroupMemberRequest(BaseModel):
+    first_name: str = Field(..., min_length=1, max_length=100)
+    last_name: str = Field(default="", max_length=100)
+    email: str = Field(..., min_length=3, max_length=320)
+
+    @field_validator("first_name", "last_name", "email")
+    @classmethod
+    def strip_invite_fields(cls, value: str) -> str:
+        return value.strip()
+
+    @field_validator("email")
+    @classmethod
+    def validate_invite_email(cls, value: str) -> str:
+        if "@" not in value or "." not in value.rsplit("@", 1)[-1]:
+            raise ValueError("enter a valid email address")
+        return value.lower()
 
 
 class SplitwiseUserOut(BaseModel):

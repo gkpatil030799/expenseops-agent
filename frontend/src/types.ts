@@ -27,11 +27,13 @@ export type Friend = {
   last_name: string | null;
   email: string | null;
   display_name: string;
+  registration_status?: string | null;
 };
 
 export type Group = {
   id: number;
   name: string;
+  invite_link?: string | null;
 };
 
 export type SplitwiseUser = {

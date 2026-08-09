@@ -28,6 +28,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
+import { GroupManagementPanel } from "@/components/GroupManagementPanel";
 import {
   analyticsForTransactions,
   buildDashboardEvents,
@@ -497,6 +498,8 @@ function App() {
           days={analyticsDays}
           onDaysChange={setAnalyticsDays}
         />
+
+        <GroupManagementPanel currentUserId={currentSplitwiseUser?.id ?? null} />
 
         <div className="grid gap-5 xl:grid-cols-[minmax(0,1fr)_360px]">
           <section className="space-y-4">

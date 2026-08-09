@@ -53,6 +53,14 @@ class PendingTelegramSplit:
     custom_participant_splits: list[dict] = field(default_factory=list)
     split_target_mode: str | None = None
     split_value_mode: str = "equal"
+    management_group_id: int | None = None
+    management_group_name: str | None = None
+    management_group_type: str = "home"
+    management_friend_id: int | None = None
+    management_friend_name: str | None = None
+    management_invite_first_name: str | None = None
+    management_invite_last_name: str | None = None
+    management_invite_email: str | None = None
 
     def add_friend(self, friend_id: int, display_name: str) -> None:
         if friend_id not in self.selected_friend_ids:
