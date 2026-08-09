@@ -3366,9 +3366,16 @@ def _split_equal_from_telegram(
             confirm=True,
             post_pending=False,
         )
-    except (TransactionError, SplitwiseAPIError, ValueError):
+    except (TransactionError, SplitwiseAPIError, ValueError) as exc:
+        if isinstance(exc, TransactionError) and "still pending" in str(exc).lower():
+            message = (
+                "This transaction is still pending at your bank. ExpenseOps will wait for "
+                "the final amount before allowing a Splitwise post."
+            )
+        else:
+            message = "Could not create the split. Open the dashboard to review."
         telegram.send_message(
-            "Could not create the split. Open the dashboard to review.",
+            message,
             chat_id=chat_id,
         )
         telegram_split_state_store.clear(chat_id, user_id)
@@ -3956,6 +3963,7 @@ def _pending_review_transactions(db: DbSession) -> list[ExpenseTransaction]:
         db.execute(
             select(ExpenseTransaction)
             .where(ExpenseTransaction.status == TransactionStatus.ASK_USER.value)
+            .where(ExpenseTransaction.pending.is_(False))
             .order_by(ExpenseTransaction.created_at, ExpenseTransaction.id)
         ).scalars()
     )

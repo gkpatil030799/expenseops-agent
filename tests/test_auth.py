@@ -14,6 +14,7 @@ def _safe_production_settings(**overrides):
         "app_secret_key": "configured-fernet-key",
         "telegram_webhook_secret": "configured-telegram-secret",
         "telegram_allowed_user_id": "12345",
+        "dashboard_api_token": "configured-dashboard-token",
         "plaid_env": "production",
         "_env_file": None,
     }

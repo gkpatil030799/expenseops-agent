@@ -545,6 +545,7 @@ def test_plaid_webhook_verification_enabled_accepts_valid_header(monkeypatch, ca
         "get_settings",
         lambda: Settings(
             plaid_verify_webhooks=True,
+            plaid_env="sandbox",
             plaid_client_id="client-id",
             plaid_secret="super-secret-value",
         ),

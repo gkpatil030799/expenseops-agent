@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.requests import Request
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
+from sqlalchemy import text
 from starlette.responses import Response
 
 from app.api import (
@@ -16,7 +17,7 @@ from app.api import (
 )
 from app.auth import install_dashboard_auth
 from app.config import get_settings
-from app.db import init_db
+from app.db import engine, init_db
 from app.logging_config import configure_logging, new_trace_id, reset_trace_id, set_trace_id
 from sandbox.backend.router import router as sandbox_router
 
@@ -74,4 +75,9 @@ def root() -> FileResponse:
 
 @app.get("/health")
 def health() -> dict[str, str]:
+    try:
+        with engine.connect() as connection:
+            connection.execute(text("SELECT 1"))
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail="Database unavailable") from exc
     return {"status": "ok", "app": settings.app_name}

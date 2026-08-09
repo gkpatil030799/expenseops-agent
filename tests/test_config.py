@@ -10,6 +10,7 @@ def _safe_production_settings(**overrides):
         "app_secret_key": "configured-fernet-key",
         "telegram_webhook_secret": "configured-telegram-secret",
         "telegram_allowed_user_id": "12345",
+        "dashboard_api_token": "configured-dashboard-token",
         "plaid_env": "production",
         "allow_unverified_plaid_webhooks_for_local_test": False,
         "_env_file": None,
@@ -22,6 +23,13 @@ def test_frontend_origin_parses_csv():
     settings = Settings(frontend_origin="https://a.example,https://b.example")
 
     assert settings.frontend_origin == ["https://a.example", "https://b.example"]
+
+
+@pytest.mark.parametrize("scheme", ["postgres://", "postgresql://"])
+def test_database_url_uses_installed_psycopg3_driver(scheme):
+    settings = Settings(database_url=f"{scheme}user:secret@db.example/expenseops")
+
+    assert settings.database_url.startswith("postgresql+psycopg://")
 
 
 def test_docs_disabled_by_default_in_production():
@@ -51,3 +59,12 @@ def test_production_config_rejects_enabled_sandbox_lab(monkeypatch):
 
     with pytest.raises(ValidationError, match="ENABLE_EXPENSEOPS_SANDBOX_LAB"):
         _safe_production_settings()
+
+
+def test_production_config_rejects_missing_dashboard_auth():
+    with pytest.raises(ValidationError, match="DASHBOARD_API_TOKEN"):
+        _safe_production_settings(
+            dashboard_api_token="",
+            dashboard_username="",
+            dashboard_password="",
+        )

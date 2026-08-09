@@ -193,7 +193,7 @@ def isolate_telegram_route_tests(monkeypatch, tmp_path):
     telegram_routes.telegram_split_state_store._states.clear()
     telegram_routes.telegram_review_queue_store._states.clear()
     app.dependency_overrides[get_db] = override_get_db
-    yield
+    yield TestingSessionLocal
     app.dependency_overrides.pop(get_db, None)
     telegram_routes.telegram_split_state_store._states.clear()
     telegram_routes.telegram_review_queue_store._states.clear()
@@ -783,6 +783,55 @@ def test_telegram_review_queue_sends_next_transaction_with_progress(monkeypatch)
     assert "Transaction 2 of 2" in messages[0][1]
     assert "Done: 1 / 2" in messages[0][1]
     assert "$32.60 Fry's Food and Drug" in messages[0][1]
+
+
+def test_pending_review_transactions_excludes_bank_pending(isolate_telegram_route_tests):
+    db = isolate_telegram_route_tests()
+    tx = db.get(ExpenseTransaction, 123)
+    tx.pending = True
+    db.commit()
+
+    assert telegram_routes._pending_review_transactions(db) == []
+
+    tx.pending = False
+    db.commit()
+    assert [row.id for row in telegram_routes._pending_review_transactions(db)] == [123]
+    db.close()
+
+
+def test_equal_split_pending_transaction_gets_clear_message(monkeypatch):
+    messages = []
+
+    class FakeTransactionService:
+        def __init__(self, db):
+            pass
+
+        def get_transaction(self, transaction_id):
+            return type("Tx", (), {"splitwise_expense_id": None})()
+
+        def create_equal_split_expense(self, **kwargs):
+            raise telegram_routes.TransactionError("This transaction is still pending.")
+
+    class FakeTelegramService:
+        def send_message(self, message, reply_markup=None, chat_id=None):
+            messages.append((chat_id, message))
+
+    monkeypatch.setattr(telegram_routes, "TransactionService", FakeTransactionService)
+    telegram_routes.telegram_split_state_store.set_pending("chat-1", "user-1", 123)
+
+    telegram_routes._split_equal_from_telegram(
+        123,
+        [7],
+        ["Janhavi"],
+        None,
+        "chat-1",
+        "user-1",
+        object(),
+        FakeTelegramService(),
+    )
+
+    assert "still pending at your bank" in messages[0][1]
+    assert telegram_routes.telegram_split_state_store.get_pending("chat-1", "user-1") is None
 
 
 def test_telegram_review_queue_sends_final_completion_summary(monkeypatch):

@@ -3,6 +3,7 @@ import react from "@vitejs/plugin-react";
 import path from "node:path";
 
 export default defineConfig({
+  base: "/static/",
   plugins: [react()],
   resolve: {
     alias: {

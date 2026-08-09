@@ -793,6 +793,8 @@ Required production environment values:
 APP_ENV="production"
 ENVIRONMENT="production"
 APP_SECRET_KEY="generated-fernet-key"
+DASHBOARD_USERNAME="your-private-username"
+DASHBOARD_PASSWORD="a-long-random-password"
 DATABASE_URL="postgresql+psycopg://..."
 PLAID_CLIENT_ID="..."
 PLAID_SECRET="..."
@@ -813,8 +815,9 @@ alembic upgrade head
 uvicorn app.main:app --host 0.0.0.0 --port "$PORT"
 ```
 
-Deployment is future work for this repo. The current README is focused on
-running and testing the local/private-beta MVP.
+The included Dockerfile and Railway configuration build the React dashboard,
+run database migrations, and start the API. Keep the first personal deployment
+on Plaid Sandbox until the deployed webhook flow has been validated.
 
 ## Known Limitations / Future Work
 

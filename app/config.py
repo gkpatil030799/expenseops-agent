@@ -65,6 +65,15 @@ class Settings(BaseSettings):
     def parse_csv(cls, value: str | list[str]) -> list[str]:
         return _csv(value)
 
+    @field_validator("database_url", mode="before")
+    @classmethod
+    def normalize_database_url(cls, value: str) -> str:
+        if value.startswith("postgres://"):
+            return value.replace("postgres://", "postgresql+psycopg://", 1)
+        if value.startswith("postgresql://"):
+            return value.replace("postgresql://", "postgresql+psycopg://", 1)
+        return value
+
     @model_validator(mode="after")
     def validate_production_safety(self) -> Settings:
         if not self.is_production_mode:
@@ -77,6 +86,13 @@ class Settings(BaseSettings):
             errors.append("TELEGRAM_WEBHOOK_SECRET must be configured for production.")
         if not self.telegram_allowed_user_id:
             errors.append("TELEGRAM_ALLOWED_USER_ID must be configured for production.")
+        if not self.dashboard_api_token and not (
+            self.dashboard_username and self.dashboard_password
+        ):
+            errors.append(
+                "DASHBOARD_API_TOKEN or both DASHBOARD_USERNAME and "
+                "DASHBOARD_PASSWORD must be configured for production."
+            )
         if self.allow_unverified_plaid_webhooks_for_local_test:
             errors.append(
                 "ALLOW_UNVERIFIED_PLAID_WEBHOOKS_FOR_LOCAL_TEST must be false in production."
