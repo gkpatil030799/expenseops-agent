@@ -5393,3 +5393,91 @@ def test_telegram_remove_participant_requires_confirmation(monkeypatch):
 
     assert response.status_code == 200
     assert calls == [(44, 7)]
+
+
+def test_telegram_add_participant_can_search_full_friend_list(monkeypatch):
+    messages = []
+
+    class FakeSplitwiseService:
+        def get_group_members(self, group_id):
+            assert group_id == 44
+            return [{"id": 1, "first_name": "Current", "last_name": "User"}]
+
+        def search_friends(self, query):
+            assert query == "Janhavi"
+            return [
+                {"id": 91, "first_name": "Janhavi", "last_name": "Ghuge"},
+                {"id": 92, "first_name": "Janhavi", "last_name": "Patil"},
+            ]
+
+        def get_friends(self):
+            return [
+                {"id": friend_id, "first_name": f"Friend {friend_id}", "last_name": ""}
+                for friend_id in range(2, 27)
+            ]
+
+    class FakeTelegramService:
+        def answer_callback_query(self, callback_query_id, text):
+            pass
+
+        def send_message(self, message, reply_markup=None, chat_id=None):
+            messages.append((chat_id, message, reply_markup))
+
+    monkeypatch.setattr(telegram_routes, "SplitwiseService", FakeSplitwiseService)
+    monkeypatch.setattr(telegram_routes, "TelegramService", FakeTelegramService)
+    telegram_routes.telegram_split_state_store.set_pending(
+        "chat-1", "user-1", 0, mode="group_manage_add_select"
+    )
+    client = TestClient(app)
+
+    client.post(
+        "/telegram/webhook",
+        json={
+            "callback_query": {
+                "id": "add-menu",
+                "data": "gm:add:44",
+                "message": {"chat": {"id": "chat-1"}},
+                "from": {"id": "user-1"},
+            }
+        },
+    )
+    initial_keyboard = messages[-1][2]["inline_keyboard"]
+    assert initial_keyboard[-2][0] == {
+        "text": "🔎 Search all friends",
+        "callback_data": "gm:add_search:44",
+    }
+
+    client.post(
+        "/telegram/webhook",
+        json={
+            "callback_query": {
+                "id": "search",
+                "data": "gm:add_search:44",
+                "message": {"chat": {"id": "chat-1"}},
+                "from": {"id": "user-1"},
+            }
+        },
+    )
+    response = client.post(
+        "/telegram/webhook",
+        json={
+            "message": {
+                "chat": {"id": "chat-1"},
+                "from": {"id": "user-1"},
+                "text": "Janhavi",
+            }
+        },
+    )
+
+    assert response.status_code == 200
+    result_message = messages[-1]
+    assert "Matches for" in result_message[1]
+    keyboard = result_message[2]["inline_keyboard"]
+    assert keyboard[0][0] == {
+        "text": "Janhavi Ghuge",
+        "callback_data": "gm:add_pick:44:91",
+    }
+    assert keyboard[1][0] == {
+        "text": "Janhavi Patil",
+        "callback_data": "gm:add_pick:44:92",
+    }

@@ -707,7 +707,13 @@ def _handle_text_message(message: dict, db: DbSession) -> None:
         _start_group_creation(chat_id, user_id, telegram)
         return
     if pending and pending.mode.startswith("group_manage_"):
-        _handle_group_management_text(pending, text, chat_id, user_id, telegram)
+        try:
+            _handle_group_management_text(pending, text, chat_id, user_id, telegram)
+        except SplitwiseAPIError:
+            telegram.send_message(
+                "Could not search Splitwise friends right now. Please try again.",
+                chat_id=chat_id,
+            )
         return
     if not pending:
         return
@@ -917,6 +923,48 @@ def _handle_group_management_text(
         )
         return
 
+    if pending.mode == "group_manage_add_search":
+        group_id = pending.management_group_id
+        if not group_id:
+            telegram.send_message(
+                "This group search expired. Send /groups to start again.",
+                chat_id=chat_id,
+            )
+            return
+        service = SplitwiseService()
+        member_ids = {int(member["id"]) for member in service.get_group_members(group_id)}
+        matches = [
+            friend
+            for friend in service.search_friends(text)
+            if int(friend["id"]) not in member_ids
+        ]
+        if not matches:
+            telegram.send_message(
+                f"No available Splitwise friend matched <b>{html(text)}</b>. "
+                "Try another name or email.",
+                reply_markup={
+                    "inline_keyboard": [
+                        [{"text": "⬅️ Back", "callback_data": f"gm:add:{group_id}"}]
+                    ]
+                },
+                chat_id=chat_id,
+            )
+            return
+        pending.friend_options = matches
+        pending.mode = "group_manage_add_select"
+        telegram.send_message(
+            f"Matches for <b>{html(text)}</b>:",
+            reply_markup={
+                "inline_keyboard": _group_management_friend_rows(group_id, matches)
+                + [
+                    [{"text": "🔎 Search again", "callback_data": f"gm:add_search:{group_id}"}],
+                    [{"text": "⬅️ Back", "callback_data": f"gm:add:{group_id}"}],
+                ]
+            },
+            chat_id=chat_id,
+        )
+        return
+
     telegram.send_message("Use the buttons above, or send /groups to start again.", chat_id=chat_id)
 
 
@@ -993,6 +1041,15 @@ def _handle_group_management_callback(
     if action == "add":
         _show_add_friend_choices(group_id, chat_id, user_id, telegram, message_id)
         return "Choose a friend."
+    if action == "add_search":
+        state = pending or telegram_split_state_store.set_pending(chat_id, user_id, 0)
+        state.mode = "group_manage_add_search"
+        state.management_group_id = group_id
+        telegram.send_message(
+            "🔎 <b>Search Splitwise friends</b>\n\nType a name or email address:",
+            chat_id=chat_id,
+        )
+        return "Type a friend name or email."
     if action == "add_pick":
         friend_id = _management_callback_id(parts, 3, "friend")
         friend = _find_splitwise_friend(friend_id)
@@ -1153,7 +1210,20 @@ def _show_add_friend_choices(
         pending.mode = "group_manage_add_select"
         pending.management_group_id = group_id
         pending.friend_options = friends
-    rows = [
+    rows = _group_management_friend_rows(group_id, friends[:20])
+    rows.append([{"text": "🔎 Search all friends", "callback_data": f"gm:add_search:{group_id}"}])
+    rows.append([{"text": "⬅️ Back", "callback_data": f"gm:open:{group_id}"}])
+    _edit_or_send(
+        telegram,
+        "Choose a recent Splitwise friend, or search the complete friend list:",
+        reply_markup={"inline_keyboard": rows},
+        chat_id=chat_id,
+        message_id=message_id,
+    )
+
+
+def _group_management_friend_rows(group_id: int, friends: list[dict]) -> list[list[dict]]:
+    return [
         [
             {
                 "text": friend_display_name(friend)[:50],
@@ -1162,14 +1232,6 @@ def _show_add_friend_choices(
         ]
         for friend in friends[:20]
     ]
-    rows.append([{"text": "⬅️ Back", "callback_data": f"gm:open:{group_id}"}])
-    _edit_or_send(
-        telegram,
-        "Choose an existing Splitwise friend to add:",
-        reply_markup={"inline_keyboard": rows},
-        chat_id=chat_id,
-        message_id=message_id,
-    )
 
 
 def _show_remove_member_choices(
