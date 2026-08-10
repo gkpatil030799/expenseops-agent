@@ -231,6 +231,27 @@ make migrate
 For local SQLite development, the app also creates missing tables on startup.
 For production deployments, use Alembic migrations rather than `create_all`.
 
+## Household Ops
+
+Household Ops is a separate productivity workspace alongside expense review. It provides:
+
+- a fast errand inbox with due dates, priority, places, completion, skipping, and trip inclusion;
+- cadence-based household staples with deterministic due scores;
+- Bought, Still have it, Skip once, Disable, and add-to-trip actions;
+- idempotent store-aware replenishment suggestions that avoid duplicate errands;
+- explicit place resolution with branch candidates and remembered preferred places;
+- a hard routing gate that keeps unresolved errands out of Maps waypoints;
+- grouped errand plans where multiple tasks at one concrete place become one stop; and
+- Google Maps directions links through a routing-provider abstraction.
+
+The built-in provider uses deterministic due-date/priority ordering. It is explicitly reported as
+not route-optimized and does not fabricate distance, time saved, or inventory knowledge.
+
+After starting the backend and frontend, choose **Household Ops** in the top navigation. Add an
+errand or staple, choose a specific destination for each routed errand, use **Check what's due**,
+include errands in the next trip, and select **Plan errands**. Name-only tasks such as "haircut"
+or chains such as "Aldi" remain unresolved until a full physical destination is selected.
+
 ## Environment Variables
 
 Important local variables:
@@ -266,6 +287,18 @@ SPLITWISE_AUTH_SCHEME="Bearer"
 
 OPENAI_API_KEY=""
 OPENAI_MODEL="gpt-4.1-mini"
+
+HOUSEHOLD_BASE_LOCATION=""
+HOUSEHOLD_SNOOZE_DAYS=7
+HOUSEHOLD_ROUTING_PROVIDER="fallback"
+HOUSEHOLD_PLACE_SEARCH_PROVIDER="fallback"
+GOOGLE_MAPS_API_KEY=""
+HOUSEHOLD_MAX_INCREMENTAL_MINUTES=10
+HOUSEHOLD_PROBABLY_DUE_INCREMENTAL_MINUTES=5
+HOUSEHOLD_PLACE_CANDIDATES_PER_ERRAND=3
+HOUSEHOLD_MAX_PLACE_COMBINATIONS=27
+HOUSEHOLD_PREFERRED_PLACE_BIAS_MINUTES=3
+HOUSEHOLD_PROVIDER_CACHE_TTL_SECONDS=900
 ```
 
 Notes:
@@ -282,6 +315,26 @@ Notes:
 - `FRONTEND_ORIGIN` must match the Vite URL you open in the browser. Vite
   usually starts on `http://localhost:5173`; if that port is busy it may use
   `5174`.
+- `HOUSEHOLD_BASE_LOCATION` is optional. Keep any personal address in `.env` or
+  Railway variables rather than committing it to source control.
+- `HOUSEHOLD_SNOOZE_DAYS` controls the default Still have it / Skip once delay.
+- `HOUSEHOLD_ROUTING_PROVIDER=fallback` keeps deterministic ordering without travel-time or
+  distance claims. Set it to `google_maps` only after enabling Google's Routes API and Geocoding
+  API and adding a restricted `GOOGLE_MAPS_API_KEY`.
+- `HOUSEHOLD_PLACE_SEARCH_PROVIDER=fallback` supports explicit manual destination entry. Set it
+  to `google_places` after enabling Places API (New) to search nearby salons and store branches.
+  Place search determines where an errand happens; the routing provider separately determines
+  how to travel between the selected destinations.
+- With both live providers enabled, While I'm Out automatically searches unresolved errands,
+  filters candidates reported closed, fetches one bounded route matrix, and compares full-trip
+  location combinations locally. Only the winning combination receives a detailed Compute Routes
+  request. The available-time and stop-duration budget is applied before the concrete destinations
+  are saved.
+- Identical Places searches, geocodes, route matrices, and final routes are reused for
+  `HOUSEHOLD_PROVIDER_CACHE_TTL_SECONDS` (15 minutes by default). Set it to `0` to disable caching.
+  The candidate and combination limits bound both route-matrix elements and local optimizer work.
+- The incremental-minute settings control which measured detours are considered useful. They are
+  ignored by the fallback provider because no travel time is available.
 
 ## Running Locally
 
@@ -832,6 +885,9 @@ on Plaid Sandbox until the deployed webhook flow has been validated.
 - Production deployment should be validated against a stable deployed webhook
   environment, not only local ngrok.
 - More dashboard components can be extracted from the main frontend file.
+- Household Ops uses cadence estimates rather than real inventory measurements.
+- The built-in errand route is deterministically ordered but not geographically optimized.
+- Delivery items are surfaced for review; ordering and payment automation are not implemented.
 
 ## Project Status
 

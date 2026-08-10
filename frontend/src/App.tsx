@@ -9,6 +9,7 @@ import {
   CheckCircle2,
   ChevronDown,
   Clock3,
+  House,
   Layers3,
   Link2,
   MessageCircle,
@@ -29,6 +30,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { GroupManagementPanel } from "@/components/GroupManagementPanel";
+import { HouseholdOpsPage } from "@/components/HouseholdOpsPage";
 import {
   analyticsForTransactions,
   buildDashboardEvents,
@@ -107,6 +109,7 @@ function App() {
   const [currentSplitwiseUser, setCurrentSplitwiseUser] = useState<SplitwiseUser | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [log, setLog] = useState<unknown>({ status: "Ready" });
+  const [activeWorkspace, setActiveWorkspace] = useState<"expenses" | "household">("expenses");
 
   const pendingTotal = useMemo(
     () => transactions.reduce((total, tx) => total + Math.abs(tx.amount_cents), 0) / 100,
@@ -467,6 +470,12 @@ function App() {
   return (
     <main className="min-h-screen bg-[radial-gradient(circle_at_top,rgba(79,70,229,0.06),transparent_30rem)]">
       <section className="mx-auto flex w-full max-w-[1500px] flex-col gap-5 px-3 py-3 sm:px-6 sm:py-5 lg:px-8">
+        <WorkspaceNavigation active={activeWorkspace} onChange={setActiveWorkspace} />
+
+        {activeWorkspace === "household" ? (
+          <HouseholdOpsPage />
+        ) : (
+          <>
         <Header onPlaid={openPlaidLink} onSync={syncTransactions} busy={busy} />
 
         <div className="grid gap-4 sm:grid-cols-2">
@@ -632,8 +641,52 @@ function App() {
             <ActivityLog log={log} />
           </aside>
         </div>
+          </>
+        )}
       </section>
     </main>
+  );
+}
+
+function WorkspaceNavigation({
+  active,
+  onChange,
+}: {
+  active: "expenses" | "household";
+  onChange: (value: "expenses" | "household") => void;
+}) {
+  return (
+    <nav
+      className="flex w-full gap-1 rounded-xl border border-slate-200 bg-white p-1 shadow-sm sm:w-fit"
+      aria-label="ExpenseOps sections"
+    >
+      <button
+        type="button"
+        onClick={() => onChange("expenses")}
+        aria-current={active === "expenses" ? "page" : undefined}
+        className={`flex flex-1 items-center justify-center gap-2 rounded-lg px-4 py-2 text-sm font-medium transition sm:flex-none ${
+          active === "expenses"
+            ? "bg-slate-900 text-white shadow-sm"
+            : "text-slate-600 hover:bg-slate-50 hover:text-slate-950"
+        }`}
+      >
+        <WalletCards className="h-4 w-4" />
+        Expense review
+      </button>
+      <button
+        type="button"
+        onClick={() => onChange("household")}
+        aria-current={active === "household" ? "page" : undefined}
+        className={`flex flex-1 items-center justify-center gap-2 rounded-lg px-4 py-2 text-sm font-medium transition sm:flex-none ${
+          active === "household"
+            ? "bg-indigo-600 text-white shadow-sm"
+            : "text-slate-600 hover:bg-slate-50 hover:text-slate-950"
+        }`}
+      >
+        <House className="h-4 w-4" />
+        Household Ops
+      </button>
+    </nav>
   );
 }
 

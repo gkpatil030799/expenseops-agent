@@ -10,6 +10,7 @@ from starlette.responses import Response
 
 from app.api import (
     ai_memory_routes,
+    household_routes,
     plaid_routes,
     splitwise_routes,
     telegram_routes,
@@ -35,7 +36,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.frontend_origin,
     allow_credentials=True,
-    allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
+    allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["Authorization", "Content-Type"],
 )
 
@@ -64,6 +65,7 @@ app.include_router(splitwise_routes.router)
 app.include_router(telegram_routes.router)
 app.include_router(transaction_routes.router)
 app.include_router(ai_memory_routes.router)
+app.include_router(household_routes.router)
 app.include_router(sandbox_router)
 app.mount("/static", StaticFiles(directory="app/static"), name="static")
 

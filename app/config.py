@@ -60,6 +60,18 @@ class Settings(BaseSettings):
     openai_api_key: str = ""
     openai_model: str = "gpt-4.1-mini"
 
+    household_base_location: str = ""
+    household_snooze_days: int = Field(default=7, ge=1, le=90)
+    household_routing_provider: Literal["fallback", "google_maps"] = "fallback"
+    household_place_search_provider: Literal["fallback", "google_places"] = "fallback"
+    google_maps_api_key: str = ""
+    household_max_incremental_minutes: int = Field(default=10, ge=0, le=120)
+    household_probably_due_incremental_minutes: int = Field(default=5, ge=0, le=60)
+    household_place_candidates_per_errand: int = Field(default=3, ge=1, le=8)
+    household_max_place_combinations: int = Field(default=27, ge=1, le=200)
+    household_preferred_place_bias_minutes: int = Field(default=3, ge=0, le=30)
+    household_provider_cache_ttl_seconds: int = Field(default=900, ge=0, le=86400)
+
     @field_validator("frontend_origin", "plaid_country_codes", "plaid_products", mode="before")
     @classmethod
     def parse_csv(cls, value: str | list[str]) -> list[str]:
