@@ -124,6 +124,7 @@ class GmailPromotionIngestionService:
             self.db.commit()
             return True, 0
         created = 0
+        offers_by_fingerprint: dict[str, PromotionOffer] = {}
         for value in extracted:
             value = _validated_expiry(value, received)
             merchant = _normalize_merchant(value.merchant)
@@ -131,9 +132,13 @@ class GmailPromotionIngestionService:
             if is_high_risk(f"{subject} {text[:4000]}"):
                 trust = "suppressed"
             fingerprint = _campaign_fingerprint(merchant, value, domain, raw.get("threadId"))
-            offer = self.db.execute(
-                select(PromotionOffer).where(PromotionOffer.campaign_fingerprint == fingerprint)
-            ).scalar_one_or_none()
+            offer = offers_by_fingerprint.get(fingerprint)
+            if offer is None:
+                offer = self.db.execute(
+                    select(PromotionOffer).where(
+                        PromotionOffer.campaign_fingerprint == fingerprint
+                    )
+                ).scalar_one_or_none()
             if offer:
                 sources = list(dict.fromkeys([*offer.source_message_ids, message_id]))
                 offer.source_message_ids = sources
@@ -171,6 +176,7 @@ class GmailPromotionIngestionService:
                 )
                 self.db.add(offer)
                 created += 1
+            offers_by_fingerprint[fingerprint] = offer
         message.parse_status = "parsed"
         message.parse_confidence = max(v.confidence for v in extracted)
         message.processed_at = utc_now()

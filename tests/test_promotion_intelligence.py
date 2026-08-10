@@ -21,7 +21,7 @@ from app.models import (
 )
 from app.services.gmail_promotion_ingestion_service import GmailPromotionIngestionService
 from app.services.promotion_digest_service import PromotionDigestService
-from app.services.promotion_extraction_service import PromotionExtractionService
+from app.services.promotion_extraction_service import ExtractedOffer, PromotionExtractionService
 from app.services.promotion_ranking_service import PromotionRankingService
 from app.services.promotion_trust_service import safe_destination
 
@@ -150,6 +150,31 @@ def test_message_processing_is_idempotent_and_independent_of_receipts(db):
     assert service.process_message(raw) == (True, 1)
     assert service.process_message(raw) == (False, 0)
     assert db.query(PromotionMessage).count() == 1
+    assert db.query(PromotionOffer).count() == 1
+
+
+def test_duplicate_fingerprints_within_one_message_are_collapsed(db, monkeypatch):
+    db.autoflush = False
+    extracted = [
+        ExtractedOffer(
+            merchant="IRCTC Tourism Packages",
+            headline=headline,
+            offer_type="fixed price package",
+            confidence=0.95,
+        )
+        for headline in ("Dwarka package", "Kashi package", "Hyderabad package")
+    ]
+    monkeypatch.setattr(
+        PromotionExtractionService,
+        "extract",
+        lambda *_args, **_kwargs: extracted,
+    )
+
+    result = GmailPromotionIngestionService(db, config()).process_message(
+        message("same-fingerprint", "Tour packages", "Limited seats")
+    )
+
+    assert result == (True, 1)
     assert db.query(PromotionOffer).count() == 1
 
 
