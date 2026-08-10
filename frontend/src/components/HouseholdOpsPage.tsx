@@ -432,6 +432,24 @@ export function HouseholdOpsPage() {
     });
   }
 
+  async function syncGmailReceipts() {
+    await run("gmail-receipts", async () => {
+      const result = await api<{ scanned: number; ingested: number; skipped: number }>(
+        "/api/replenishment/gmail/sync",
+        {
+          method: "POST",
+          body: JSON.stringify({ max_results: 25 }),
+        },
+      );
+      setNotice(
+        result.ingested
+          ? `Gmail receipt sync found ${result.ingested} new receipt${result.ingested === 1 ? "" : "s"} from ${result.scanned} scanned messages.`
+          : `Gmail receipt sync scanned ${result.scanned} messages. No new receipts were found.`,
+      );
+      await loadHouseholdOps();
+    });
+  }
+
   async function createPlan() {
     await run("plan", async () => {
       const created = await api<ErrandPlan>("/api/household/errand-plans", {
@@ -703,7 +721,7 @@ export function HouseholdOpsPage() {
       ) : null}
 
       <Card>
-        <CardHeader className="flex-row items-start justify-between gap-4 space-y-0">
+        <CardHeader className="flex-col items-start justify-between gap-4 space-y-0 sm:flex-row">
           <div>
             <div className="mb-1 inline-flex items-center gap-2 text-xs font-semibold uppercase text-slate-500">
               <Brain className="h-4 w-4" /> Learning from purchases
@@ -711,9 +729,14 @@ export function HouseholdOpsPage() {
             <CardTitle>Replenishment learning</CardTitle>
             <CardDescription>Receipt matches and your feedback improve estimates; every purchase remains correctable.</CardDescription>
           </div>
-          <Button variant="outline" onClick={runWeeklyLearning} disabled={busy !== null}>
-            <RefreshCw className={`h-4 w-4 ${busy === "weekly-learning" ? "animate-spin" : ""}`} /> Refresh predictions
-          </Button>
+          <div className="flex w-full flex-wrap gap-2 sm:w-auto sm:justify-end">
+            <Button variant="outline" onClick={syncGmailReceipts} disabled={busy !== null}>
+              <ReceiptText className="h-4 w-4" /> {busy === "gmail-receipts" ? "Syncing Gmail…" : "Sync Gmail receipts"}
+            </Button>
+            <Button variant="outline" onClick={runWeeklyLearning} disabled={busy !== null}>
+              <RefreshCw className={`h-4 w-4 ${busy === "weekly-learning" ? "animate-spin" : ""}`} /> Refresh predictions
+            </Button>
+          </div>
         </CardHeader>
         <CardContent className="space-y-5">
           {busy === "initial" && !learning ? <LoadingRows /> : (

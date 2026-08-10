@@ -12,6 +12,7 @@ from sqlalchemy.orm import sessionmaker
 from app.api.replenishment_routes import summary
 from app.config import Settings
 from app.db import Base
+from app.jobs import gmail_receipts
 from app.models import (
     ExpenseTransaction,
     HouseholdItem,
@@ -514,9 +515,34 @@ def test_gmail_sync_is_narrow_and_message_id_idempotent(db):
         gmail_refresh_token="refresh",
     )
     service = GmailReceiptService(db, config, client)
-    service.sync()
-    service.sync()
+    first = service.sync()
+    second = service.sync()
+    assert first.ingested == 1
+    assert second.ingested == 0
+    assert second.skipped == 1
     assert db.scalar(select(func.count(PurchaseReceipt.id))) == 1
+
+
+def test_gmail_receipt_job_reports_bounded_sync_counts(db, monkeypatch):
+    class SessionContext:
+        def __enter__(self):
+            return db
+
+        def __exit__(self, *_args):
+            return None
+
+    class FakeService:
+        def __init__(self, _db, _settings):
+            pass
+
+        def sync(self, *, max_results):
+            assert max_results == 12
+            return SimpleNamespace(scanned=12, ingested=3, skipped=9)
+
+    monkeypatch.setattr(gmail_receipts, "SessionLocal", SessionContext)
+    monkeypatch.setattr(gmail_receipts, "GmailReceiptService", FakeService)
+
+    assert gmail_receipts.run(12) == {"scanned": 12, "ingested": 3, "skipped": 9}
 
 
 def test_prediction_history_keeps_multiple_runs_instead_of_overwriting(db):

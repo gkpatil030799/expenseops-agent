@@ -346,6 +346,12 @@ tests/              Backend and integration-focused tests
 
 ## Background Jobs
 
+Gmail receipt sync:
+
+```bash
+python -m app.jobs.gmail_receipts --max-results 25
+```
+
 Promotion jobs:
 
 ```bash
@@ -360,9 +366,12 @@ Weekly replenishment learning:
 python -m app.jobs.weekly_replenishment
 ```
 
-These jobs are idempotent. In production, run them with an external scheduler
-such as Railway cron services. Leave `PROMOTIONS_DIGEST_ENABLED=false` until
-you have reviewed the quality of your ranked deals.
+These jobs are idempotent. A practical starting schedule is every six hours for
+Gmail receipts and promotions, with the replenishment workflow running weekly.
+In production, configure those schedules explicitly with an external scheduler
+such as Railway cron services—schedule-like environment variables do not create
+cron services by themselves. Leave `PROMOTIONS_DIGEST_ENABLED=false` until you
+have reviewed the quality of your ranked deals.
 
 ## Test It
 

@@ -6,6 +6,7 @@ import re
 from dataclasses import dataclass
 
 import httpx
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.config import Settings, get_settings
@@ -63,6 +64,14 @@ class GmailReceiptService:
         for summary in messages:
             message_id = str(summary.get("id") or "")
             if not message_id:
+                skipped += 1
+                continue
+            if self.db.scalar(
+                select(PurchaseReceipt.id).where(
+                    PurchaseReceipt.source == "gmail",
+                    PurchaseReceipt.source_external_id == message_id,
+                )
+            ):
                 skipped += 1
                 continue
             message = self.gmail.get_message(message_id, token)
