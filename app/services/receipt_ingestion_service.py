@@ -234,6 +234,36 @@ class ReceiptIngestionService:
         self.db.refresh(line)
         return line
 
+    def track_line_as_new_household_item(
+        self,
+        receipt_id: int,
+        line_id: int,
+        *,
+        name: str,
+        cadence_days: int,
+        replenishment_mode: str = "either",
+    ) -> tuple[HouseholdItem, PurchaseReceiptItem]:
+        receipt = self.get(receipt_id)
+        line = next((item for item in receipt.items if item.id == line_id), None)
+        if line is None:
+            raise ValueError("Receipt line not found.")
+        clean_name = name.strip()
+        if not clean_name:
+            raise ValueError("Household item name is required.")
+        item = HouseholdItem(
+            name=clean_name,
+            quantity=f"{line.quantity:g}" if line.quantity is not None else None,
+            unit=line.unit,
+            cadence_days=cadence_days,
+            replenishment_mode=replenishment_mode,
+            enabled=True,
+        )
+        self.db.add(item)
+        self.db.flush()
+        updated_line = self.update_line_match(receipt.id, line.id, item.id)
+        self.db.refresh(item)
+        return item, updated_line
+
     def _persist(
         self,
         source: str,

@@ -78,6 +78,14 @@ type ManualPlaceForm = {
   full_address: string;
 };
 
+type ReceiptItemDraft = {
+  receiptId: number;
+  lineId: number;
+  name: string;
+  cadence_days: string;
+  replenishment_mode: HouseholdItem["replenishment_mode"];
+};
+
 const emptyErrandForm: ErrandForm = {
   title: "",
   errand_type: "other",
@@ -147,6 +155,7 @@ export function HouseholdOpsPage() {
   const [manualPlace, setManualPlace] = useState<ManualPlaceForm>(emptyManualPlaceForm);
   const [rememberPlace, setRememberPlace] = useState(true);
   const [learning, setLearning] = useState<ReplenishmentLearningSummary | null>(null);
+  const [receiptItemDraft, setReceiptItemDraft] = useState<ReceiptItemDraft | null>(null);
 
   const activeErrands = useMemo(
     () => errands.filter((errand) => errand.status === "open" || errand.status === "planned"),
@@ -344,9 +353,24 @@ export function HouseholdOpsPage() {
     });
   }
 
-  async function updateReceiptMatch(receipt: PurchaseReceipt, lineId: number, value: string) {
-    await run(`receipt-line-${lineId}`, async () => {
-      await api(`/api/replenishment/receipts/${receipt.id}/items/${lineId}`, {
+  async function updateReceiptMatch(
+    receipt: PurchaseReceipt,
+    line: PurchaseReceipt["items"][number],
+    value: string,
+  ) {
+    if (value === "create") {
+      setReceiptItemDraft({
+        receiptId: receipt.id,
+        lineId: line.id,
+        name: line.raw_name,
+        cadence_days: "30",
+        replenishment_mode: "either",
+      });
+      return;
+    }
+    if (receiptItemDraft?.lineId === line.id) setReceiptItemDraft(null);
+    await run(`receipt-line-${line.id}`, async () => {
+      await api(`/api/replenishment/receipts/${receipt.id}/items/${line.id}`, {
         method: "PATCH",
         body: JSON.stringify(
           value === "reject"
@@ -355,6 +379,27 @@ export function HouseholdOpsPage() {
         ),
       });
       setNotice("Receipt match updated.");
+      await loadHouseholdOps();
+    });
+  }
+
+  async function trackReceiptItem() {
+    if (!receiptItemDraft) return;
+    await run(`receipt-new-item-${receiptItemDraft.lineId}`, async () => {
+      await api(
+        `/api/replenishment/receipts/${receiptItemDraft.receiptId}/items/${receiptItemDraft.lineId}/track`,
+        {
+          method: "POST",
+          body: JSON.stringify({
+            name: receiptItemDraft.name.trim(),
+            cadence_days: Number(receiptItemDraft.cadence_days),
+            replenishment_mode: receiptItemDraft.replenishment_mode,
+          }),
+        },
+      );
+      const name = receiptItemDraft.name.trim();
+      setReceiptItemDraft(null);
+      setNotice(`${name} is now tracked. Confirm the receipt to add this purchase to learning history.`);
       await loadHouseholdOps();
     });
   }
@@ -715,17 +760,34 @@ export function HouseholdOpsPage() {
                           <div><p className="font-semibold text-slate-950">{receipt.merchant || "Unknown merchant"}</p><p className="text-xs text-slate-600">{receipt.source} · {new Date(receipt.purchased_at || receipt.created_at).toLocaleDateString()} · {receipt.parse_status.replace(/_/g, " ")}</p></div>
                           {receipt.parse_status === "needs_review" ? <div className="flex gap-2"><Button size="sm" onClick={() => receiptAction(receipt, "confirm")} disabled={busy !== null}><Check className="h-3.5 w-3.5" />Confirm</Button><Button size="sm" variant="ghost" onClick={() => receiptAction(receipt, "ignore")} disabled={busy !== null}>Ignore</Button></div> : <Badge variant="secondary">{receipt.parse_status}</Badge>}
                         </div>
-                        {receipt.items.length ? <div className="mt-3 grid gap-2 sm:grid-cols-2">{receipt.items.map((line) => (
-                          <label key={line.id} className="grid gap-1 text-xs font-medium text-slate-700">
-                            <span className="truncate">{line.raw_name}</span>
-                            <select className={controlClass} value={line.match_status === "rejected" ? "reject" : line.household_item_id?.toString() || ""} onChange={(event) => updateReceiptMatch(receipt, line.id, event.target.value)} disabled={["ignored", "failed"].includes(receipt.parse_status) || busy !== null} aria-label={`Match ${line.raw_name}`}>
-                              <option value="">Unmatched</option>
-                              {items.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
-                              <option value="reject">Not a household item</option>
-                            </select>
-                            {line.acquisition_id ? <button type="button" className="justify-self-start rounded text-xs font-semibold text-rose-700 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500" onClick={() => undoReceiptAcquisition(receipt, line.acquisition_id!)}>Undo learned purchase</button> : null}
-                          </label>
-                        ))}</div> : null}
+                        {receipt.items.length ? <div className="mt-3 grid gap-2 sm:grid-cols-2">{receipt.items.map((line) => {
+                          const creatingThisItem = receiptItemDraft?.lineId === line.id;
+                          return (
+                            <div key={line.id} className={`grid gap-1 rounded-lg ${creatingThisItem ? "border border-indigo-200 bg-indigo-50/50 p-3" : ""}`}>
+                              <label className="grid gap-1 text-xs font-medium text-slate-700">
+                                <span className="truncate">{line.raw_name}</span>
+                                <select className={controlClass} value={creatingThisItem ? "create" : line.match_status === "rejected" ? "reject" : line.household_item_id?.toString() || ""} onChange={(event) => updateReceiptMatch(receipt, line, event.target.value)} disabled={["ignored", "failed"].includes(receipt.parse_status) || busy !== null} aria-label={`Match ${line.raw_name}`}>
+                                  <option value="">Unmatched — decide later</option>
+                                  {items.map((item) => <option key={item.id} value={item.id}>Match to: {item.name}</option>)}
+                                  <option value="create">＋ Track as a new household item…</option>
+                                  <option value="reject">Not a household item</option>
+                                </select>
+                              </label>
+                              {creatingThisItem && receiptItemDraft ? (
+                                <div className="mt-2 grid gap-2">
+                                  <p className="text-xs leading-5 text-slate-600">Give this staple a reusable name and a starting cadence. Repeated confirmed purchases will refine the estimate.</p>
+                                  <Input value={receiptItemDraft.name} onChange={(event) => setReceiptItemDraft((current) => current ? { ...current, name: event.target.value } : current)} placeholder="Household item name" aria-label={`New household item name for ${line.raw_name}`} />
+                                  <div className="grid gap-2 sm:grid-cols-2">
+                                    <label className="grid gap-1 text-xs font-medium text-slate-700">Starting cadence (days)<Input type="number" min="1" max="3650" value={receiptItemDraft.cadence_days} onChange={(event) => setReceiptItemDraft((current) => current ? { ...current, cadence_days: event.target.value } : current)} /></label>
+                                    <label className="grid gap-1 text-xs font-medium text-slate-700">How to replenish<select className={controlClass} value={receiptItemDraft.replenishment_mode} onChange={(event) => setReceiptItemDraft((current) => current ? { ...current, replenishment_mode: event.target.value as HouseholdItem["replenishment_mode"] } : current)}><option value="either">Errand or delivery</option><option value="errand">Errand</option><option value="delivery">Delivery</option></select></label>
+                                  </div>
+                                  <div className="flex justify-end gap-2"><Button size="sm" variant="outline" onClick={() => setReceiptItemDraft(null)}>Cancel</Button><Button size="sm" onClick={trackReceiptItem} disabled={!receiptItemDraft.name.trim() || !Number(receiptItemDraft.cadence_days) || busy !== null}><Plus className="h-3.5 w-3.5" />Create & match</Button></div>
+                                </div>
+                              ) : null}
+                              {line.acquisition_id ? <button type="button" className="justify-self-start rounded text-xs font-semibold text-rose-700 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500" onClick={() => undoReceiptAcquisition(receipt, line.acquisition_id!)}>Undo learned purchase</button> : null}
+                            </div>
+                          );
+                        })}</div> : null}
                       </div>
                     ))}
                   </div>

@@ -21,6 +21,7 @@ from app.replenishment_schemas import (
     FeedbackRequest,
     GmailSyncRequest,
     ReceiptLineMatchRequest,
+    ReceiptLineNewHouseholdItemRequest,
     ReceiptOut,
     WeeklyRunRequest,
 )
@@ -187,6 +188,33 @@ def update_receipt_line(
             "id": line.id,
             "match_status": line.match_status,
             "household_item_id": line.household_item_id,
+        }
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.post("/receipts/{receipt_id}/items/{line_id}/track")
+def track_receipt_line_as_household_item(
+    receipt_id: int,
+    line_id: int,
+    payload: ReceiptLineNewHouseholdItemRequest,
+    db: DbSession,
+) -> dict:
+    try:
+        item, line = ReceiptIngestionService(db).track_line_as_new_household_item(
+            receipt_id,
+            line_id,
+            name=payload.name,
+            cadence_days=payload.cadence_days,
+            replenishment_mode=payload.replenishment_mode,
+        )
+        return {
+            "household_item": {"id": item.id, "name": item.name},
+            "receipt_line": {
+                "id": line.id,
+                "match_status": line.match_status,
+                "household_item_id": line.household_item_id,
+            },
         }
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc

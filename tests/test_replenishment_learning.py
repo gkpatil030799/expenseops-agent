@@ -206,6 +206,35 @@ def test_low_confidence_or_unmatched_lines_do_not_contaminate_history(db):
     assert db.scalar(select(func.count(HouseholdItemAcquisition.id))) == 0
 
 
+def test_unmatched_receipt_line_can_start_tracking_a_new_household_item(db):
+    service = ReceiptIngestionService(
+        db, settings(), StaticParser(parsed_receipt(name="BRITANNIA TOASTED JUJI RUSK"))
+    )
+    receipt = service.ingest_text(
+        source="telegram", source_external_id="new-staple-1", text="receipt"
+    )
+    line = receipt.items[0]
+    assert line.household_item_id is None
+
+    tracked, updated_line = service.track_line_as_new_household_item(
+        receipt.id,
+        line.id,
+        name="Toasted rusk",
+        cadence_days=21,
+        replenishment_mode="either",
+    )
+
+    assert tracked.name == "Toasted rusk"
+    assert tracked.cadence_days == 21
+    assert updated_line.household_item_id == tracked.id
+    assert db.scalar(select(func.count(HouseholdItemAcquisition.id))) == 0
+
+    service.confirm(receipt.id)
+    acquisition = db.scalar(select(HouseholdItemAcquisition))
+    assert acquisition.household_item_id == tracked.id
+    assert acquisition.user_confirmed is True
+
+
 def test_duplicate_external_id_is_idempotent_and_skips_reparse(db):
     item(db)
     parser = StaticParser(parsed_receipt())

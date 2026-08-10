@@ -40,6 +40,12 @@ class ReceiptLineMatchRequest(BaseModel):
     rejected: bool = False
 
 
+class ReceiptLineNewHouseholdItemRequest(BaseModel):
+    name: str = Field(..., min_length=1, max_length=255)
+    cadence_days: int = Field(default=30, ge=1, le=3650)
+    replenishment_mode: Literal["errand", "delivery", "either"] = "either"
+
+
 class FeedbackRequest(BaseModel):
     feedback_type: Literal["still_have", "skipped", "too_early", "too_late", "correct"]
     prediction_id: int | None = None
