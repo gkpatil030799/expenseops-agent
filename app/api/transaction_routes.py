@@ -115,9 +115,7 @@ def split_equal(tx_id: int, payload: EqualSplitRequest, db: DbSession) -> Splitw
 
 
 @router.post("/{tx_id}/split/custom", response_model=SplitwisePostResponse)
-def split_custom(
-    tx_id: int, payload: CustomSplitRequest, db: DbSession
-) -> SplitwisePostResponse:
+def split_custom(tx_id: int, payload: CustomSplitRequest, db: DbSession) -> SplitwisePostResponse:
     try:
         legacy_owed_by_user_id = None
         participant_splits = None

@@ -22,6 +22,7 @@ import {
   UserCheck,
   UsersRound,
   WalletCards,
+  Tags,
   X,
 } from "lucide-react";
 
@@ -31,6 +32,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Input } from "@/components/ui/input";
 import { GroupManagementPanel } from "@/components/GroupManagementPanel";
 import { HouseholdOpsPage } from "@/components/HouseholdOpsPage";
+import { PromotionsPage } from "@/components/PromotionsPage";
 import {
   analyticsForTransactions,
   buildDashboardEvents,
@@ -109,7 +111,10 @@ function App() {
   const [currentSplitwiseUser, setCurrentSplitwiseUser] = useState<SplitwiseUser | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [log, setLog] = useState<unknown>({ status: "Ready" });
-  const [activeWorkspace, setActiveWorkspace] = useState<"expenses" | "household">("expenses");
+  const [activeWorkspace, setActiveWorkspace] = useState<"expenses" | "household" | "promotions">(() => {
+    const value = new URLSearchParams(window.location.search).get("workspace");
+    return value === "household" || value === "promotions" ? value : "expenses";
+  });
 
   const pendingTotal = useMemo(
     () => transactions.reduce((total, tx) => total + Math.abs(tx.amount_cents), 0) / 100,
@@ -474,6 +479,8 @@ function App() {
 
         {activeWorkspace === "household" ? (
           <HouseholdOpsPage />
+        ) : activeWorkspace === "promotions" ? (
+          <PromotionsPage />
         ) : (
           <>
         <Header onPlaid={openPlaidLink} onSync={syncTransactions} busy={busy} />
@@ -652,8 +659,8 @@ function WorkspaceNavigation({
   active,
   onChange,
 }: {
-  active: "expenses" | "household";
-  onChange: (value: "expenses" | "household") => void;
+  active: "expenses" | "household" | "promotions";
+  onChange: (value: "expenses" | "household" | "promotions") => void;
 }) {
   return (
     <nav
@@ -672,6 +679,9 @@ function WorkspaceNavigation({
       >
         <WalletCards className="h-4 w-4" />
         Expense review
+      </button>
+      <button type="button" onClick={() => onChange("promotions")} aria-current={active === "promotions" ? "page" : undefined} className={`flex flex-1 items-center justify-center gap-2 rounded-lg px-4 py-2 text-sm font-medium transition sm:flex-none ${active === "promotions" ? "bg-indigo-600 text-white shadow-sm" : "text-slate-600 hover:bg-slate-50 hover:text-slate-950"}`}>
+        <Tags className="h-4 w-4" />Deals
       </button>
       <button
         type="button"

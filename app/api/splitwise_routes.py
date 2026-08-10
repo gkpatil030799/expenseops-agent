@@ -141,9 +141,7 @@ def list_group_members(group_id: int) -> list[FriendOut]:
 
 
 @router.post("/groups/{group_id}/invite", response_model=list[FriendOut])
-def invite_group_member(
-    group_id: int, request: InviteGroupMemberRequest
-) -> list[FriendOut]:
+def invite_group_member(group_id: int, request: InviteGroupMemberRequest) -> list[FriendOut]:
     try:
         service = SplitwiseService()
         friend = service.create_friend(

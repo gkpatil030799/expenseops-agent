@@ -17,6 +17,7 @@ from app.models import (
     ReplenishmentMode,
     utc_now,
 )
+from app.services.acquisition_service import AcquisitionService
 from app.services.errand_service import ErrandService, HouseholdOpsNotFound
 
 
@@ -84,11 +85,13 @@ class ReplenishmentService:
     def mark_bought(self, item_id: int, *, now: datetime | None = None) -> HouseholdItem:
         item = self.get_item(item_id)
         current = now or utc_now()
-        item.last_acquired_at = current
-        item.snoozed_until = None
-        item.updated_at = current
-        self.db.commit()
-        self.db.refresh(item)
+        AcquisitionService(self.db).record(
+            item,
+            acquired_at=current,
+            quantity=_float_or_none(item.quantity),
+            unit=item.unit,
+            source="manual_bought",
+        )
         return item
 
     def still_have(
@@ -103,12 +106,21 @@ class ReplenishmentService:
         days = snooze_days or self.settings.household_snooze_days
         item.snoozed_until = current + timedelta(days=days)
         item.updated_at = current
+        AcquisitionService(self.db).feedback(
+            item,
+            "still_have",
+            occurred_at=current,
+            metadata={"snooze_days": days},
+            commit=False,
+        )
         self.db.commit()
         self.db.refresh(item)
         return item
 
     def skip_once(self, item_id: int, *, now: datetime | None = None) -> HouseholdItem:
-        return self.still_have(item_id, now=now)
+        item = self.still_have(item_id, now=now)
+        AcquisitionService(self.db).feedback(item, "skipped", occurred_at=now or utc_now())
+        return item
 
     def disable(self, item_id: int) -> HouseholdItem:
         return self.update_item(item_id, {"enabled": False})
@@ -272,3 +284,10 @@ def _suggestion(item: HouseholdItem, action: str, errand: Errand | None) -> dict
 
 def _aware(value: datetime) -> datetime:
     return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
+
+
+def _float_or_none(value: str | None) -> float | None:
+    try:
+        return float(value) if value is not None else None
+    except ValueError:
+        return None

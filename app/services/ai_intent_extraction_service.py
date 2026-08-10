@@ -82,18 +82,18 @@ class AIIntentExtractionService:
                                 "action=clarify just because split values are compact, "
                                 "abbreviated, or need backend validation.\n\n"
                                 "Keep person_mentions as the user's intended people, including "
-                                "\"me\", and preserve the order they appear in the message.\n\n"
+                                '"me", and preserve the order they appear in the message.\n\n'
                                 "For group splits:\n"
                                 "- If the user mentions a group name, put it in group_mentions.\n"
-                                "- Words like \"group\", \"in\", \"with\", and \"between\" are "
+                                '- Words like "group", "in", "with", and "between" are '
                                 "not part of the group name unless clearly part of the name.\n\n"
                                 "For custom splits:\n"
                                 "- Always extract split_mode and custom_values_text when the "
                                 "user mentions unequal, percentage, percent, %, amount, pays, "
                                 "dollars, shares, ratio, or numeric split values.\n"
                                 "- Preserve the raw value expression in custom_values_text.\n"
-                                "- Do not discard compact values like \"40-60\", \"40/60\", "
-                                "\"40 60\", \"70 30\", \"2-1\", or \"$20 $30\".\n"
+                                '- Do not discard compact values like "40-60", "40/60", '
+                                '"40 60", "70 30", "2-1", or "$20 $30".\n'
                                 "- If the split type is clear:\n"
                                 "  - percent, percentage, percentages, % => "
                                 "split_mode=percentages\n"
@@ -109,42 +109,42 @@ class AIIntentExtractionService:
                                 "explicit values for all mentioned participants.\n"
                                 "- Use remaining_split_behavior=unknown only when unclear.\n\n"
                                 "Examples:\n"
-                                "1. \"Janhavi 50 percent and rest split equally\"\n"
+                                '1. "Janhavi 50 percent and rest split equally"\n'
                                 "   => action=split, split_mode=percentages, "
-                                "person_mentions=[\"Janhavi\"], "
-                                "custom_values_text=\"Janhavi 50 percent\", "
+                                'person_mentions=["Janhavi"], '
+                                'custom_values_text="Janhavi 50 percent", '
                                 "remaining_split_behavior=equal_remaining\n\n"
-                                "2. \"Rahul pays 20 and rest equally\"\n"
+                                '2. "Rahul pays 20 and rest equally"\n'
                                 "   => action=split, split_mode=exact_amounts, "
-                                "person_mentions=[\"Rahul\"], "
-                                "custom_values_text=\"Rahul pays 20\", "
+                                'person_mentions=["Rahul"], '
+                                'custom_values_text="Rahul pays 20", '
                                 "remaining_split_behavior=equal_remaining\n\n"
-                                "3. \"Split between me and Janhavi in Sugar Monkeys group "
-                                "unequally in percentages 40-60\"\n"
+                                '3. "Split between me and Janhavi in Sugar Monkeys group '
+                                'unequally in percentages 40-60"\n'
                                 "   => action=split, target_type=group, "
-                                "group_mentions=[\"Sugar Monkeys\"], "
-                                "person_mentions=[\"me\", \"Janhavi\"], "
+                                'group_mentions=["Sugar Monkeys"], '
+                                'person_mentions=["me", "Janhavi"], '
                                 "split_mode=percentages, payer_included=true, "
-                                "custom_values_text=\"40-60\", "
+                                'custom_values_text="40-60", '
                                 "remaining_split_behavior=none\n\n"
-                                "4. \"split me Rahul 70 30\"\n"
+                                '4. "split me Rahul 70 30"\n'
                                 "   => action=split, target_type=people, "
-                                "person_mentions=[\"me\", \"Rahul\"], split_mode=unknown, "
-                                "custom_values_text=\"70 30\", "
+                                'person_mentions=["me", "Rahul"], split_mode=unknown, '
+                                'custom_values_text="70 30", '
                                 "remaining_split_behavior=none\n\n"
-                                "5. \"Janhavi and Rahul shares 2-1\"\n"
+                                '5. "Janhavi and Rahul shares 2-1"\n'
                                 "   => action=split, target_type=people, "
-                                "person_mentions=[\"Janhavi\", \"Rahul\"], "
-                                "split_mode=shares, custom_values_text=\"2-1\", "
+                                'person_mentions=["Janhavi", "Rahul"], '
+                                'split_mode=shares, custom_values_text="2-1", '
                                 "remaining_split_behavior=none\n\n"
-                                "6. \"split with me, Janhavi, and Yash 50-25-25 percent\"\n"
+                                '6. "split with me, Janhavi, and Yash 50-25-25 percent"\n'
                                 "   => action=split, target_type=people, "
-                                "person_mentions=[\"me\", \"Janhavi\", \"Yash\"], "
-                                "split_mode=percentages, custom_values_text=\"50-25-25\", "
+                                'person_mentions=["me", "Janhavi", "Yash"], '
+                                'split_mode=percentages, custom_values_text="50-25-25", '
                                 "remaining_split_behavior=none\n\n"
-                                "7. \"exclude me, split Janhavi and Rahul equally\"\n"
+                                '7. "exclude me, split Janhavi and Rahul equally"\n'
                                 "   => action=split, target_type=people, "
-                                "person_mentions=[\"Janhavi\", \"Rahul\"], "
+                                'person_mentions=["Janhavi", "Rahul"], '
                                 "split_mode=equal, payer_included=false\n\n"
                                 "If the user asks to mark personal, draft, cancel, or undo, "
                                 "extract that action directly.\n\n"

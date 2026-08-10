@@ -28,6 +28,7 @@ class Settings(BaseSettings):
     dashboard_username: str = ""
     dashboard_password: str = ""
     dashboard_api_token: str = ""
+    app_public_url: str = ""
 
     allow_posting_pending_transactions: bool = False
 
@@ -59,6 +60,42 @@ class Settings(BaseSettings):
 
     openai_api_key: str = ""
     openai_model: str = "gpt-4.1-mini"
+
+    receipt_parser_provider: Literal["fallback", "openai"] = "fallback"
+    receipt_parser_model: str = "gpt-4.1-mini"
+    receipt_max_attachment_bytes: int = Field(default=10_000_000, ge=100_000, le=25_000_000)
+    receipt_auto_match_confidence: float = Field(default=0.9, ge=0.0, le=1.0)
+    receipt_possible_match_confidence: float = Field(default=0.65, ge=0.0, le=1.0)
+    gmail_receipt_sync_enabled: bool = False
+    gmail_client_id: str = ""
+    gmail_client_secret: str = ""
+    gmail_refresh_token: str = ""
+    gmail_user_id: str = "me"
+    gmail_receipt_query: str = (
+        "newer_than:30d (subject:(receipt OR order OR purchase) "
+        "OR from:(walmart.com target.com costco.com instacart.com amazon.com))"
+    )
+    promotions_enabled: bool = False
+    promotions_initial_lookback_days: int = Field(default=30, ge=1, le=365)
+    promotions_max_messages_per_sync: int = Field(default=100, ge=1, le=500)
+    promotions_llm_fallback_enabled: bool = True
+    promotions_max_llm_body_chars: int = Field(default=12000, ge=1000, le=50000)
+    promotions_min_score: float = Field(default=50.0, ge=0.0, le=100.0)
+    promotions_digest_enabled: bool = False
+    promotions_digest_cadence: Literal["daily", "weekly"] = "weekly"
+    promotions_digest_max_deals: int = Field(default=8, ge=1, le=20)
+    promotions_digest_timezone: str = "UTC"
+    promotions_digest_local_hour: int = Field(default=17, ge=0, le=23)
+    promotions_sync_schedule: str = "0 */6 * * *"
+    gmail_push_enabled: bool = False
+    gmail_pubsub_topic: str = ""
+    replenishment_ml_min_rows: int = Field(default=30, ge=10, le=10000)
+    replenishment_ml_min_validation_rows: int = Field(default=8, ge=3, le=1000)
+    replenishment_walk_forward_min_rows: int = Field(default=60, ge=20, le=10000)
+    replenishment_model_min_mae_improvement_pct: float = Field(default=10.0, ge=0.0, le=100.0)
+    replenishment_model_min_mae_improvement_days: float = Field(default=1.0, ge=0.0, le=365.0)
+    replenishment_max_feedback_cadence_adjustment_pct: float = Field(default=25.0, ge=0.0, le=100.0)
+    replenishment_weekly_schedule: str = "0 9 * * 0"
 
     household_base_location: str = ""
     household_snooze_days: int = Field(default=7, ge=1, le=90)

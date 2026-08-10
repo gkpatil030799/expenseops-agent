@@ -169,9 +169,7 @@ class EntityResolutionService:
             if selected:
                 resolved.append(selected)
             elif candidates:
-                ambiguous.append(
-                    AmbiguousEntity(mention=mention, candidates=candidates, kind=kind)
-                )
+                ambiguous.append(AmbiguousEntity(mention=mention, candidates=candidates, kind=kind))
             else:
                 unresolved.append(mention)
 

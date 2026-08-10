@@ -6,6 +6,7 @@ import {
   CheckCircle2,
   CircleOff,
   Clock3,
+  Brain,
   ExternalLink,
   House,
   ListChecks,
@@ -16,6 +17,7 @@ import {
   Pencil,
   Plus,
   RefreshCw,
+  ReceiptText,
   Route,
   ShoppingBasket,
   Trash2,
@@ -34,6 +36,8 @@ import type {
   PlaceCandidate,
   PlaceSearchResult,
   PlanningLocation,
+  PurchaseReceipt,
+  ReplenishmentLearningSummary,
   ReplenishmentSuggestion,
   SavedLocation,
   WhileOutPlan,
@@ -142,6 +146,7 @@ export function HouseholdOpsPage() {
   const [placeSearch, setPlaceSearch] = useState<PlaceSearchResult | null>(null);
   const [manualPlace, setManualPlace] = useState<ManualPlaceForm>(emptyManualPlaceForm);
   const [rememberPlace, setRememberPlace] = useState(true);
+  const [learning, setLearning] = useState<ReplenishmentLearningSummary | null>(null);
 
   const activeErrands = useMemo(
     () => errands.filter((errand) => errand.status === "open" || errand.status === "planned"),
@@ -158,16 +163,18 @@ export function HouseholdOpsPage() {
     setBusy("refresh");
     setError(null);
     try {
-      const [loadedErrands, loadedItems, latestPlan, loadedLocations] = await Promise.all([
+      const [loadedErrands, loadedItems, latestPlan, loadedLocations, loadedLearning] = await Promise.all([
         api<Errand[]>("/api/household/errands"),
         api<HouseholdItem[]>("/api/household/items"),
         api<ErrandPlan | null>("/api/household/errand-plans/latest"),
         api<SavedLocation[]>("/api/household/locations"),
+        api<ReplenishmentLearningSummary>("/api/replenishment/summary"),
       ]);
       setErrands(loadedErrands);
       setItems(loadedItems);
       setPlan(latestPlan);
       setLocations(loadedLocations);
+      setLearning(loadedLearning);
       setOriginChoice((current) => {
         if (current !== "manual" || manualOrigin) return current;
         const preferred = loadedLocations.find((location) => location.location_type === "home");
@@ -333,6 +340,49 @@ export function HouseholdOpsPage() {
           ? "Replenishment recommendations refreshed."
           : "Nothing is due based on the current cadence data.",
       );
+      await loadHouseholdOps();
+    });
+  }
+
+  async function updateReceiptMatch(receipt: PurchaseReceipt, lineId: number, value: string) {
+    await run(`receipt-line-${lineId}`, async () => {
+      await api(`/api/replenishment/receipts/${receipt.id}/items/${lineId}`, {
+        method: "PATCH",
+        body: JSON.stringify(
+          value === "reject"
+            ? { household_item_id: null, rejected: true }
+            : { household_item_id: value ? Number(value) : null, rejected: false },
+        ),
+      });
+      setNotice("Receipt match updated.");
+      await loadHouseholdOps();
+    });
+  }
+
+  async function undoReceiptAcquisition(receipt: PurchaseReceipt, acquisitionId: number) {
+    if (!window.confirm("Undo this learned purchase? The receipt remains available for correction.")) return;
+    await run(`undo-acquisition-${acquisitionId}`, async () => {
+      await api(`/api/replenishment/acquisitions/${acquisitionId}/undo`, { method: "POST" });
+      setNotice("Purchase history entry undone.");
+      await loadHouseholdOps();
+    });
+  }
+
+  async function receiptAction(receipt: PurchaseReceipt, action: "confirm" | "ignore") {
+    await run(`receipt-${action}-${receipt.id}`, async () => {
+      await api(`/api/replenishment/receipts/${receipt.id}/${action}`, { method: "POST" });
+      setNotice(action === "confirm" ? "Receipt purchases added to learning history." : "Receipt ignored.");
+      await loadHouseholdOps();
+    });
+  }
+
+  async function runWeeklyLearning() {
+    await run("weekly-learning", async () => {
+      await api("/api/replenishment/weekly-run", {
+        method: "POST",
+        body: JSON.stringify({ run_key: `manual-${new Date().toISOString()}` }),
+      });
+      setNotice("Predictions refreshed. A model is promoted only when it beats the baseline.");
       await loadHouseholdOps();
     });
   }
@@ -606,6 +656,102 @@ export function HouseholdOpsPage() {
           {notice}
         </div>
       ) : null}
+
+      <Card>
+        <CardHeader className="flex-row items-start justify-between gap-4 space-y-0">
+          <div>
+            <div className="mb-1 inline-flex items-center gap-2 text-xs font-semibold uppercase text-slate-500">
+              <Brain className="h-4 w-4" /> Learning from purchases
+            </div>
+            <CardTitle>Replenishment learning</CardTitle>
+            <CardDescription>Receipt matches and your feedback improve estimates; every purchase remains correctable.</CardDescription>
+          </div>
+          <Button variant="outline" onClick={runWeeklyLearning} disabled={busy !== null}>
+            <RefreshCw className={`h-4 w-4 ${busy === "weekly-learning" ? "animate-spin" : ""}`} /> Refresh predictions
+          </Button>
+        </CardHeader>
+        <CardContent className="space-y-5">
+          {busy === "initial" && !learning ? <LoadingRows /> : (
+            <>
+              <section>
+                <div className="mb-3 flex items-center justify-between gap-3">
+                  <div>
+                    <h3 className="text-sm font-semibold uppercase tracking-wide text-slate-700">This week</h3>
+                    <p className="text-xs text-slate-600">Likely needs based on confirmed purchase timing—not an inventory claim.</p>
+                  </div>
+                  <Badge variant="secondary">{learning?.this_week.length || 0} likely due</Badge>
+                </div>
+                {learning?.this_week.length ? (
+                  <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-3">
+                    {learning.this_week.map((prediction) => (
+                      <div key={prediction.id} className="rounded-xl border border-slate-200 bg-slate-50/60 p-3">
+                        <p className="font-semibold text-slate-950">{prediction.household_item_name}</p>
+                        <p className="mt-1 text-xs text-slate-600">
+                          {prediction.predicted_days_remaining <= 0 ? "Likely due now" : `Likely within ${Math.max(1, Math.ceil(prediction.predicted_days_remaining))} days`}
+                        </p>
+                        <p className="mt-1 text-xs leading-5 text-slate-600">{prediction.explanation}</p>
+                        {prediction.evidence_label ? <p className="mt-2 text-xs font-medium text-amber-700">{prediction.evidence_label}</p> : null}
+                      </div>
+                    ))}
+                  </div>
+                ) : <EmptyPanel icon={PackageCheck} title="Nothing predicted for this week" description="Confirm purchases over time to build a useful pattern." compact />}
+              </section>
+
+              <section className="grid gap-3 sm:grid-cols-3">
+                <Metric label="Confirmed purchases" value={learning?.learning.confirmed_acquisitions || 0} />
+                <Metric label="Items with history" value={learning?.learning.items_with_history || 0} />
+                <Metric label="Prediction engine" value={learning?.learning.active_model ? "Validated model" : "Adaptive baseline"} />
+              </section>
+
+              <section>
+                <div className="mb-3 inline-flex items-center gap-2 text-sm font-semibold text-slate-900">
+                  <ReceiptText className="h-4 w-4 text-slate-500" /> Recent receipts
+                </div>
+                {learning?.recent_receipts.length ? (
+                  <div className="space-y-3">
+                    {learning.recent_receipts.map((receipt) => (
+                      <div key={receipt.id} className="rounded-xl border border-slate-200 p-4">
+                        <div className="flex flex-wrap items-start justify-between gap-3">
+                          <div><p className="font-semibold text-slate-950">{receipt.merchant || "Unknown merchant"}</p><p className="text-xs text-slate-600">{receipt.source} · {new Date(receipt.purchased_at || receipt.created_at).toLocaleDateString()} · {receipt.parse_status.replace(/_/g, " ")}</p></div>
+                          {receipt.parse_status === "needs_review" ? <div className="flex gap-2"><Button size="sm" onClick={() => receiptAction(receipt, "confirm")} disabled={busy !== null}><Check className="h-3.5 w-3.5" />Confirm</Button><Button size="sm" variant="ghost" onClick={() => receiptAction(receipt, "ignore")} disabled={busy !== null}>Ignore</Button></div> : <Badge variant="secondary">{receipt.parse_status}</Badge>}
+                        </div>
+                        {receipt.items.length ? <div className="mt-3 grid gap-2 sm:grid-cols-2">{receipt.items.map((line) => (
+                          <label key={line.id} className="grid gap-1 text-xs font-medium text-slate-700">
+                            <span className="truncate">{line.raw_name}</span>
+                            <select className={controlClass} value={line.match_status === "rejected" ? "reject" : line.household_item_id?.toString() || ""} onChange={(event) => updateReceiptMatch(receipt, line.id, event.target.value)} disabled={["ignored", "failed"].includes(receipt.parse_status) || busy !== null} aria-label={`Match ${line.raw_name}`}>
+                              <option value="">Unmatched</option>
+                              {items.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
+                              <option value="reject">Not a household item</option>
+                            </select>
+                            {line.acquisition_id ? <button type="button" className="justify-self-start rounded text-xs font-semibold text-rose-700 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500" onClick={() => undoReceiptAcquisition(receipt, line.acquisition_id!)}>Undo learned purchase</button> : null}
+                          </label>
+                        ))}</div> : null}
+                      </div>
+                    ))}
+                  </div>
+                ) : <EmptyPanel icon={ReceiptText} title="No receipts yet" description="Send a receipt photo or PDF to the Telegram bot, then confirm the matches here." compact />}
+              </section>
+
+              <details className="rounded-xl border border-slate-200 px-4 py-3">
+                <summary className="cursor-pointer text-sm font-semibold text-slate-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500">Advanced prediction history & accuracy</summary>
+                <div className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+                  <Metric label="Current method" value={learning?.accuracy.current_prediction_method?.replace(/_/g, " ") || "No prediction yet"} />
+                  <Metric label="Training observations" value={learning?.accuracy.training_observations || 0} />
+                  <Metric label="Validation observations" value={learning?.accuracy.validation_observations || 0} />
+                  <Metric label="Evidence level" value={learning?.accuracy.confidence_level || "insufficient"} />
+                  <Metric label="Validation method" value={learning?.accuracy.validation_method?.replace(/_/g, " ") || "Not eligible yet"} />
+                  <Metric label="Strongest baseline MAE" value={learning?.accuracy.baseline_mae_days !== null && learning?.accuracy.baseline_mae_days !== undefined ? `${learning.accuracy.baseline_mae_days} days` : "Not evaluated"} />
+                  <Metric label="Active model MAE" value={learning?.accuracy.active_model_mae_days !== null && learning?.accuracy.active_model_mae_days !== undefined ? `${learning.accuracy.active_model_mae_days} days` : "No active model"} />
+                  <Metric label="Evaluated predictions" value={learning?.accuracy.evaluated_predictions || 0} />
+                </div>
+                <p className="mt-3 text-sm text-slate-600">{learning?.accuracy.evaluated_predictions ? `Historical prediction error: ${learning.accuracy.mae_days} mean absolute days.` : "Accuracy appears after a prediction is followed by the next valid confirmed purchase."}</p>
+                {learning?.accuracy.confidence_level === "insufficient" || learning?.accuracy.confidence_level === "low" ? <p className="mt-2 text-sm font-medium text-amber-700">Early estimate — limited history.</p> : null}
+                {learning?.accuracy.decision_reason ? <p className="mt-2 text-xs leading-5 text-slate-600">Latest model decision{learning.accuracy.latest_model_status ? ` (${learning.accuracy.latest_model_status})` : ""}: {learning.accuracy.decision_reason}</p> : null}
+              </details>
+            </>
+          )}
+        </CardContent>
+      </Card>
 
       <WhileOutPanel
         locations={locations}
@@ -1121,6 +1267,8 @@ function IconButton({ label, children, onClick, danger = false }: { label: strin
 function EmptyPanel({ icon: Icon, title, description, compact = false }: { icon: typeof House; title: string; description: string; compact?: boolean }) { return <div className={`flex flex-col items-center justify-center rounded-xl border border-dashed border-slate-300 bg-slate-50/50 px-5 text-center ${compact ? "min-h-32 py-5" : "min-h-44 py-8"}`}><span className="flex h-10 w-10 items-center justify-center rounded-xl bg-white text-slate-500 shadow-sm ring-1 ring-slate-200"><Icon className="h-5 w-5" /></span><h3 className="mt-3 text-sm font-semibold text-slate-900">{title}</h3><p className="mt-1 max-w-sm text-xs leading-5 text-slate-600">{description}</p></div>; }
 
 function LoadingRows() { return <div className="space-y-2" role="status" aria-label="Loading Household Ops"><div className="ui-skeleton h-20" /><div className="ui-skeleton h-20" /><div className="ui-skeleton h-20" /><span className="sr-only">Loading</span></div>; }
+
+function Metric({ label, value }: { label: string; value: string | number }) { return <div className="rounded-xl border border-slate-200 bg-slate-50/60 p-3"><p className="text-xs font-medium text-slate-600">{label}</p><p className="mt-1 text-lg font-semibold text-slate-950">{value}</p></div>; }
 
 function nullable(value: string) { return value.trim() || null; }
 function toIso(value: string) { return value ? new Date(value).toISOString() : null; }

@@ -159,10 +159,7 @@ def _owed_cents_by_user(
         if sum(percentages, Decimal("0")) != Decimal("100"):
             raise ValueError("percentages must sum to 100")
         cents = _allocate_by_weights(total_cents, percentages)
-        return {
-            split.user_id: cents[index]
-            for index, split in enumerate(participant_splits)
-        }
+        return {split.user_id: cents[index] for index, split in enumerate(participant_splits)}
 
     if split_mode == "shares":
         shares = []
@@ -173,10 +170,7 @@ def _owed_cents_by_user(
                 raise ValueError("shares must be positive")
             shares.append(split.shares)
         cents = _allocate_by_weights(total_cents, shares)
-        return {
-            split.user_id: cents[index]
-            for index, split in enumerate(participant_splits)
-        }
+        return {split.user_id: cents[index] for index, split in enumerate(participant_splits)}
 
     raise ValueError("unsupported split mode")
 

@@ -135,8 +135,7 @@ class LLMSplitParser:
         alias_participants: list[_AliasParticipant],
     ) -> dict[str, Any]:
         participants_for_prompt = [
-            {"alias": item.alias, "display_name": item.display_name}
-            for item in alias_participants
+            {"alias": item.alias, "display_name": item.display_name} for item in alias_participants
         ]
         payload = {
             "model": self.settings.openai_model,
@@ -273,8 +272,7 @@ class LLMSplitParser:
 
         return LLMSplitParseResult(
             ok=True,
-            parser_confidence=_optional_decimal(payload.get("parser_confidence"))
-            or Decimal("0"),
+            parser_confidence=_optional_decimal(payload.get("parser_confidence")) or Decimal("0"),
             normalized_intent=str(payload.get("normalized_intent") or ""),
             participant_splits=participant_splits,
             clarification_question=payload.get("clarification_question"),

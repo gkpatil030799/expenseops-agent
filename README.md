@@ -252,6 +252,35 @@ errand or staple, choose a specific destination for each routed errand, use **Ch
 include errands in the next trip, and select **Plan errands**. Name-only tasks such as "haircut"
 or chains such as "Aldi" remain unresolved until a full physical destination is selected.
 
+### Promotion Intelligence
+
+The Deals workspace reads only Gmail's Promotions category, extracts concrete offers, rejects unsafe
+links, collapses campaign reminders, removes expired deals, and ranks a small set using Replenishment
+needs, transaction affinity, and explicit feedback. It reuses the existing Gmail OAuth and Telegram
+configuration. Setup, scheduled commands, scoring behavior, privacy rules, and limitations are in
+[`docs/PROMOTION_INTELLIGENCE.md`](docs/PROMOTION_INTELLIGENCE.md).
+
+### Replenishment learning
+
+Replenishment now learns from immutable acquisition history instead of replacing one
+`last_acquired_at` value. Send a receipt image/PDF to the Telegram bot, review the tracked-item
+matches, then confirm or correct them in Household Ops. Gmail receipt discovery is separately
+opt-in, query-limited, and idempotent by Gmail message ID. Plaid corroborates merchant/date/amount
+but never invents product line items.
+
+Predictions start with configured cadence and an adaptive weighted median. After at least 30 usable
+historical training rows (configurable), the weekly job trains one global standardized ridge model.
+Small datasets use chronological holdout; 60+ rows use expanding walk-forward validation. Promotion
+requires beating the strongest of configured cadence, adaptive cadence, and the current active model
+by both 10% and one absolute MAE day by default. Run the same idempotent workflow locally with:
+
+```bash
+python -m app.jobs.weekly_replenishment
+```
+
+For full architecture, Gmail OAuth setup, privacy behavior, Railway scheduling, and known limits,
+see [Replenishment Learning](docs/REPLENISHMENT_LEARNING.md).
+
 ## Environment Variables
 
 Important local variables:
@@ -287,6 +316,17 @@ SPLITWISE_AUTH_SCHEME="Bearer"
 
 OPENAI_API_KEY=""
 OPENAI_MODEL="gpt-4.1-mini"
+
+RECEIPT_PARSER_PROVIDER="fallback"
+RECEIPT_PARSER_MODEL="gpt-4.1-mini"
+GMAIL_RECEIPT_SYNC_ENABLED="false"
+REPLENISHMENT_ML_MIN_ROWS=30
+REPLENISHMENT_ML_MIN_VALIDATION_ROWS=8
+REPLENISHMENT_WALK_FORWARD_MIN_ROWS=60
+REPLENISHMENT_MODEL_MIN_MAE_IMPROVEMENT_PCT=10
+REPLENISHMENT_MODEL_MIN_MAE_IMPROVEMENT_DAYS=1.0
+REPLENISHMENT_MAX_FEEDBACK_CADENCE_ADJUSTMENT_PCT=25
+REPLENISHMENT_WEEKLY_SCHEDULE="0 9 * * 0"
 
 HOUSEHOLD_BASE_LOCATION=""
 HOUSEHOLD_SNOOZE_DAYS=7

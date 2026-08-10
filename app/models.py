@@ -66,6 +66,29 @@ class ReplenishmentMode(StrEnum):
     EITHER = "either"
 
 
+class ReceiptSource(StrEnum):
+    TELEGRAM = "telegram"
+    GMAIL = "gmail"
+    MANUAL = "manual"
+
+
+class ReceiptParseStatus(StrEnum):
+    PENDING = "pending"
+    PARSED = "parsed"
+    NEEDS_REVIEW = "needs_review"
+    CONFIRMED = "confirmed"
+    IGNORED = "ignored"
+    FAILED = "failed"
+
+
+class ReceiptItemMatchStatus(StrEnum):
+    MATCHED = "matched"
+    POSSIBLE = "possible"
+    UNMATCHED = "unmatched"
+    IRRELEVANT = "irrelevant"
+    REJECTED = "rejected"
+
+
 class ErrandPlanStatus(StrEnum):
     PLANNED = "planned"
     STARTED = "started"
@@ -230,6 +253,349 @@ class HouseholdItem(Base):
     errand_links: Mapped[list[ErrandHouseholdItem]] = relationship(
         back_populates="household_item", cascade="all, delete-orphan"
     )
+
+
+class PurchaseReceipt(Base):
+    __tablename__ = "purchase_receipts"
+    __table_args__ = (
+        UniqueConstraint("source", "source_external_id", name="uq_receipt_source_external"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    source: Mapped[str] = mapped_column(String(32), index=True)
+    source_external_id: Mapped[str] = mapped_column(String(255))
+    content_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    merchant_raw: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    merchant_normalized: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
+    purchased_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    subtotal_cents: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    tax_cents: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    total_cents: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    currency: Mapped[str] = mapped_column(String(8), default="USD")
+    transaction_id: Mapped[int | None] = mapped_column(
+        ForeignKey("expense_transactions.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    parse_status: Mapped[str] = mapped_column(
+        String(32), default=ReceiptParseStatus.PENDING.value, index=True
+    )
+    parse_confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
+    failure_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    ignored_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+    items: Mapped[list[PurchaseReceiptItem]] = relationship(
+        back_populates="receipt", cascade="all, delete-orphan", order_by="PurchaseReceiptItem.id"
+    )
+
+
+class PurchaseReceiptItem(Base):
+    __tablename__ = "purchase_receipt_items"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    receipt_id: Mapped[int] = mapped_column(
+        ForeignKey("purchase_receipts.id", ondelete="CASCADE"), index=True
+    )
+    raw_name: Mapped[str] = mapped_column(String(500))
+    normalized_name: Mapped[str] = mapped_column(String(255), index=True)
+    quantity: Mapped[float | None] = mapped_column(Float, nullable=True)
+    unit: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    normalized_quantity: Mapped[float | None] = mapped_column(Float, nullable=True)
+    normalized_unit: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    package_size: Mapped[float | None] = mapped_column(Float, nullable=True)
+    quantity_confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
+    unit_price_cents: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    line_total_cents: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    brand: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    category: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    household_item_id: Mapped[int | None] = mapped_column(
+        ForeignKey("household_items.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    match_status: Mapped[str] = mapped_column(
+        String(32), default=ReceiptItemMatchStatus.UNMATCHED.value, index=True
+    )
+    match_confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+    receipt: Mapped[PurchaseReceipt] = relationship(back_populates="items")
+    household_item: Mapped[HouseholdItem | None] = relationship()
+    acquisition: Mapped[HouseholdItemAcquisition | None] = relationship(
+        back_populates="receipt_item", uselist=False
+    )
+
+
+class HouseholdItemAlias(Base):
+    __tablename__ = "household_item_aliases"
+    __table_args__ = (
+        UniqueConstraint(
+            "household_item_id",
+            "merchant_normalized",
+            "normalized_alias",
+            name="uq_household_alias_item_merchant_name",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    household_item_id: Mapped[int] = mapped_column(
+        ForeignKey("household_items.id", ondelete="CASCADE"), index=True
+    )
+    merchant_normalized: Mapped[str] = mapped_column(String(255), default="")
+    raw_pattern: Mapped[str] = mapped_column(String(500))
+    normalized_alias: Mapped[str] = mapped_column(String(255), index=True)
+    confidence: Mapped[float] = mapped_column(Float, default=1.0)
+    source: Mapped[str] = mapped_column(String(32), default="user")
+    voided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+    household_item: Mapped[HouseholdItem] = relationship()
+
+
+class HouseholdItemAcquisition(Base):
+    __tablename__ = "household_item_acquisitions"
+    __table_args__ = (UniqueConstraint("receipt_item_id", name="uq_acquisition_receipt_item"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    household_item_id: Mapped[int] = mapped_column(
+        ForeignKey("household_items.id", ondelete="CASCADE"), index=True
+    )
+    acquired_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    quantity: Mapped[float | None] = mapped_column(Float, nullable=True)
+    unit: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    normalized_quantity: Mapped[float | None] = mapped_column(Float, nullable=True)
+    normalized_unit: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    package_size: Mapped[float | None] = mapped_column(Float, nullable=True)
+    quantity_confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
+    configured_cadence_days: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    merchant_normalized: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    logical_purchase_key: Mapped[str | None] = mapped_column(
+        String(64), nullable=True, unique=True, index=True
+    )
+    receipt_item_id: Mapped[int | None] = mapped_column(
+        ForeignKey("purchase_receipt_items.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    transaction_id: Mapped[int | None] = mapped_column(
+        ForeignKey("expense_transactions.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    supersedes_acquisition_id: Mapped[int | None] = mapped_column(
+        ForeignKey("household_item_acquisitions.id", ondelete="SET NULL"), nullable=True
+    )
+    source: Mapped[str] = mapped_column(String(32), index=True)
+    confidence: Mapped[float] = mapped_column(Float, default=1.0)
+    confirmed: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    user_confirmed: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    voided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+    household_item: Mapped[HouseholdItem] = relationship()
+    receipt_item: Mapped[PurchaseReceiptItem | None] = relationship(back_populates="acquisition")
+
+
+class ReplenishmentModelVersion(Base):
+    __tablename__ = "replenishment_model_versions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    version: Mapped[str] = mapped_column(String(100), unique=True, index=True)
+    algorithm: Mapped[str] = mapped_column(String(100))
+    status: Mapped[str] = mapped_column(String(32), index=True)
+    trained_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    training_rows: Mapped[int] = mapped_column(Integer)
+    training_start_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    training_end_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    metrics_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    artifact_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class ReplenishmentPrediction(Base):
+    __tablename__ = "replenishment_predictions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    household_item_id: Mapped[int] = mapped_column(
+        ForeignKey("household_items.id", ondelete="CASCADE"), index=True
+    )
+    generated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    predicted_need_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    predicted_days_remaining: Mapped[float] = mapped_column(Float)
+    due_score: Mapped[float] = mapped_column(Float)
+    method: Mapped[str] = mapped_column(String(64), index=True)
+    model_version_id: Mapped[int | None] = mapped_column(
+        ForeignKey("replenishment_model_versions.id", ondelete="SET NULL"), nullable=True
+    )
+    confidence: Mapped[float] = mapped_column(Float)
+    confidence_level: Mapped[str] = mapped_column(String(32), default="insufficient", index=True)
+    feature_snapshot: Mapped[dict] = mapped_column(JSON, default=dict)
+    actual_next_acquisition_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    error_days: Mapped[float | None] = mapped_column(Float, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+    household_item: Mapped[HouseholdItem] = relationship()
+    model_version: Mapped[ReplenishmentModelVersion | None] = relationship()
+
+
+class ReplenishmentFeedback(Base):
+    __tablename__ = "replenishment_feedback"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    household_item_id: Mapped[int] = mapped_column(
+        ForeignKey("household_items.id", ondelete="CASCADE"), index=True
+    )
+    prediction_id: Mapped[int | None] = mapped_column(
+        ForeignKey("replenishment_predictions.id", ondelete="SET NULL"), nullable=True
+    )
+    feedback_type: Mapped[str] = mapped_column(String(32), index=True)
+    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    metadata_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class ReplenishmentJobRun(Base):
+    __tablename__ = "replenishment_job_runs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    run_key: Mapped[str] = mapped_column(String(100), unique=True, index=True)
+    trigger: Mapped[str] = mapped_column(String(32))
+    status: Mapped[str] = mapped_column(String(32), index=True)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    dataset_size: Mapped[int] = mapped_column(Integer, default=0)
+    model_version_id: Mapped[int | None] = mapped_column(
+        ForeignKey("replenishment_model_versions.id", ondelete="SET NULL"), nullable=True
+    )
+    metrics_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class PromotionMessage(Base):
+    __tablename__ = "promotion_messages"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    gmail_message_id: Mapped[str] = mapped_column(String(255), unique=True, index=True)
+    gmail_thread_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    gmail_history_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    sender_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    sender_email: Mapped[str | None] = mapped_column(String(320), nullable=True)
+    sender_domain: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
+    subject: Mapped[str] = mapped_column(String(1000), default="")
+    snippet: Mapped[str | None] = mapped_column(Text, nullable=True)
+    received_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    gmail_label_snapshot: Mapped[list] = mapped_column(JSON, default=list)
+    parse_status: Mapped[str] = mapped_column(String(32), default="pending", index=True)
+    parse_confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
+    processed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    content_fingerprint: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+    offers: Mapped[list[PromotionOffer]] = relationship(
+        back_populates="message", cascade="all, delete-orphan"
+    )
+
+
+class PromotionOffer(Base):
+    __tablename__ = "promotion_offers"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    promotion_message_id: Mapped[int] = mapped_column(
+        ForeignKey("promotion_messages.id", ondelete="CASCADE"), index=True
+    )
+    merchant_raw: Mapped[str] = mapped_column(String(255))
+    merchant_normalized: Mapped[str] = mapped_column(String(255), index=True)
+    primary_category: Mapped[str] = mapped_column(String(64), default="Other", index=True)
+    secondary_categories: Mapped[list] = mapped_column(JSON, default=list)
+    offer_type: Mapped[str] = mapped_column(String(32), default="other")
+    headline: Mapped[str] = mapped_column(String(1000))
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    percent_off: Mapped[float | None] = mapped_column(Float, nullable=True)
+    amount_off: Mapped[float | None] = mapped_column(Float, nullable=True)
+    currency: Mapped[str | None] = mapped_column(String(8), nullable=True)
+    minimum_spend: Mapped[float | None] = mapped_column(Float, nullable=True)
+    original_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    discounted_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    promo_code: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    starts_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, index=True
+    )
+    expiry_precision: Mapped[str] = mapped_column(String(32), default="unknown")
+    destination_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    destination_domain: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    terms_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    loyalty_required: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    new_customer_only: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    confidence: Mapped[float] = mapped_column(Float, default=0.0)
+    trust_status: Mapped[str] = mapped_column(String(32), default="review", index=True)
+    status: Mapped[str] = mapped_column(String(32), default="active", index=True)
+    campaign_fingerprint: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    score: Mapped[float] = mapped_column(Float, default=0.0, index=True)
+    score_breakdown_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    saved: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    source_message_ids: Mapped[list] = mapped_column(JSON, default=list)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+    message: Mapped[PromotionMessage] = relationship(back_populates="offers")
+
+
+class PromotionFeedback(Base):
+    __tablename__ = "promotion_feedback"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    promotion_offer_id: Mapped[int] = mapped_column(
+        ForeignKey("promotion_offers.id", ondelete="CASCADE"), index=True
+    )
+    feedback_type: Mapped[str] = mapped_column(String(32), index=True)
+    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    metadata_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class PromotionDigestRun(Base):
+    __tablename__ = "promotion_digest_runs"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    scheduled_for: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    generated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    offers_considered: Mapped[int] = mapped_column(Integer, default=0)
+    offers_included: Mapped[int] = mapped_column(Integer, default=0)
+    delivery_channel: Mapped[str] = mapped_column(String(32), default="telegram")
+    delivery_status: Mapped[str] = mapped_column(String(32), default="preview", index=True)
+    campaign_fingerprints: Mapped[list] = mapped_column(JSON, default=list)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class PromotionSettings(Base):
+    __tablename__ = "promotion_settings"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    preferred_categories: Mapped[list] = mapped_column(JSON, default=list)
+    muted_categories: Mapped[list] = mapped_column(JSON, default=list)
+    preferred_merchants: Mapped[list] = mapped_column(JSON, default=list)
+    muted_merchants: Mapped[list] = mapped_column(JSON, default=list)
+    minimum_score: Mapped[float] = mapped_column(Float, default=50.0)
+    maximum_deals_per_digest: Mapped[int] = mapped_column(Integer, default=8)
+    digest_cadence: Mapped[str] = mapped_column(String(32), default="weekly")
+    digest_time: Mapped[int] = mapped_column(Integer, default=17)
+    timezone: Mapped[str] = mapped_column(String(64), default="UTC")
+    include_minimum_spend: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class GmailSyncCheckpoint(Base):
+    __tablename__ = "gmail_sync_checkpoints"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    account_key: Mapped[str] = mapped_column(String(255), unique=True, index=True)
+    history_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    backfill_page_token: Mapped[str | None] = mapped_column(Text, nullable=True)
+    initial_backfill_complete: Mapped[bool] = mapped_column(Boolean, default=False)
+    watch_expiration_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
 
 class Errand(Base):

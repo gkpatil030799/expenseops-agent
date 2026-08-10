@@ -12,6 +12,8 @@ from app.api import (
     ai_memory_routes,
     household_routes,
     plaid_routes,
+    promotion_routes,
+    replenishment_routes,
     splitwise_routes,
     telegram_routes,
     transaction_routes,
@@ -66,6 +68,8 @@ app.include_router(telegram_routes.router)
 app.include_router(transaction_routes.router)
 app.include_router(ai_memory_routes.router)
 app.include_router(household_routes.router)
+app.include_router(replenishment_routes.router)
+app.include_router(promotion_routes.router)
 app.include_router(sandbox_router)
 app.mount("/static", StaticFiles(directory="app/static"), name="static")
 

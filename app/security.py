@@ -14,8 +14,8 @@ def _fernet() -> Fernet:
     if not key or key == "paste-a-generated-fernet-key-here":
         raise SecretConfigurationError(
             "APP_SECRET_KEY is missing. Generate one with: "
-            "python -c \"from cryptography.fernet import Fernet; "
-            "print(Fernet.generate_key().decode())\""
+            'python -c "from cryptography.fernet import Fernet; '
+            'print(Fernet.generate_key().decode())"'
         )
     return Fernet(key.encode("utf-8"))
 

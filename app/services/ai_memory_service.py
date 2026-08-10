@@ -15,11 +15,7 @@ MAX_ORIGINAL_MESSAGE_LENGTH = 500
 
 
 def _tokens(text: str | None) -> set[str]:
-    return {
-        token
-        for token in re.findall(r"[a-z0-9]+", (text or "").lower())
-        if len(token) > 2
-    }
+    return {token for token in re.findall(r"[a-z0-9]+", (text or "").lower()) if len(token) > 2}
 
 
 def _cap_message(message: str) -> str:

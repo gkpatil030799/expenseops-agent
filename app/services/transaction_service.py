@@ -378,9 +378,7 @@ class TransactionService:
         tx.name = tx_data.get("name") or tx.merchant_name or "Unknown transaction"
         tx.amount_cents = decimal_to_cents(Decimal(str(tx_data.get("amount", 0))))
         tx.iso_currency_code = (
-            tx_data.get("iso_currency_code")
-            or tx_data.get("unofficial_currency_code")
-            or "USD"
+            tx_data.get("iso_currency_code") or tx_data.get("unofficial_currency_code") or "USD"
         )
         tx.date = _parse_date(tx_data.get("date"))
         tx.authorized_date = _parse_date(tx_data.get("authorized_date"))
@@ -1026,8 +1024,8 @@ def _parse_date(value: Any) -> date | None:
 def _date_to_splitwise_iso(value: date | None) -> str | None:
     if not value:
         return None
-    return datetime(value.year, value.month, value.day, tzinfo=UTC).isoformat().replace(
-        "+00:00", "Z"
+    return (
+        datetime(value.year, value.month, value.day, tzinfo=UTC).isoformat().replace("+00:00", "Z")
     )
 
 

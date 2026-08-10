@@ -49,7 +49,6 @@ class TelegramService:
                 chat_id_set=bool(chat_id or self.settings.telegram_chat_id),
             )
             return False
-
         url = f"https://api.telegram.org/bot{self.settings.telegram_bot_token}/sendMessage"
         payload: dict[str, Any] = {
             "chat_id": chat_id or self.settings.telegram_chat_id,
@@ -80,6 +79,25 @@ class TelegramService:
                 chat_id=chat_id or self.settings.telegram_chat_id,
             )
             return False
+
+    def download_file(self, file_id: str) -> tuple[bytes, str]:
+        if not self.settings.telegram_bot_token:
+            raise ValueError("telegram_not_configured")
+        base = f"https://api.telegram.org/bot{self.settings.telegram_bot_token}"
+        try:
+            with httpx.Client(timeout=30.0) as client:
+                metadata = client.get(f"{base}/getFile", params={"file_id": file_id})
+                metadata.raise_for_status()
+                file_path = str((metadata.json().get("result") or {}).get("file_path") or "")
+                if not file_path:
+                    raise ValueError("telegram_file_path_missing")
+                response = client.get(
+                    f"https://api.telegram.org/file/bot{self.settings.telegram_bot_token}/{file_path}"
+                )
+                response.raise_for_status()
+            return response.content, file_path
+        except Exception as exc:
+            raise ValueError("telegram_file_download_failed") from exc
 
     def edit_message(
         self,
@@ -115,10 +133,7 @@ class TelegramService:
             logger.info("Telegram callback answer skipped: Telegram is not configured.")
             return
 
-        url = (
-            f"https://api.telegram.org/bot{self.settings.telegram_bot_token}"
-            "/answerCallbackQuery"
-        )
+        url = f"https://api.telegram.org/bot{self.settings.telegram_bot_token}/answerCallbackQuery"
         payload = {
             "callback_query_id": callback_query_id,
             "text": text,
@@ -161,6 +176,50 @@ def format_ask_user_transaction_message(tx: ExpenseTransaction) -> str:
             f"❓ <b>Question</b>: {html(question)}",
         ]
     )
+
+
+def build_receipt_review_keyboard(receipt_id: int, dashboard_url: str = "") -> dict[str, Any]:
+    edit_button: dict[str, str]
+    if dashboard_url:
+        edit_button = {
+            "text": "✏️ Edit matches",
+            "url": dashboard_url.rstrip("/") + "/?workspace=household",
+        }
+    else:
+        edit_button = {
+            "text": "✏️ Edit matches",
+            "callback_data": f"receipt:edit:{receipt_id}",
+        }
+    return {
+        "inline_keyboard": [
+            [
+                {
+                    "text": "✅ Confirm",
+                    "callback_data": f"receipt:confirm:{receipt_id}",
+                },
+                edit_button,
+            ],
+            [{"text": "Ignore", "callback_data": f"receipt:ignore:{receipt_id}"}],
+        ]
+    }
+
+
+def format_receipt_review_message(receipt) -> str:
+    merchant = receipt.merchant_raw or "Unknown merchant"
+    matched = [line for line in receipt.items if line.household_item_id is not None]
+    lines = [
+        "🧾 <b>Receipt ready to review</b>",
+        f"🏪 <b>{html(merchant)}</b>",
+        f"Found {len(receipt.items)} line items; {len(matched)} matched to household staples.",
+        "",
+    ]
+    for line in receipt.items[:8]:
+        target = line.household_item.name if line.household_item else "not matched"
+        lines.append(f"• {html(line.raw_name)} → {html(target)}")
+    if len(receipt.items) > 8:
+        lines.append(f"…and {len(receipt.items) - 8} more")
+    lines.extend(["", "Confirm, edit matches in the dashboard, or ignore this receipt."])
+    return "\n".join(lines)
 
 
 def _telegram_merchant_display(tx: ExpenseTransaction) -> str:

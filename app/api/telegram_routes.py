@@ -28,6 +28,7 @@ from app.services.entity_resolution_service import (
 from app.services.llm_ai_chat_parser import AIChatIntent, AICustomValue, LLMAIChatParser
 from app.services.llm_conversation_parser import LLMConversationIntent, LLMConversationParser
 from app.services.llm_split_parser import LLMSplitParser
+from app.services.receipt_ingestion_service import ReceiptIngestionService
 from app.services.share_calculator import (
     CustomSplitInput,
     build_custom_split_shares_by_mode,
@@ -49,6 +50,7 @@ from app.services.telegram_service import (
     build_group_choice_keyboard,
     build_group_member_select_keyboard,
     build_group_select_keyboard,
+    build_receipt_review_keyboard,
     build_review_inline_keyboard,
     build_split_confirmation_keyboard,
     build_split_flow_keyboard,
@@ -70,6 +72,7 @@ from app.services.telegram_service import (
     format_group_members_prompt,
     format_group_started_message,
     format_personal_success_message,
+    format_receipt_review_message,
     format_split_confirmation_message,
     format_split_mode_prompt,
     format_split_started_message,
@@ -118,7 +121,8 @@ async def telegram_webhook(
 
         message = update.get("message")
         if message:
-            _handle_text_message(message, db)
+            if not _handle_receipt_attachment(message, db):
+                _handle_text_message(message, db)
     return {"ok": True}
 
 
@@ -171,6 +175,12 @@ def _handle_callback_query(callback_query: dict, db: DbSession) -> dict[str, boo
     chat_id = str(chat.get("id") or "")
     user_id = str(from_user.get("id") or "")
     telegram = TelegramService()
+
+    if callback_data.startswith("receipt:"):
+        answer = _handle_receipt_callback(callback_data, chat_id, db, telegram)
+        if callback_query_id:
+            telegram.answer_callback_query(callback_query_id, answer)
+        return {"ok": True}
 
     if callback_data.startswith("gm:"):
         try:
@@ -267,6 +277,84 @@ def _handle_callback_query(callback_query: dict, db: DbSession) -> dict[str, boo
     if callback_query_id and hasattr(telegram, "answer_callback_query"):
         telegram.answer_callback_query(callback_query_id, answer)
     return {"ok": True}
+
+
+def _handle_receipt_attachment(message: dict, db: DbSession) -> bool:
+    document = message.get("document") or {}
+    photos = message.get("photo") or []
+    if document:
+        mime_type = str(document.get("mime_type") or "")
+        if mime_type not in {"application/pdf", "image/jpeg", "image/png", "image/webp"}:
+            return False
+        file_id = str(document.get("file_id") or "")
+        filename = str(document.get("file_name") or "receipt")
+    elif photos:
+        photo = max(photos, key=lambda value: int(value.get("file_size") or 0))
+        file_id = str(photo.get("file_id") or "")
+        mime_type = "image/jpeg"
+        filename = "telegram-receipt.jpg"
+    else:
+        return False
+    chat_id = str((message.get("chat") or {}).get("id") or "")
+    telegram = TelegramService()
+    try:
+        content, _ = telegram.download_file(file_id)
+        receipt = ReceiptIngestionService(db).ingest_attachment(
+            source="telegram",
+            source_external_id=str(message.get("message_id") or file_id),
+            content=content,
+            mime_type=mime_type,
+            filename=filename,
+        )
+        if receipt.parse_status == "failed":
+            telegram.send_message(
+                "I couldn't read that receipt. Try a clearer image/PDF "
+                "or review it in the dashboard.",
+                chat_id=chat_id,
+            )
+        else:
+            telegram.send_message(
+                format_receipt_review_message(receipt),
+                reply_markup=build_receipt_review_keyboard(
+                    receipt.id, get_settings().app_public_url
+                ),
+                chat_id=chat_id,
+            )
+    except ValueError:
+        telegram.send_message(
+            "I couldn't download that receipt. Please try sending it again.", chat_id=chat_id
+        )
+    return True
+
+
+def _handle_receipt_callback(
+    callback_data: str, chat_id: str, db: DbSession, telegram: TelegramService
+) -> str:
+    try:
+        _, action, raw_id = callback_data.split(":", 2)
+        receipt_id = int(raw_id)
+        service = ReceiptIngestionService(db)
+        if action == "confirm":
+            receipt = service.confirm(receipt_id)
+            count = sum(line.match_status == "matched" for line in receipt.items)
+            telegram.send_message(
+                f"Saved {count} confirmed household purchase{'s' if count != 1 else ''}.",
+                chat_id=chat_id,
+            )
+            return "Receipt confirmed."
+        if action == "ignore":
+            service.ignore(receipt_id)
+            telegram.send_message("Receipt ignored. Nothing was learned from it.", chat_id=chat_id)
+            return "Receipt ignored."
+        if action == "edit":
+            telegram.send_message(
+                "Open Household Ops → Recent receipts to change item matches before confirming.",
+                chat_id=chat_id,
+            )
+            return "Edit in the dashboard."
+    except (ValueError, TypeError):
+        return "That receipt action expired."
+    return "Unknown receipt action."
 
 
 def _route_review_callback(
@@ -692,9 +780,7 @@ def _handle_text_message(message: dict, db: DbSession) -> None:
         return
 
     normalized = " ".join(text.lower().split())
-    if normalized in {"/groups", "manage groups", "groups"} or normalized.startswith(
-        "/groups@"
-    ):
+    if normalized in {"/groups", "manage groups", "groups"} or normalized.startswith("/groups@"):
         try:
             _show_group_management_home(chat_id, user_id, telegram)
         except SplitwiseAPIError:
@@ -934,18 +1020,14 @@ def _handle_group_management_text(
         service = SplitwiseService()
         member_ids = {int(member["id"]) for member in service.get_group_members(group_id)}
         matches = [
-            friend
-            for friend in service.search_friends(text)
-            if int(friend["id"]) not in member_ids
+            friend for friend in service.search_friends(text) if int(friend["id"]) not in member_ids
         ]
         if not matches:
             telegram.send_message(
                 f"No available Splitwise friend matched <b>{html(text)}</b>. "
                 "Try another name or email.",
                 reply_markup={
-                    "inline_keyboard": [
-                        [{"text": "⬅️ Back", "callback_data": f"gm:add:{group_id}"}]
-                    ]
+                    "inline_keyboard": [[{"text": "⬅️ Back", "callback_data": f"gm:add:{group_id}"}]]
                 },
                 chat_id=chat_id,
             )
@@ -2024,9 +2106,7 @@ def _ai_confirmation_blocker(pending: PendingTelegramSplit) -> str | None:
     if pending.selected_group_id:
         member_ids = {int(member["id"]) for member in pending.group_members}
         missing = [
-            friend_id
-            for friend_id in pending.selected_friend_ids
-            if friend_id not in member_ids
+            friend_id for friend_id in pending.selected_friend_ids if friend_id not in member_ids
         ]
         if missing:
             return "One selected participant is not in the confirmed group."
@@ -3134,8 +3214,7 @@ def _prompt_ai_group_member_selection(
         format_group_members_prompt(
             pending.selected_group_name or "Selected group",
             _selected_friend_names(pending),
-            pending.transaction_title
-            or _compact_title_for_transaction(pending.transaction_id, db),
+            pending.transaction_title or _compact_title_for_transaction(pending.transaction_id, db),
         ),
         reply_markup=build_group_member_select_keyboard(
             pending.transaction_id,

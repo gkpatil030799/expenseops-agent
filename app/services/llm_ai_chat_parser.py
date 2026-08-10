@@ -135,9 +135,7 @@ def _coerce(payload: dict[str, Any]) -> AIChatIntent:
                 alias=str(item.get("alias")),
                 amount=Decimal(str(item["amount"])) if item.get("amount") is not None else None,
                 percentage=(
-                    Decimal(str(item["percentage"]))
-                    if item.get("percentage") is not None
-                    else None
+                    Decimal(str(item["percentage"])) if item.get("percentage") is not None else None
                 ),
                 shares=Decimal(str(item["shares"])) if item.get("shares") is not None else None,
             )

@@ -49,9 +49,7 @@ def classify_transaction_recommendation(
     category: str | None = None,
 ) -> TransactionClassification:
     text = " ".join(
-        part.lower()
-        for part in [merchant_name, name, category]
-        if part and part.strip()
+        part.lower() for part in [merchant_name, name, category] if part and part.strip()
     )
     amount = abs(amount_cents) / 100
 

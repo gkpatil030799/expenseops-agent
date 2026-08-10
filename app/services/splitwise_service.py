@@ -172,9 +172,7 @@ class SplitwiseService:
             if query_l in f"{friend_display_name(friend)} {friend.get('email') or ''}".lower()
         ]
 
-    def create_friend(
-        self, *, email: str, first_name: str, last_name: str = ""
-    ) -> dict[str, Any]:
+    def create_friend(self, *, email: str, first_name: str, last_name: str = "") -> dict[str, Any]:
         data = self._request(
             "POST",
             "/create_friend",

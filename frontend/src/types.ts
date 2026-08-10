@@ -188,6 +188,73 @@ export type ReplenishmentRefresh = {
   created_errand_count: number;
 };
 
+export type ReceiptLine = {
+  id: number;
+  raw_name: string;
+  normalized_name: string;
+  quantity: number | null;
+  unit: string | null;
+  line_total_cents: number | null;
+  household_item_id: number | null;
+  household_item_name: string | null;
+  acquisition_id: number | null;
+  match_status: string;
+  match_confidence: number | null;
+};
+
+export type PurchaseReceipt = {
+  id: number;
+  source: string;
+  merchant: string | null;
+  purchased_at: string | null;
+  total_cents: number | null;
+  currency: string;
+  parse_status: string;
+  parse_confidence: number | null;
+  failure_code: string | null;
+  transaction_id: number | null;
+  created_at: string;
+  items: ReceiptLine[];
+};
+
+export type ReplenishmentPrediction = {
+  id: number;
+  household_item_id: number;
+  household_item_name: string;
+  predicted_need_at: string;
+  predicted_days_remaining: number;
+  due_score: number;
+  confidence: number;
+  confidence_level: "insufficient" | "low" | "medium" | "high";
+  method: string;
+  explanation: string;
+  evidence_label: string | null;
+};
+
+export type ReplenishmentLearningSummary = {
+  this_week: ReplenishmentPrediction[];
+  learning: {
+    confirmed_acquisitions: number;
+    items_with_history: number;
+    active_model: string | null;
+  };
+  recent_receipts: PurchaseReceipt[];
+  accuracy: {
+    evaluated_predictions: number;
+    mae_days: number | null;
+    current_prediction_method: string | null;
+    training_observations: number;
+    validation_observations: number;
+    validation_method: string | null;
+    baseline_mae_days: number | null;
+    active_model_mae_days: number | null;
+    improvement_pct: number | null;
+    confidence_level: "insufficient" | "low" | "medium" | "high";
+    latest_model_status: string | null;
+    decision_reason: string | null;
+  };
+};
+
 export type ErrandPlanStop = {
   id: number;
   stop_order: number;
@@ -244,6 +311,29 @@ export type PlanningLocation = {
   address?: string;
   latitude?: number;
   longitude?: number;
+};
+
+export type PromotionOffer = {
+  id: number;
+  merchant: string;
+  category: string;
+  headline: string;
+  description: string | null;
+  offer_type: string;
+  percent_off: number | null;
+  amount_off: number | null;
+  minimum_spend: number | null;
+  promo_code: string | null;
+  expires_at: string | null;
+  expiry_precision: string;
+  destination_url: string | null;
+  terms_summary: string | null;
+  trust_status: string;
+  status: string;
+  score: number;
+  saved: boolean;
+  why: string[];
+  source_count: number;
 };
 
 export type WhileOutPlan = {
