@@ -10,7 +10,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.config import Settings, get_settings
-from app.models import PurchaseReceipt
+from app.models import GmailSyncCheckpoint, PurchaseReceipt, utc_now
 from app.services.gmail_client_service import GmailClient
 from app.services.receipt_ingestion_service import ReceiptIngestionService
 
@@ -86,12 +86,44 @@ class GmailReceiptService:
                 auto_confirm_high_confidence=True,
             )
             ingested.append(receipt)
+        checkpoint = self.db.scalar(
+            select(GmailSyncCheckpoint).where(
+                GmailSyncCheckpoint.account_key == self._checkpoint_key
+            )
+        )
+        if checkpoint is None:
+            checkpoint = GmailSyncCheckpoint(account_key=self._checkpoint_key)
+            self.db.add(checkpoint)
+        checkpoint.updated_at = utc_now()
+        self.db.commit()
         return GmailSyncResult(
             scanned=len(messages),
             ingested=len(ingested),
             skipped=skipped,
             receipts=ingested,
         )
+
+    def status(self) -> dict:
+        checkpoint = self.db.scalar(
+            select(GmailSyncCheckpoint).where(
+                GmailSyncCheckpoint.account_key == self._checkpoint_key
+            )
+        )
+        latest_receipt_at = self.db.scalar(
+            select(PurchaseReceipt.created_at)
+            .where(PurchaseReceipt.source == "gmail")
+            .order_by(PurchaseReceipt.created_at.desc())
+            .limit(1)
+        )
+        return {
+            "configured": self.configured,
+            "last_successful_sync_at": checkpoint.updated_at if checkpoint else None,
+            "latest_receipt_at": latest_receipt_at,
+        }
+
+    @property
+    def _checkpoint_key(self) -> str:
+        return f"{self.settings.gmail_user_id}:receipts"
 
     def _access_token(self) -> str:
         return self.gmail.access_token()

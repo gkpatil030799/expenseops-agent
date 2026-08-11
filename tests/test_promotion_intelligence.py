@@ -7,7 +7,7 @@ import pytest
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import sessionmaker
 
-from app.api.promotion_routes import list_promotions
+from app.api.promotion_routes import dismiss, list_promotions, restore
 from app.config import Settings
 from app.db import Base
 from app.models import (
@@ -363,6 +363,19 @@ def test_main_feed_enforces_minimum_score_but_keeps_saved_deals(db):
     assert list_promotions(db, status="active", limit=50) == []
     offer.saved = True
     db.commit()
+    assert [value["id"] for value in list_promotions(db, status="active", limit=50)] == [offer.id]
+
+
+def test_dismissed_offer_can_be_restored_to_active_feed(db):
+    service = GmailPromotionIngestionService(db, config(promotions_min_score=0))
+    service.process_message(message("restore", "20% off laundry", "Today only"))
+    offer = db.query(PromotionOffer).one()
+
+    dismiss(offer.id, db)
+    assert offer.status == "dismissed"
+
+    restored = restore(offer.id, db)
+    assert restored["status"] == "active"
     assert [value["id"] for value in list_promotions(db, status="active", limit=50)] == [offer.id]
 
 

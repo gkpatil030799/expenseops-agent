@@ -102,6 +102,16 @@ def dismiss(offer_id: int, db: DbSession) -> dict:
     return _offer(offer)
 
 
+@router.post("/{offer_id}/restore")
+def restore(offer_id: int, db: DbSession) -> dict:
+    offer = _get(db, offer_id)
+    offer.status = "active"
+    db.add(PromotionFeedback(promotion_offer_id=offer.id, feedback_type="restored"))
+    db.commit()
+    PromotionRankingService(db).rescore_all()
+    return _offer(offer)
+
+
 @router.post("/{offer_id}/feedback")
 def feedback(offer_id: int, payload: PromotionFeedbackRequest, db: DbSession) -> dict:
     offer = _get(db, offer_id)

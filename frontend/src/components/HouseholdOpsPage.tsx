@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import {
   AlertCircle,
+  Archive,
   CalendarClock,
   Check,
   CheckCircle2,
@@ -11,13 +12,13 @@ import {
   House,
   ListChecks,
   LocateFixed,
-  Map,
   MapPin,
   PackageCheck,
   Pencil,
   Plus,
   RefreshCw,
   ReceiptText,
+  RotateCcw,
   Route,
   ShoppingBasket,
   Trash2,
@@ -86,6 +87,14 @@ type ReceiptItemDraft = {
   replenishment_mode: HouseholdItem["replenishment_mode"];
 };
 
+type HouseholdView = "today" | "errands" | "receipts" | "staples" | "history";
+
+type GmailReceiptSyncStatus = {
+  configured: boolean;
+  last_successful_sync_at: string | null;
+  latest_receipt_at: string | null;
+};
+
 const emptyErrandForm: ErrandForm = {
   title: "",
   errand_type: "other",
@@ -125,9 +134,12 @@ const controlClass =
   "h-10 w-full rounded-lg border border-slate-300 bg-white px-3 text-sm text-slate-800 outline-none transition hover:border-slate-400 focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/20";
 
 export function HouseholdOpsPage() {
+  const [householdView, setHouseholdView] = useState<HouseholdView>("today");
   const [errands, setErrands] = useState<Errand[]>([]);
   const [items, setItems] = useState<HouseholdItem[]>([]);
   const [plan, setPlan] = useState<ErrandPlan | null>(null);
+  const [receipts, setReceipts] = useState<PurchaseReceipt[]>([]);
+  const [gmailSyncStatus, setGmailSyncStatus] = useState<GmailReceiptSyncStatus | null>(null);
   const [suggestions, setSuggestions] = useState<ReplenishmentSuggestion[]>([]);
   const [busy, setBusy] = useState<string | null>("initial");
   const [error, setError] = useState<string | null>(null);
@@ -138,7 +150,6 @@ export function HouseholdOpsPage() {
   const [editingItemId, setEditingItemId] = useState<number | null>(null);
   const [errandForm, setErrandForm] = useState<ErrandForm>(emptyErrandForm);
   const [itemForm, setItemForm] = useState<ItemForm>(emptyItemForm);
-  const [baseLocation, setBaseLocation] = useState("");
   const [locations, setLocations] = useState<SavedLocation[]>([]);
   const [whileOut, setWhileOut] = useState<WhileOutPlan | null>(null);
   const [originChoice, setOriginChoice] = useState("manual");
@@ -156,10 +167,24 @@ export function HouseholdOpsPage() {
   const [rememberPlace, setRememberPlace] = useState(true);
   const [learning, setLearning] = useState<ReplenishmentLearningSummary | null>(null);
   const [receiptItemDraft, setReceiptItemDraft] = useState<ReceiptItemDraft | null>(null);
+  const [reviewingReceiptId, setReviewingReceiptId] = useState<number | null>(null);
+  const [expandedHistoryReceiptId, setExpandedHistoryReceiptId] = useState<number | null>(null);
 
   const activeErrands = useMemo(
     () => errands.filter((errand) => errand.status === "open" || errand.status === "planned"),
     [errands],
+  );
+  const errandHistory = useMemo(
+    () => errands.filter((errand) => errand.status === "completed" || errand.status === "skipped"),
+    [errands],
+  );
+  const receiptQueue = useMemo(
+    () => receipts.filter((receipt) => receipt.parse_status === "needs_review" || receipt.parse_status === "failed"),
+    [receipts],
+  );
+  const receiptHistory = useMemo(
+    () => receipts.filter((receipt) => receipt.parse_status === "confirmed" || receipt.parse_status === "ignored"),
+    [receipts],
   );
   const dueItems = useMemo(() => items.filter((item) => item.should_surface), [items]);
   const enabledItems = useMemo(() => items.filter((item) => item.enabled), [items]);
@@ -172,24 +197,27 @@ export function HouseholdOpsPage() {
     setBusy("refresh");
     setError(null);
     try {
-      const [loadedErrands, loadedItems, latestPlan, loadedLocations, loadedLearning] = await Promise.all([
+      const [loadedErrands, loadedItems, latestPlan, loadedLocations, loadedLearning, loadedReceipts, loadedGmailStatus] = await Promise.all([
         api<Errand[]>("/api/household/errands"),
         api<HouseholdItem[]>("/api/household/items"),
         api<ErrandPlan | null>("/api/household/errand-plans/latest"),
         api<SavedLocation[]>("/api/household/locations"),
         api<ReplenishmentLearningSummary>("/api/replenishment/summary"),
+        api<PurchaseReceipt[]>("/api/replenishment/receipts?limit=50"),
+        api<GmailReceiptSyncStatus>("/api/replenishment/gmail/status"),
       ]);
       setErrands(loadedErrands);
       setItems(loadedItems);
       setPlan(latestPlan);
       setLocations(loadedLocations);
       setLearning(loadedLearning);
+      setReceipts(loadedReceipts);
+      setGmailSyncStatus(loadedGmailStatus);
       setOriginChoice((current) => {
         if (current !== "manual" || manualOrigin) return current;
         const preferred = loadedLocations.find((location) => location.location_type === "home");
         return preferred ? `saved:${preferred.id}` : current;
       });
-      if (latestPlan?.base_location) setBaseLocation(latestPlan.base_location);
     } catch (caught) {
       setError(errorMessage(caught));
     } finally {
@@ -417,6 +445,42 @@ export function HouseholdOpsPage() {
     await run(`receipt-${action}-${receipt.id}`, async () => {
       await api(`/api/replenishment/receipts/${receipt.id}/${action}`, { method: "POST" });
       setNotice(action === "confirm" ? "Receipt purchases added to learning history." : "Receipt ignored.");
+      setReviewingReceiptId(null);
+      await loadHouseholdOps();
+    });
+  }
+
+  async function repeatErrand(errand: Errand) {
+    await run(`repeat-errand-${errand.id}`, async () => {
+      const created = await api<Errand>("/api/household/errands", {
+        method: "POST",
+        body: JSON.stringify({
+          title: errand.title,
+          errand_type: errand.errand_type,
+          place_name: errand.resolved_place_name || errand.place_name,
+          place_address: errand.resolved_place_address || errand.place_address,
+          estimated_duration_minutes: errand.estimated_duration_minutes,
+          priority: errand.priority,
+          notes: errand.notes,
+          included_in_next_plan: true,
+        }),
+      });
+      if (errand.place_resolution_status === "resolved" && errand.resolved_place_name && errand.resolved_place_address) {
+        await api<Errand>(`/api/household/errands/${created.id}/resolve-place`, {
+          method: "POST",
+          body: JSON.stringify({
+            canonical_name: errand.resolved_place_name,
+            full_address: errand.resolved_place_address,
+            latitude: errand.resolved_latitude,
+            longitude: errand.resolved_longitude,
+            provider_place_id: errand.resolved_provider_place_id,
+            open_now: errand.resolved_open_now,
+            opening_hours: errand.resolved_opening_hours,
+            remember_preference: false,
+          }),
+        });
+      }
+      setNotice(`${errand.title} was added back to your active errands.`);
       await loadHouseholdOps();
     });
   }
@@ -447,23 +511,6 @@ export function HouseholdOpsPage() {
           : `Gmail receipt sync scanned ${result.scanned} messages. No new receipts were found.`,
       );
       await loadHouseholdOps();
-    });
-  }
-
-  async function createPlan() {
-    await run("plan", async () => {
-      const created = await api<ErrandPlan>("/api/household/errand-plans", {
-        method: "POST",
-        body: JSON.stringify({ base_location: nullable(baseLocation) }),
-      });
-      setPlan(created);
-      setNotice(
-        created.routing_is_optimized
-          ? "Route plan created."
-          : "Trip grouped with deterministic ordering; route optimization is not configured.",
-      );
-      const loadedErrands = await api<Errand[]>("/api/household/errands");
-      setErrands(loadedErrands);
     });
   }
 
@@ -720,7 +767,19 @@ export function HouseholdOpsPage() {
         </div>
       ) : null}
 
-      <Card>
+      <HouseholdNavigation active={householdView} onChange={setHouseholdView} receiptCount={receiptQueue.length} />
+
+      {householdView === "today" ? (
+        <TodayOverview
+          receiptCount={receiptQueue.length}
+          unresolvedErrandCount={activeErrands.filter((errand) => errand.place_resolution_status !== "resolved").length}
+          activeErrandCount={activeErrands.length}
+          dueItemCount={dueItems.length}
+          onChange={setHouseholdView}
+        />
+      ) : null}
+
+      {householdView === "receipts" ? <Card>
         <CardHeader className="flex-col items-start justify-between gap-4 space-y-0 sm:flex-row">
           <div>
             <div className="mb-1 inline-flex items-center gap-2 text-xs font-semibold uppercase text-slate-500">
@@ -739,6 +798,7 @@ export function HouseholdOpsPage() {
           </div>
         </CardHeader>
         <CardContent className="space-y-5">
+          <GmailSyncStatus status={gmailSyncStatus} busy={busy === "gmail-receipts"} />
           {busy === "initial" && !learning ? <LoadingRows /> : (
             <>
               <section>
@@ -772,49 +832,22 @@ export function HouseholdOpsPage() {
               </section>
 
               <section>
-                <div className="mb-3 inline-flex items-center gap-2 text-sm font-semibold text-slate-900">
-                  <ReceiptText className="h-4 w-4 text-slate-500" /> Recent receipts
-                </div>
-                {learning?.recent_receipts.length ? (
-                  <div className="space-y-3">
-                    {learning.recent_receipts.map((receipt) => (
-                      <div key={receipt.id} className="rounded-xl border border-slate-200 p-4">
-                        <div className="flex flex-wrap items-start justify-between gap-3">
-                          <div><p className="font-semibold text-slate-950">{receipt.merchant || "Unknown merchant"}</p><p className="text-xs text-slate-600">{receipt.source} · {new Date(receipt.purchased_at || receipt.created_at).toLocaleDateString()} · {receipt.parse_status.replace(/_/g, " ")}</p></div>
-                          {receipt.parse_status === "needs_review" ? <div className="flex gap-2"><Button size="sm" onClick={() => receiptAction(receipt, "confirm")} disabled={busy !== null}><Check className="h-3.5 w-3.5" />Confirm</Button><Button size="sm" variant="ghost" onClick={() => receiptAction(receipt, "ignore")} disabled={busy !== null}>Ignore</Button></div> : <Badge variant="secondary">{receipt.parse_status}</Badge>}
-                        </div>
-                        {receipt.items.length ? <div className="mt-3 grid gap-2 sm:grid-cols-2">{receipt.items.map((line) => {
-                          const creatingThisItem = receiptItemDraft?.lineId === line.id;
-                          return (
-                            <div key={line.id} className={`grid gap-1 rounded-lg ${creatingThisItem ? "border border-indigo-200 bg-indigo-50/50 p-3" : ""}`}>
-                              <label className="grid gap-1 text-xs font-medium text-slate-700">
-                                <span className="truncate">{line.raw_name}</span>
-                                <select className={controlClass} value={creatingThisItem ? "create" : line.match_status === "rejected" ? "reject" : line.household_item_id?.toString() || ""} onChange={(event) => updateReceiptMatch(receipt, line, event.target.value)} disabled={["ignored", "failed"].includes(receipt.parse_status) || busy !== null} aria-label={`Match ${line.raw_name}`}>
-                                  <option value="">Unmatched — decide later</option>
-                                  {items.map((item) => <option key={item.id} value={item.id}>Match to: {item.name}</option>)}
-                                  <option value="create">＋ Track as a new household item…</option>
-                                  <option value="reject">Not a household item</option>
-                                </select>
-                              </label>
-                              {creatingThisItem && receiptItemDraft ? (
-                                <div className="mt-2 grid gap-2">
-                                  <p className="text-xs leading-5 text-slate-600">Give this staple a reusable name and a starting cadence. Repeated confirmed purchases will refine the estimate.</p>
-                                  <Input value={receiptItemDraft.name} onChange={(event) => setReceiptItemDraft((current) => current ? { ...current, name: event.target.value } : current)} placeholder="Household item name" aria-label={`New household item name for ${line.raw_name}`} />
-                                  <div className="grid gap-2 sm:grid-cols-2">
-                                    <label className="grid gap-1 text-xs font-medium text-slate-700">Starting cadence (days)<Input type="number" min="1" max="3650" value={receiptItemDraft.cadence_days} onChange={(event) => setReceiptItemDraft((current) => current ? { ...current, cadence_days: event.target.value } : current)} /></label>
-                                    <label className="grid gap-1 text-xs font-medium text-slate-700">How to replenish<select className={controlClass} value={receiptItemDraft.replenishment_mode} onChange={(event) => setReceiptItemDraft((current) => current ? { ...current, replenishment_mode: event.target.value as HouseholdItem["replenishment_mode"] } : current)}><option value="either">Errand or delivery</option><option value="errand">Errand</option><option value="delivery">Delivery</option></select></label>
-                                  </div>
-                                  <div className="flex justify-end gap-2"><Button size="sm" variant="outline" onClick={() => setReceiptItemDraft(null)}>Cancel</Button><Button size="sm" onClick={trackReceiptItem} disabled={!receiptItemDraft.name.trim() || !Number(receiptItemDraft.cadence_days) || busy !== null}><Plus className="h-3.5 w-3.5" />Create & match</Button></div>
-                                </div>
-                              ) : null}
-                              {line.acquisition_id ? <button type="button" className="justify-self-start rounded text-xs font-semibold text-rose-700 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500" onClick={() => undoReceiptAcquisition(receipt, line.acquisition_id!)}>Undo learned purchase</button> : null}
-                            </div>
-                          );
-                        })}</div> : null}
-                      </div>
-                    ))}
+                <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
+                  <div>
+                    <div className="inline-flex items-center gap-2 text-sm font-semibold text-slate-900">
+                      <ReceiptText className="h-4 w-4 text-slate-500" /> Receipts needing attention
+                    </div>
+                    <p className="mt-1 text-xs text-slate-600">Completed receipts leave this queue automatically.</p>
                   </div>
-                ) : <EmptyPanel icon={ReceiptText} title="No receipts yet" description="Send a receipt photo or PDF to the Telegram bot, then confirm the matches here." compact />}
+                  <Badge variant="secondary">{receiptQueue.length} to review</Badge>
+                </div>
+                {receiptQueue.length ? <div className="space-y-3">
+                  <div className="divide-y divide-slate-100 overflow-hidden rounded-xl border border-slate-200">
+                    {receiptQueue.map((receipt) => <ReceiptQueueRow key={receipt.id} receipt={receipt} selected={reviewingReceiptId === receipt.id} busy={busy !== null} onReview={() => setReviewingReceiptId(receipt.id)} onIgnore={() => receiptAction(receipt, "ignore")} />)}
+                  </div>
+                  {receiptQueue.find((receipt) => receipt.id === reviewingReceiptId) ? <ReceiptReviewCard receipt={receiptQueue.find((receipt) => receipt.id === reviewingReceiptId)!} items={items} draft={receiptItemDraft} busy={busy !== null} onDraft={setReceiptItemDraft} onMatch={updateReceiptMatch} onTrack={trackReceiptItem} onUndo={undoReceiptAcquisition} onConfirm={(receipt) => receiptAction(receipt, "confirm")} onIgnore={(receipt) => receiptAction(receipt, "ignore")} onClose={() => setReviewingReceiptId(null)} /> : null}
+                </div> : <EmptyPanel icon={CheckCircle2} title="Receipt queue is clear" description="New Gmail or Telegram receipts will appear here when they need a decision." compact />}
+
               </section>
 
               <details className="rounded-xl border border-slate-200 px-4 py-3">
@@ -836,9 +869,9 @@ export function HouseholdOpsPage() {
             </>
           )}
         </CardContent>
-      </Card>
+      </Card> : null}
 
-      <WhileOutPanel
+      {householdView === "today" || householdView === "errands" ? <WhileOutPanel
         locations={locations}
         originChoice={originChoice}
         manualOrigin={manualOrigin}
@@ -866,9 +899,9 @@ export function HouseholdOpsPage() {
         onCloseLocationForm={closeLocationForm}
         onEditLocation={editLocation}
         onDeleteLocation={deleteLocation}
-      />
+      /> : null}
 
-      <div className="grid gap-5 xl:grid-cols-[minmax(0,1.15fr)_minmax(360px,0.85fr)]">
+      {householdView === "errands" ? <div className="grid gap-5 xl:grid-cols-[minmax(0,1.15fr)_minmax(360px,0.85fr)]">
         <Card>
           <CardHeader className="flex-row items-start justify-between gap-4 space-y-0">
             <div>
@@ -934,23 +967,19 @@ export function HouseholdOpsPage() {
             <div className="mb-1 inline-flex items-center gap-2 text-xs font-semibold uppercase text-slate-500">
               <Route className="h-4 w-4" /> Next trip
             </div>
-            <CardTitle>Plan my errands</CardTitle>
-            <CardDescription>Same-place errands become one stop. Fallback order favors due dates and priority.</CardDescription>
+            <CardTitle>Your latest route</CardTitle>
+            <CardDescription>The route builder above is now the single place to choose endpoints, available time, and useful stops.</CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
-            <label className="grid gap-1.5 text-xs font-medium text-slate-700">
-              Start location <span className="font-normal text-slate-500">(optional)</span>
-              <Input value={baseLocation} onChange={(event) => setBaseLocation(event.target.value)} placeholder="Enter an address only when you want it in the route" />
-            </label>
-            <Button className="w-full" onClick={createPlan} disabled={busy !== null || !activeErrands.some((item) => item.included_in_next_plan)}>
-              <Map className="h-4 w-4" /> {busy === "plan" ? "Planning…" : "Plan errands"}
-            </Button>
             {plan ? <PlanSummary plan={plan} /> : <EmptyPanel icon={MapPin} title="No trip planned yet" description="Include errands in the next trip, then create a grouped stop plan." compact />}
+            <Button variant="outline" className="w-full" onClick={() => document.getElementById("trip-builder")?.scrollIntoView({ behavior: "smooth", block: "start" })}>
+              <Route className="h-4 w-4" /> {plan ? "Change stops or re-optimize" : "Build a route"}
+            </Button>
           </CardContent>
         </Card>
-      </div>
+      </div> : null}
 
-      <Card>
+      {householdView === "staples" ? <Card>
         <CardHeader className="flex-row items-start justify-between gap-4 space-y-0">
           <div>
             <div className="mb-1 inline-flex items-center gap-2 text-xs font-semibold uppercase text-slate-500">
@@ -1022,9 +1051,56 @@ export function HouseholdOpsPage() {
             )}
           </div>
         </CardContent>
-      </Card>
+      </Card> : null}
+
+      {householdView === "history" ? (
+        <HouseholdHistory
+          receipts={receiptHistory}
+          errands={errandHistory}
+          items={items}
+          draft={receiptItemDraft}
+          expandedReceiptId={expandedHistoryReceiptId}
+          busy={busy !== null}
+          onToggleReceipt={(receiptId) => setExpandedHistoryReceiptId((current) => current === receiptId ? null : receiptId)}
+          onDraft={setReceiptItemDraft}
+          onMatch={updateReceiptMatch}
+          onTrack={trackReceiptItem}
+          onUndoReceipt={undoReceiptAcquisition}
+          onRepeatErrand={repeatErrand}
+          onDeleteErrand={(errand) => mutateErrand(errand, "delete")}
+        />
+      ) : null}
     </div>
   );
+}
+
+function HouseholdNavigation({ active, onChange, receiptCount }: { active: HouseholdView; onChange: (value: HouseholdView) => void; receiptCount: number }) {
+  const views: Array<{ value: HouseholdView; label: string }> = [
+    { value: "today", label: "Today" },
+    { value: "errands", label: "Errands" },
+    { value: "receipts", label: "Receipts" },
+    { value: "staples", label: "Staples" },
+    { value: "history", label: "History" },
+  ];
+  return <nav className="flex gap-1 overflow-x-auto rounded-xl border border-slate-200 bg-white p-1 shadow-sm" aria-label="Household Ops sections">{views.map((view) => <button key={view.value} type="button" onClick={() => onChange(view.value)} aria-current={active === view.value ? "page" : undefined} className={`whitespace-nowrap rounded-lg px-4 py-2 text-sm font-medium transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500 ${active === view.value ? "bg-indigo-600 text-white shadow-sm" : "text-slate-600 hover:bg-slate-50 hover:text-slate-950"}`}>{view.label}{view.value === "receipts" && receiptCount ? <span className={`ml-2 rounded-full px-1.5 py-0.5 text-[11px] ${active === view.value ? "bg-white/20 text-white" : "bg-amber-100 text-amber-800"}`}>{receiptCount}</span> : null}</button>)}</nav>;
+}
+
+function TodayOverview({ receiptCount, unresolvedErrandCount, activeErrandCount, dueItemCount, onChange }: { receiptCount: number; unresolvedErrandCount: number; activeErrandCount: number; dueItemCount: number; onChange: (value: HouseholdView) => void }) {
+  const cards: Array<{ label: string; value: number; detail: string; view: HouseholdView; icon: typeof House; attention: boolean }> = [
+    { label: "Receipts to review", value: receiptCount, detail: receiptCount ? "Classify purchases for learning" : "Queue is clear", view: "receipts", icon: ReceiptText, attention: receiptCount > 0 },
+    { label: "Errands needing locations", value: unresolvedErrandCount, detail: unresolvedErrandCount ? "Resolve before routing" : "All active stops are concrete", view: "errands", icon: MapPin, attention: unresolvedErrandCount > 0 },
+    { label: "Active errands", value: activeErrandCount, detail: activeErrandCount ? "Ready to combine into a trip" : "Nothing waiting", view: "errands", icon: ListChecks, attention: false },
+    { label: "Staples probably due", value: dueItemCount, detail: dueItemCount ? "Review replenishment suggestions" : "Nothing surfaced today", view: "staples", icon: ShoppingBasket, attention: dueItemCount > 0 },
+  ];
+  return <section><div className="mb-3"><h2 className="text-xl font-semibold text-slate-950">What needs attention</h2><p className="mt-1 text-sm text-slate-600">Start with decisions that unblock today’s errands and learning.</p></div><div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">{cards.map(({ label, value, detail, view, icon: Icon, attention }) => <button key={label} type="button" onClick={() => onChange(view)} className="rounded-xl border border-slate-200 bg-white p-4 text-left shadow-sm transition hover:border-indigo-200 hover:shadow-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500"><span className="flex items-start justify-between gap-3"><span><span className="block text-xs font-semibold uppercase tracking-wide text-slate-600">{label}</span><span className="mt-2 block text-3xl font-semibold text-slate-950">{value}</span></span><span className={`flex h-9 w-9 items-center justify-center rounded-xl ${attention ? "bg-amber-50 text-amber-700" : "bg-slate-100 text-slate-600"}`}><Icon className="h-4 w-4" /></span></span><span className="mt-2 block text-xs text-slate-600">{detail}</span></button>)}</div></section>;
+}
+
+function GmailSyncStatus({ status, busy }: { status: GmailReceiptSyncStatus | null; busy: boolean }) {
+  return <div className="flex flex-col gap-3 rounded-xl border border-slate-200 bg-slate-50/70 p-4 sm:flex-row sm:items-center sm:justify-between"><div className="flex items-start gap-3"><span className={`mt-1 h-2.5 w-2.5 shrink-0 rounded-full ring-4 ${status?.configured ? "bg-emerald-500 ring-emerald-100" : "bg-slate-400 ring-slate-200"}`} /><div><p className="text-sm font-semibold text-slate-900">{status?.configured ? "Automatic Gmail receipt import is active" : "Gmail receipt import is not configured"}</p><p className="mt-1 text-xs text-slate-600">{busy ? "Sync in progress…" : status?.last_successful_sync_at ? `Last successful sync ${formatRelativeTime(status.last_successful_sync_at)}.` : status?.configured ? "Waiting for the first successful scheduled sync." : "Add the Gmail credentials and enable receipt sync to import automatically."}</p></div></div>{status?.latest_receipt_at ? <p className="text-xs text-slate-600">Latest Gmail receipt {formatRelativeTime(status.latest_receipt_at)}</p> : null}</div>;
+}
+
+function HouseholdHistory({ receipts, errands, items, draft, expandedReceiptId, busy, onToggleReceipt, onDraft, onMatch, onTrack, onUndoReceipt, onRepeatErrand, onDeleteErrand }: { receipts: PurchaseReceipt[]; errands: Errand[]; items: HouseholdItem[]; draft: ReceiptItemDraft | null; expandedReceiptId: number | null; busy: boolean; onToggleReceipt: (receiptId: number) => void; onDraft: React.Dispatch<React.SetStateAction<ReceiptItemDraft | null>>; onMatch: (receipt: PurchaseReceipt, line: PurchaseReceipt["items"][number], value: string) => void; onTrack: () => void; onUndoReceipt: (receipt: PurchaseReceipt, acquisitionId: number) => void; onRepeatErrand: (errand: Errand) => void; onDeleteErrand: (errand: Errand) => void }) {
+  return <div className="grid gap-5 xl:grid-cols-2"><Card><CardHeader><div className="mb-1 inline-flex items-center gap-2 text-xs font-semibold uppercase text-slate-500"><ReceiptText className="h-4 w-4" />Receipts</div><CardTitle>Receipt history</CardTitle><CardDescription>Completed and ignored receipts stay available without occupying the review queue.</CardDescription></CardHeader><CardContent>{receipts.length ? <div className="divide-y divide-slate-200 overflow-hidden rounded-lg border border-slate-200 bg-white">{receipts.map((receipt) => <ReceiptHistoryRow key={receipt.id} receipt={receipt} expanded={expandedReceiptId === receipt.id} busy={busy} items={items} draft={draft} onToggle={() => onToggleReceipt(receipt.id)} onDraft={onDraft} onMatch={onMatch} onTrack={onTrack} onUndo={onUndoReceipt} />)}</div> : <EmptyPanel icon={ReceiptText} title="No completed receipts yet" description="Confirmed and ignored receipts will appear here." compact />}</CardContent></Card><Card><CardHeader><div className="mb-1 inline-flex items-center gap-2 text-xs font-semibold uppercase text-slate-500"><ListChecks className="h-4 w-4" />Errands</div><CardTitle>Errand history</CardTitle><CardDescription>Repeat a past errand without rebuilding its destination.</CardDescription></CardHeader><CardContent>{errands.length ? <div className="divide-y divide-slate-200 overflow-hidden rounded-lg border border-slate-200 bg-white">{errands.map((errand) => <ErrandHistoryRow key={errand.id} errand={errand} busy={busy} onRepeat={() => onRepeatErrand(errand)} onDelete={() => onDeleteErrand(errand)} />)}</div> : <EmptyPanel icon={ListChecks} title="No completed errands yet" description="Completed and skipped errands will appear here." compact />}</CardContent></Card></div>;
 }
 
 function WhileOutPanel({
@@ -1085,7 +1161,7 @@ function WhileOutPanel({
   onDeleteLocation: (location: SavedLocation) => void;
 }) {
   return (
-    <Card className="overflow-hidden border-indigo-200">
+    <Card id="trip-builder" className="scroll-mt-4 overflow-hidden border-indigo-200">
       <CardHeader className="border-b border-indigo-100 bg-indigo-50/50">
         <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
           <div>
@@ -1275,6 +1351,67 @@ function ErrandEditor({ form, setForm, editing, busy, onSave, onCancel }: { form
   );
 }
 
+function ReceiptQueueRow({ receipt, selected, busy, onReview, onIgnore }: { receipt: PurchaseReceipt; selected: boolean; busy: boolean; onReview: () => void; onIgnore: () => void }) {
+  const unresolved = receipt.items.filter((line) => !line.household_item_id && line.match_status !== "rejected").length;
+  return (
+    <div className={`flex flex-col gap-3 p-4 transition sm:flex-row sm:items-center sm:justify-between ${selected ? "bg-indigo-50/60" : "bg-white hover:bg-slate-50/70"}`}>
+      <div className="min-w-0">
+        <div className="flex flex-wrap items-center gap-2">
+          <p className="font-semibold text-slate-950">{receipt.merchant || "Unknown merchant"}</p>
+          <Badge className={receipt.parse_status === "failed" ? "bg-rose-50 text-rose-700" : "bg-amber-50 text-amber-700"}>{receipt.parse_status === "failed" ? "Processing failed" : "Needs review"}</Badge>
+        </div>
+        <p className="mt-1 text-xs text-slate-600">{receiptDate(receipt)} · {receipt.items.length} items{receipt.parse_status === "needs_review" ? ` · ${unresolved} still unmatched` : ""}{receiptTotal(receipt)}</p>
+        {receipt.parse_status === "failed" ? <p className="mt-1 text-xs text-rose-700">The receipt could not be parsed. You can ignore it and upload a clearer copy.</p> : null}
+      </div>
+      <div className="flex shrink-0 gap-2">
+        {receipt.parse_status === "needs_review" ? <Button size="sm" variant={selected ? "secondary" : "outline"} onClick={onReview} disabled={busy}>{selected ? "Reviewing" : "Review receipt"}</Button> : null}
+        <Button size="sm" variant="ghost" onClick={onIgnore} disabled={busy}>Ignore</Button>
+      </div>
+    </div>
+  );
+}
+
+function ReceiptReviewCard({ receipt, items, draft, busy, onDraft, onMatch, onTrack, onUndo, onConfirm, onIgnore, onClose }: { receipt: PurchaseReceipt; items: HouseholdItem[]; draft: ReceiptItemDraft | null; busy: boolean; onDraft: React.Dispatch<React.SetStateAction<ReceiptItemDraft | null>>; onMatch: (receipt: PurchaseReceipt, line: PurchaseReceipt["items"][number], value: string) => void; onTrack: () => void; onUndo: (receipt: PurchaseReceipt, acquisitionId: number) => void; onConfirm: (receipt: PurchaseReceipt) => void; onIgnore: (receipt: PurchaseReceipt) => void; onClose: () => void }) {
+  const decided = receipt.items.filter((line) => line.household_item_id || line.match_status === "rejected").length;
+  return (
+    <div className="rounded-xl border border-indigo-200 bg-white shadow-sm">
+      <div className="flex flex-wrap items-start justify-between gap-3 border-b border-indigo-100 bg-indigo-50/50 p-4">
+        <div><p className="text-xs font-semibold uppercase tracking-wide text-indigo-700">Reviewing receipt</p><h3 className="mt-1 font-semibold text-slate-950">{receipt.merchant || "Unknown merchant"}</h3><p className="mt-1 text-xs text-slate-600">{decided} of {receipt.items.length} items classified{receiptTotal(receipt)}</p></div>
+        <IconButton label="Close receipt review" onClick={onClose}><X className="h-4 w-4" /></IconButton>
+      </div>
+      <div className="p-4"><ReceiptItemsEditor receipt={receipt} items={items} draft={draft} busy={busy} onDraft={onDraft} onMatch={onMatch} onTrack={onTrack} onUndo={onUndo} /></div>
+      <div className="sticky bottom-0 flex flex-wrap justify-end gap-2 border-t border-slate-200 bg-white/95 p-4 backdrop-blur">
+        <Button variant="ghost" onClick={() => onIgnore(receipt)} disabled={busy}>Ignore receipt</Button>
+        <Button onClick={() => onConfirm(receipt)} disabled={busy}><Check className="h-4 w-4" />Confirm current matches</Button>
+      </div>
+    </div>
+  );
+}
+
+function ReceiptHistoryRow({ receipt, expanded, busy, items, draft, onToggle, onDraft, onMatch, onTrack, onUndo }: { receipt: PurchaseReceipt; expanded: boolean; busy: boolean; items: HouseholdItem[]; draft: ReceiptItemDraft | null; onToggle: () => void; onDraft: React.Dispatch<React.SetStateAction<ReceiptItemDraft | null>>; onMatch: (receipt: PurchaseReceipt, line: PurchaseReceipt["items"][number], value: string) => void; onTrack: () => void; onUndo: (receipt: PurchaseReceipt, acquisitionId: number) => void }) {
+  return (
+    <div>
+      <button type="button" onClick={onToggle} aria-expanded={expanded} className="flex w-full items-center justify-between gap-4 p-3 text-left transition hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-indigo-500">
+        <span className="min-w-0"><span className="block truncate text-sm font-semibold text-slate-900">{receipt.merchant || "Unknown merchant"}</span><span className="mt-0.5 block text-xs text-slate-600">{receiptDate(receipt)} · {receipt.items.length} items{receiptTotal(receipt)}</span></span>
+        <span className="flex shrink-0 items-center gap-2"><Badge variant="secondary">{receipt.parse_status}</Badge><span className="text-xs font-semibold text-indigo-700">{expanded ? "Hide" : "Details"}</span></span>
+      </button>
+      {expanded ? <div className="border-t border-slate-100 bg-slate-50/40 p-4"><p className="mb-3 text-xs text-slate-600">Matches remain correctable. Changes to confirmed purchases update the learning history.</p><ReceiptItemsEditor receipt={receipt} items={items} draft={draft} busy={busy} onDraft={onDraft} onMatch={onMatch} onTrack={onTrack} onUndo={onUndo} /></div> : null}
+    </div>
+  );
+}
+
+function ReceiptItemsEditor({ receipt, items, draft, busy, onDraft, onMatch, onTrack, onUndo }: { receipt: PurchaseReceipt; items: HouseholdItem[]; draft: ReceiptItemDraft | null; busy: boolean; onDraft: React.Dispatch<React.SetStateAction<ReceiptItemDraft | null>>; onMatch: (receipt: PurchaseReceipt, line: PurchaseReceipt["items"][number], value: string) => void; onTrack: () => void; onUndo: (receipt: PurchaseReceipt, acquisitionId: number) => void }) {
+  if (!receipt.items.length) return <p className="text-sm text-slate-600">No line items were detected.</p>;
+  return <div className="grid gap-3 sm:grid-cols-2">{receipt.items.map((line) => {
+    const creatingThisItem = draft?.lineId === line.id;
+    return <div key={line.id} className={`grid gap-1 rounded-lg ${creatingThisItem ? "border border-indigo-200 bg-indigo-50/50 p-3" : ""}`}>
+      <label className="grid gap-1 text-xs font-medium text-slate-700"><span className="truncate">{line.raw_name}</span><select className={controlClass} value={creatingThisItem ? "create" : line.match_status === "rejected" ? "reject" : line.household_item_id?.toString() || ""} onChange={(event) => onMatch(receipt, line, event.target.value)} disabled={["ignored", "failed"].includes(receipt.parse_status) || busy} aria-label={`Match ${line.raw_name}`}><option value="">Unmatched — decide later</option>{items.map((item) => <option key={item.id} value={item.id}>Match to: {item.name}</option>)}<option value="create">＋ Track as a new household item…</option><option value="reject">Not a household item</option></select></label>
+      {creatingThisItem && draft ? <div className="mt-2 grid gap-2"><p className="text-xs leading-5 text-slate-600">Give this staple a reusable name and starting cadence.</p><Input value={draft.name} onChange={(event) => onDraft((current) => current ? { ...current, name: event.target.value } : current)} placeholder="Household item name" /><div className="grid gap-2 sm:grid-cols-2"><label className="grid gap-1 text-xs font-medium text-slate-700">Starting cadence (days)<Input type="number" min="1" max="3650" value={draft.cadence_days} onChange={(event) => onDraft((current) => current ? { ...current, cadence_days: event.target.value } : current)} /></label><label className="grid gap-1 text-xs font-medium text-slate-700">How to replenish<select className={controlClass} value={draft.replenishment_mode} onChange={(event) => onDraft((current) => current ? { ...current, replenishment_mode: event.target.value as HouseholdItem["replenishment_mode"] } : current)}><option value="either">Errand or delivery</option><option value="errand">Errand</option><option value="delivery">Delivery</option></select></label></div><div className="flex justify-end gap-2"><Button size="sm" variant="outline" onClick={() => onDraft(null)}>Cancel</Button><Button size="sm" onClick={onTrack} disabled={!draft.name.trim() || !Number(draft.cadence_days) || busy}><Plus className="h-3.5 w-3.5" />Create & match</Button></div></div> : null}
+      {line.acquisition_id ? <button type="button" className="justify-self-start rounded text-xs font-semibold text-rose-700 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500" onClick={() => onUndo(receipt, line.acquisition_id!)}>Undo learned purchase</button> : null}
+    </div>;
+  })}</div>;
+}
+
 function ItemEditor({ form, setForm, editing, busy, onSave, onCancel }: { form: ItemForm; setForm: React.Dispatch<React.SetStateAction<ItemForm>>; editing: boolean; busy: boolean; onSave: () => void; onCancel: () => void }) {
   return (
     <div className="space-y-3 rounded-xl border border-indigo-200 bg-indigo-50/40 p-4">
@@ -1313,11 +1450,19 @@ function ErrandRow({ errand, busy, onEdit, onToggle, onComplete, onSkip, onDelet
     <div className="group bg-white p-4 transition hover:bg-slate-50/70">
       <div className="flex items-start gap-3">
         <button onClick={onComplete} disabled={busy} className="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-full border border-slate-300 text-slate-500 transition hover:border-indigo-500 hover:bg-indigo-50 hover:text-indigo-700" aria-label={`Complete ${errand.title}`}><Check className="h-4 w-4" /></button>
-        <div className="min-w-0 flex-1"><div className="flex flex-wrap items-center gap-2"><h3 className="font-semibold text-slate-950">{errand.title}</h3>{errand.priority === "high" ? <Badge className="bg-rose-50 text-rose-700">High</Badge> : null}{!errand.included_in_next_plan ? <Badge variant="secondary">Excluded</Badge> : null}<Badge variant="secondary">{errand.place_resolution_status === "resolved" ? "Location ready" : "Will search automatically"}</Badge>{errand.place_resolution_method === "automatic" ? <Badge className="bg-indigo-50 text-indigo-700">Auto-selected</Badge> : null}{errand.resolved_open_now === true ? <Badge className="bg-emerald-50 text-emerald-700">Open now</Badge> : null}</div><div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-slate-600">{errand.place_resolution_status === "resolved" ? <span className="inline-flex items-center gap-1"><MapPin className="h-3.5 w-3.5" />{errand.resolved_place_name} · {errand.resolved_place_address}</span> : errand.place_name ? <span>Looking for: {errand.place_name}</span> : null}{errand.due_at ? <span className="inline-flex items-center gap-1"><CalendarClock className="h-3.5 w-3.5" />{dueLabel(errand.due_at)}</span> : null}{errand.estimated_duration_minutes !== null ? <span className="inline-flex items-center gap-1"><Clock3 className="h-3.5 w-3.5" />{errand.estimated_duration_minutes} min</span> : null}</div>{errand.place_resolution_status !== "resolved" ? <Button variant="outline" size="sm" className="mt-2" onClick={onChoosePlace} disabled={busy}><MapPin className="h-3.5 w-3.5" />Preview place options</Button> : <Button variant="ghost" size="sm" className="mt-2" onClick={onChoosePlace} disabled={busy}>Change location</Button>}{errand.linked_household_items.length ? <p className="mt-2 text-xs text-indigo-700">Includes {errand.linked_household_items.map((item) => item.name).join(", ")}</p> : null}</div>
+        <div className="min-w-0 flex-1"><div className="flex flex-wrap items-center gap-2"><h3 className="font-semibold text-slate-950">{errand.title}</h3>{errand.priority === "high" ? <Badge className="bg-rose-50 text-rose-700">High</Badge> : null}<Badge className={errand.included_in_next_plan ? "bg-indigo-50 text-indigo-700" : "bg-slate-100 text-slate-600"}>{errand.included_in_next_plan ? "In next trip" : "Not in trip"}</Badge><Badge className={errand.place_resolution_status === "resolved" ? "bg-emerald-50 text-emerald-700" : "bg-amber-50 text-amber-700"}>{errand.place_resolution_status === "resolved" ? "Location ready" : "Needs location"}</Badge>{errand.place_resolution_method === "automatic" ? <Badge variant="secondary">Auto-selected</Badge> : null}{errand.resolved_open_now === true ? <Badge className="bg-emerald-50 text-emerald-700">Open now</Badge> : null}</div><div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-slate-600">{errand.place_resolution_status === "resolved" ? <span className="inline-flex items-center gap-1"><MapPin className="h-3.5 w-3.5" />{errand.resolved_place_name} · {errand.resolved_place_address}</span> : errand.place_name ? <span>Looking for: {errand.place_name}</span> : null}{errand.due_at ? <span className="inline-flex items-center gap-1"><CalendarClock className="h-3.5 w-3.5" />{dueLabel(errand.due_at)}</span> : null}{errand.estimated_duration_minutes !== null ? <span className="inline-flex items-center gap-1"><Clock3 className="h-3.5 w-3.5" />{errand.estimated_duration_minutes} min</span> : null}</div>{errand.place_resolution_status !== "resolved" ? <Button variant="outline" size="sm" className="mt-2" onClick={onChoosePlace} disabled={busy}><MapPin className="h-3.5 w-3.5" />Choose location</Button> : <Button variant="ghost" size="sm" className="mt-2" onClick={onChoosePlace} disabled={busy}>Change location</Button>}{errand.linked_household_items.length ? <p className="mt-2 text-xs text-indigo-700">Includes {errand.linked_household_items.map((item) => item.name).join(", ")}</p> : null}</div>
         <div className="flex shrink-0 flex-wrap justify-end gap-1"><IconButton label={errand.included_in_next_plan ? "Exclude from next trip" : "Include in next trip"} onClick={onToggle}>{errand.included_in_next_plan ? <CircleOff className="h-4 w-4" /> : <Plus className="h-4 w-4" />}</IconButton><IconButton label={`Edit ${errand.title}`} onClick={onEdit}><Pencil className="h-4 w-4" /></IconButton><IconButton label={`Skip ${errand.title}`} onClick={onSkip}><X className="h-4 w-4" /></IconButton><IconButton label={`Delete ${errand.title}`} danger onClick={onDelete}><Trash2 className="h-4 w-4" /></IconButton></div>
       </div>
     </div>
   );
+}
+
+function ErrandHistoryRow({ errand, busy, onRepeat, onDelete }: { errand: Errand; busy: boolean; onRepeat: () => void; onDelete: () => void }) {
+  const destination = errand.resolved_place_name || errand.place_name;
+  return <div className="flex flex-col gap-3 p-3 sm:flex-row sm:items-center sm:justify-between">
+    <div className="min-w-0"><div className="flex flex-wrap items-center gap-2"><p className="truncate text-sm font-semibold text-slate-900">{errand.title}</p><Badge variant="secondary">{errand.status}</Badge></div><p className="mt-1 truncate text-xs text-slate-600">{new Date(errand.updated_at).toLocaleDateString()}{destination ? ` · ${destination}` : ""}</p></div>
+    <div className="flex shrink-0 gap-1"><Button size="sm" variant="outline" onClick={onRepeat} disabled={busy}><RotateCcw className="h-3.5 w-3.5" />Do again</Button><IconButton label={`Delete ${errand.title} from history`} danger onClick={onDelete}><Trash2 className="h-4 w-4" /></IconButton></div>
+  </div>;
 }
 
 function DueItemCard({ item, busy, onAction, onEdit }: { item: HouseholdItem; busy: boolean; onAction: (action: "bought" | "still-have" | "skip-once" | "disable" | "add") => void; onEdit: () => void }) {
@@ -1359,6 +1504,9 @@ function nullable(value: string) { return value.trim() || null; }
 function toIso(value: string) { return value ? new Date(value).toISOString() : null; }
 function toLocalInput(value: string | null) { if (!value) return ""; const date = new Date(value); const offset = date.getTimezoneOffset() * 60_000; return new Date(date.getTime() - offset).toISOString().slice(0, 16); }
 function dueLabel(value: string) { const due = new Date(value); const today = new Date(); const days = Math.ceil((due.getTime() - today.getTime()) / 86_400_000); if (days < 0) return "Overdue"; if (days === 0) return "Due today"; if (days === 1) return "Due tomorrow"; return `Due ${due.toLocaleDateString(undefined, { month: "short", day: "numeric" })}`; }
+function receiptDate(receipt: PurchaseReceipt) { return new Date(receipt.purchased_at || receipt.created_at).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" }); }
+function receiptTotal(receipt: PurchaseReceipt) { return receipt.total_cents === null ? "" : ` · ${new Intl.NumberFormat(undefined, { style: "currency", currency: receipt.currency || "USD" }).format(receipt.total_cents / 100)}`; }
+function formatRelativeTime(value: string) { const seconds = Math.max(0, Math.round((Date.now() - new Date(value).getTime()) / 1000)); if (seconds < 60) return "just now"; if (seconds < 3600) return `${Math.floor(seconds / 60)} min ago`; if (seconds < 86400) return `${Math.floor(seconds / 3600)} hr ago`; return new Date(value).toLocaleDateString(undefined, { month: "short", day: "numeric" }); }
 function selectedLocation(choice: string, locations: SavedLocation[], current: PlanningLocation | null, manual: string): PlanningLocation | null { if (choice === "current") return current; if (choice.startsWith("saved:")) { const location = locations.find((item) => item.id === Number(choice.slice(6))); return location ? { saved_location_id: location.id } : null; } return manual.trim() ? { label: "Starting point", address: manual.trim() } : null; }
 async function deleteRequest(path: string) { const response = await fetch(path, { method: "DELETE" }); if (!response.ok) { const data = await response.json(); throw data; } }
 function errorMessage(error: unknown) { if (typeof error === "string") return error; if (error && typeof error === "object" && "detail" in error && typeof (error as { detail?: unknown }).detail === "string") return (error as { detail: string }).detail; return "Household Ops could not complete that action."; }

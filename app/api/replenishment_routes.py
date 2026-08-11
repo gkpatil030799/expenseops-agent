@@ -315,6 +315,11 @@ def sync_gmail(payload: GmailSyncRequest, db: DbSession) -> dict:
     return {"scanned": result.scanned, "ingested": result.ingested, "skipped": result.skipped}
 
 
+@router.get("/gmail/status")
+def gmail_sync_status(db: DbSession) -> dict:
+    return GmailReceiptService(db).status()
+
+
 def _receipt_dict(receipt: PurchaseReceipt) -> dict:
     return {
         "id": receipt.id,

@@ -15,6 +15,7 @@ from app.db import Base
 from app.jobs import gmail_receipts
 from app.models import (
     ExpenseTransaction,
+    GmailSyncCheckpoint,
     HouseholdItem,
     HouseholdItemAcquisition,
     PlaidItem,
@@ -521,6 +522,16 @@ def test_gmail_sync_is_narrow_and_message_id_idempotent(db):
     assert second.ingested == 0
     assert second.skipped == 1
     assert db.scalar(select(func.count(PurchaseReceipt.id))) == 1
+    checkpoint = db.scalar(
+        select(GmailSyncCheckpoint).where(
+            GmailSyncCheckpoint.account_key == "me:receipts"
+        )
+    )
+    assert checkpoint is not None
+    status = service.status()
+    assert status["configured"] is True
+    assert status["last_successful_sync_at"] == checkpoint.updated_at
+    assert status["latest_receipt_at"] is not None
 
 
 def test_gmail_receipt_job_reports_bounded_sync_counts(db, monkeypatch):
