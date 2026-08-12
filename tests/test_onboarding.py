@@ -571,6 +571,29 @@ def test_telegram_link_code_returns_direct_bot_link(database, monkeypatch):
         assert value["code"] not in stored.code_hash
 
 
+def test_integration_status_reports_splitwise_onboarding_availability(
+    onboarding_app, monkeypatch
+):
+    client, _database, _contexts = onboarding_app
+    monkeypatch.setattr(
+        integration_routes,
+        "get_settings",
+        lambda: Settings(
+            splitwise_consumer_key="consumer-key",
+            splitwise_consumer_secret="consumer-secret",
+            _env_file=None,
+        ),
+    )
+
+    response = client.get(
+        "/api/integrations",
+        headers={"Authorization": "Bearer owner-token"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["splitwise"] == {"connected": False, "available": True}
+
+
 @pytest.mark.parametrize(
     ("text", "expected"),
     [

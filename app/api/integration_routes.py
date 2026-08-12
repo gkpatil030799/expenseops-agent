@@ -37,6 +37,7 @@ logger = logging.getLogger(__name__)
 
 @router.get("")
 def statuses(db: DbSession) -> dict:
+    settings = get_settings()
     plaid = list(
         db.scalars(select(PlaidItem).where(PlaidItem.enabled.is_(True)).order_by(PlaidItem.id))
     )
@@ -49,7 +50,10 @@ def statuses(db: DbSession) -> dict:
             ],
         },
         "telegram": {"connected": db.scalar(select(TelegramIdentity.id)) is not None},
-        "splitwise": {"connected": db.scalar(select(SplitwiseIntegration.id)) is not None},
+        "splitwise": {
+            "connected": db.scalar(select(SplitwiseIntegration.id)) is not None,
+            "available": settings.has_splitwise_oauth1_consumer,
+        },
         "google_maps": {"connected": True, "managed_by": "application"},
         "openai": {"connected": True, "managed_by": "application"},
     }

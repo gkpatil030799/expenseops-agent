@@ -17,7 +17,7 @@ type Integrations = {
   gmail: { connected: boolean };
   plaid: { connected: boolean; institutions: { id: number; name: string }[] };
   telegram: { connected: boolean };
-  splitwise: { connected: boolean };
+  splitwise: { connected: boolean; available: boolean };
   google_maps: { connected: boolean; managed_by: string };
   openai: { connected: boolean; managed_by: string };
 };
@@ -32,6 +32,7 @@ export function AccountSettingsPage({ context }: { context: AccountContext }) {
   const [inviteLink, setInviteLink] = useState("");
   const [telegramSetup, setTelegramSetup] = useState<{ command: string; connect_url: string | null } | null>(null);
   const [message, setMessage] = useState("");
+  const [integrationError, setIntegrationError] = useState("");
 
   async function load() {
     const [workspaceValues, integrationValues, memberValues] = await Promise.all([
@@ -97,22 +98,37 @@ export function AccountSettingsPage({ context }: { context: AccountContext }) {
   }
 
   async function connectGmail() {
-    const value = await api<{ authorization_url: string }>("/api/integrations/gmail/connect", {
-      method: "POST",
-    });
-    window.location.assign(value.authorization_url);
+    setIntegrationError("");
+    try {
+      const value = await api<{ authorization_url: string }>("/api/integrations/gmail/connect", {
+        method: "POST",
+      });
+      window.location.assign(value.authorization_url);
+    } catch (error) {
+      setIntegrationError(connectionError(error, "Gmail"));
+    }
   }
 
   async function connectTelegram() {
-    const value = await api<{ command: string; connect_url: string | null }>("/api/integrations/telegram/link-code", {
-      method: "POST",
-    });
-    setTelegramSetup(value);
+    setIntegrationError("");
+    try {
+      const value = await api<{ command: string; connect_url: string | null }>("/api/integrations/telegram/link-code", {
+        method: "POST",
+      });
+      setTelegramSetup(value);
+    } catch (error) {
+      setIntegrationError(connectionError(error, "Telegram"));
+    }
   }
 
   async function connectSplitwise() {
-    const value = await api<{ authorize_url: string }>("/splitwise/oauth/authorize");
-    window.location.assign(value.authorize_url);
+    setIntegrationError("");
+    try {
+      const value = await api<{ authorize_url: string }>("/splitwise/oauth/authorize");
+      window.location.assign(value.authorize_url);
+    } catch (error) {
+      setIntegrationError(connectionError(error, "Splitwise"));
+    }
   }
 
   async function disconnect(path: string) {
@@ -151,10 +167,11 @@ export function AccountSettingsPage({ context }: { context: AccountContext }) {
           <IntegrationRow name="Plaid" connected={integrations?.plaid.connected} detail={integrations?.plaid.institutions.map((v) => v.name).join(", ")} onConnect={() => window.location.assign("/?workspace=expenses&connect=plaid")} />
           {integrations?.plaid.institutions.map((institution) => <div key={institution.id} className="flex items-center justify-between rounded-lg bg-slate-50 px-3 py-2 text-sm"><span>{institution.name}</span><Button size="sm" variant="outline" onClick={() => disconnect(`/api/integrations/plaid/${institution.id}`)}><Unplug className="h-4 w-4" />Disconnect</Button></div>)}
           <IntegrationRow name="Telegram" connected={integrations?.telegram.connected} onConnect={connectTelegram} onDisconnect={() => disconnect("/api/integrations/telegram")} />
-          <IntegrationRow name="Splitwise" connected={integrations?.splitwise.connected} onConnect={connectSplitwise} onDisconnect={() => disconnect("/api/integrations/splitwise")} />
+          <IntegrationRow name="Splitwise" connected={integrations?.splitwise.connected} available={integrations?.splitwise.available} unavailableDetail="Splitwise sign-in is not configured yet. Ask the app owner to finish setup." onConnect={connectSplitwise} onDisconnect={() => disconnect("/api/integrations/splitwise")} />
           <IntegrationRow name="Google Maps" connected detail="Application-managed" />
           <IntegrationRow name="OpenAI" connected detail="Application-managed" />
           {telegramSetup && <TelegramSetup value={telegramSetup} />}
+          {integrationError && <p role="alert" className="rounded-lg border border-rose-200 bg-rose-50 p-3 text-sm text-rose-800">{integrationError}</p>}
           {message && <p className="text-sm text-emerald-700">{message}</p>}
         </CardContent>
       </Card>
@@ -197,8 +214,14 @@ function ChecklistRow({ done, label, detail }: { done: boolean; label: string; d
   return <div className="flex items-start gap-3 rounded-lg border border-slate-200 p-3"><Icon className={`mt-0.5 h-5 w-5 ${done ? "text-emerald-600" : "text-slate-400"}`} /><div><p className="font-medium text-slate-950">{label}</p><p className="text-sm text-slate-600">{detail}</p></div></div>;
 }
 
-function IntegrationRow({ name, connected, detail, onConnect, onDisconnect }: { name: string; connected?: boolean; detail?: string; onConnect?: () => void; onDisconnect?: () => void }) {
-  return <div className="flex items-center justify-between gap-3 rounded-lg border border-slate-200 p-3"><div><p className="font-medium text-slate-950">{name}</p><p className={`text-sm ${connected ? "text-emerald-700" : "text-slate-500"}`}>{detail || (connected ? "Connected" : "Not connected")}</p></div>{onConnect && !connected ? <Button size="sm" onClick={onConnect}><Link2 className="h-4 w-4" />Connect</Button> : onDisconnect && connected ? <Button size="sm" variant="outline" onClick={onDisconnect}><Unplug className="h-4 w-4" />Disconnect</Button> : null}</div>;
+function IntegrationRow({ name, connected, available = true, detail, unavailableDetail, onConnect, onDisconnect }: { name: string; connected?: boolean; available?: boolean; detail?: string; unavailableDetail?: string; onConnect?: () => void; onDisconnect?: () => void }) {
+  const status = detail || (connected ? "Connected" : available ? "Not connected" : unavailableDetail || "Connection is not available yet.");
+  return <div className="flex items-center justify-between gap-3 rounded-lg border border-slate-200 p-3"><div><p className="font-medium text-slate-950">{name}</p><p className={`text-sm ${connected ? "text-emerald-700" : "text-slate-600"}`}>{status}</p></div>{onConnect && !connected && available ? <Button size="sm" onClick={onConnect}><Link2 className="h-4 w-4" />Connect</Button> : onConnect && !connected ? <span className="shrink-0 rounded-full bg-slate-100 px-2.5 py-1 text-xs font-medium text-slate-600">Setup needed</span> : onDisconnect && connected ? <Button size="sm" variant="outline" onClick={onDisconnect}><Unplug className="h-4 w-4" />Disconnect</Button> : null}</div>;
+}
+
+function connectionError(error: unknown, provider: string) {
+  const detail = typeof error === "object" && error && "detail" in error && typeof error.detail === "string" ? error.detail : "Please try again.";
+  return `${provider} connection could not start. ${detail}`;
 }
 
 function TelegramSetup({ value }: { value: { command: string; connect_url: string | null } }) {
