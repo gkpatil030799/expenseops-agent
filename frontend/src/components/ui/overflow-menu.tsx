@@ -24,7 +24,7 @@ export function OverflowMenu({
     <DropdownMenu.Root>
       <DropdownMenu.Trigger
         aria-label={label}
-        className="flex h-11 w-11 items-center justify-center rounded-control text-slate-600 hover:bg-slate-100 hover:text-ink sm:h-10 sm:w-10"
+        className="flex h-11 min-h-11 w-11 min-w-11 items-center justify-center rounded-control text-slate-600 hover:bg-slate-100 hover:text-ink"
       >
         <MoreHorizontal className="h-5 w-5" aria-hidden="true" />
       </DropdownMenu.Trigger>

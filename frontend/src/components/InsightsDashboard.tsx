@@ -286,7 +286,7 @@ function InsightsControls(props: ControlsProps) {
                 type="button"
                 aria-pressed={props.preset === value}
                 onClick={() => props.choosePreset(value)}
-                className={`min-h-11 shrink-0 rounded-lg border px-3 text-xs font-semibold transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500 focus-visible:ring-offset-2 ${
+                className={`min-h-11 min-w-11 shrink-0 rounded-lg border px-3 text-xs font-semibold transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500 focus-visible:ring-offset-2 ${
                   props.preset === value
                     ? "border-indigo-600 bg-indigo-600 text-white"
                     : "border-slate-200 bg-white text-slate-700 hover:border-indigo-300 hover:bg-indigo-50"
@@ -333,7 +333,7 @@ function InsightsControls(props: ControlsProps) {
               <Select label="Type" value={props.reviewType} onChange={props.setReviewType} options={["personal", "shared"]} all="All types" />
               <label className="grid gap-1 text-xs font-semibold text-slate-700">
                 Spending basis
-                <select className="h-10 rounded-lg border border-slate-300 bg-white px-3 text-sm" value={props.basis} onChange={(event) => props.setBasis(event.target.value)}>
+                <select className="h-11 rounded-lg border border-slate-300 bg-white px-3 text-sm sm:h-10" value={props.basis} onChange={(event) => props.setBasis(event.target.value)}>
                   <option value="card">Card spend</option>
                   <option value="actual_share">My actual share</option>
                 </select>
@@ -663,7 +663,7 @@ function StackedSplit({ values, onSelect }: { values: { personal: number; shared
   if (!total) return <p className="py-8 text-center text-sm text-slate-600">No classified personal or shared spending in this period.</p>;
   return (
     <div className="space-y-3">
-      <div className="flex h-10 overflow-hidden rounded-lg" aria-label={`Personal ${personal}%, Shared ${shared}%`}>
+      <div className="flex h-11 overflow-hidden rounded-lg" aria-label={`Personal ${personal}%, Shared ${shared}%`}>
         <button type="button" onClick={() => onSelect("personal")} aria-label={`Filter Personal, ${money(values.personal)}, ${personal}%`} className="bg-slate-600 text-xs font-semibold text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-white" style={{ width: `${personal}%` }}>{personal >= 15 ? `Personal ${personal}%` : null}</button>
         <button type="button" onClick={() => onSelect("shared")} aria-label={`Filter Shared, ${money(values.shared)}, ${shared}%`} className="bg-indigo-600 text-xs font-semibold text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-white" style={{ width: `${shared}%` }}>{shared >= 15 ? `Shared ${shared}%` : null}</button>
       </div>
@@ -774,7 +774,7 @@ function Legend({ color, label }: { color: string; label: string }) {
 }
 
 function Select({ label, value, onChange, options, all }: { label: string; value: string; onChange: (value: string) => void; options: string[]; all: string }) {
-  return <label className="grid gap-1 text-xs font-semibold text-slate-700">{label}<select className="h-10 rounded-lg border border-slate-300 bg-white px-3 text-sm" value={value} onChange={(event) => onChange(event.target.value)}><option value="">{all}</option>{options.map((option) => <option key={option} value={option}>{title(option)}</option>)}</select></label>;
+  return <label className="grid gap-1 text-xs font-semibold text-slate-700">{label}<select className="h-11 rounded-lg border border-slate-300 bg-white px-3 text-sm sm:h-10" value={value} onChange={(event) => onChange(event.target.value)}><option value="">{all}</option>{options.map((option) => <option key={option} value={option}>{title(option)}</option>)}</select></label>;
 }
 
 function DateField({ label, value, onChange }: { label: string; value: string; onChange: (value: string) => void }) {
@@ -782,11 +782,11 @@ function DateField({ label, value, onChange }: { label: string; value: string; o
 }
 
 function Toggle({ values, labels, value, onChange }: { values: string[]; labels: string[]; value: string; onChange: (value: string) => void }) {
-  return <div className="flex rounded-lg bg-slate-100 p-1">{values.map((option, index) => <button key={option} type="button" onClick={() => onChange(option)} aria-pressed={value === option} className={`min-h-9 rounded-md px-2 text-xs font-medium focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500 ${value === option ? "bg-white text-indigo-700 shadow-sm" : "text-slate-600 hover:text-slate-950"}`}>{labels[index]}</button>)}</div>;
+  return <div className="flex rounded-lg bg-slate-100 p-1">{values.map((option, index) => <button key={option} type="button" onClick={() => onChange(option)} aria-pressed={value === option} className={`min-h-11 min-w-11 rounded-md px-2 text-xs font-medium focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500 ${value === option ? "bg-white text-indigo-700 shadow-sm" : "text-slate-600 hover:text-slate-950"}`}>{labels[index]}</button>)}</div>;
 }
 
 function Chip({ label, onRemove }: { label: string; onRemove: () => void }) {
-  return <span className="inline-flex min-h-9 items-center gap-1 rounded-full bg-indigo-50 px-2.5 py-1 text-xs font-medium text-indigo-800">{label}<button type="button" onClick={onRemove} className="rounded-full p-1 hover:bg-indigo-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500" aria-label={`Remove ${label}`}><X className="h-3 w-3" /></button></span>;
+  return <span className="inline-flex min-h-11 items-center gap-1 rounded-full bg-indigo-50 py-1 pl-3 pr-1 text-xs font-medium text-indigo-800">{label}<button type="button" onClick={onRemove} className="inline-flex h-11 w-11 items-center justify-center rounded-full hover:bg-indigo-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500" aria-label={`Remove ${label}`}><X className="h-3 w-3" /></button></span>;
 }
 
 function CompactMessage({ title: heading, detail, action }: { title: string; detail: string; action?: () => void }) {

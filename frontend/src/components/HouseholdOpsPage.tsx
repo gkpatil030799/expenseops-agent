@@ -132,7 +132,7 @@ const emptyManualPlaceForm: ManualPlaceForm = {
 };
 
 const controlClass =
-  "h-10 w-full rounded-lg border border-slate-300 bg-white px-3 text-sm text-slate-800 outline-none transition hover:border-slate-400 focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/20";
+  "h-11 w-full rounded-lg border border-slate-300 bg-white px-3 text-sm text-slate-800 outline-none transition hover:border-slate-400 focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/20 sm:h-10";
 
 export function HouseholdOpsPage() {
   const [householdView, setHouseholdView] = useState<HouseholdView>("today");
@@ -845,7 +845,7 @@ export function HouseholdOpsPage() {
               </section>
 
               <details className="rounded-xl border border-slate-200 px-4 py-3">
-                <summary className="cursor-pointer text-sm font-semibold text-slate-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500">Advanced prediction history & accuracy</summary>
+                <summary className="flex min-h-11 cursor-pointer items-center text-sm font-semibold text-slate-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500">Advanced prediction history & accuracy</summary>
                 <div className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
                   <Metric label="Current method" value={learning?.accuracy.current_prediction_method?.replace(/_/g, " ") || "No prediction yet"} />
                   <Metric label="Training observations" value={learning?.accuracy.training_observations || 0} />
@@ -1481,7 +1481,7 @@ function ErrandRow({ errand, busy, onEdit, onToggle, onComplete, onSkip, onDelet
   return (
     <div className="group bg-white p-4 transition hover:bg-slate-50/70">
       <div className="flex items-start gap-3">
-        <button onClick={onComplete} disabled={busy} className="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-full border border-slate-300 text-slate-500 transition hover:border-indigo-500 hover:bg-indigo-50 hover:text-indigo-700" aria-label={`Complete ${errand.title}`}><Check className="h-4 w-4" /></button>
+        <button onClick={onComplete} disabled={busy} className="mt-0.5 flex h-11 w-11 shrink-0 items-center justify-center rounded-full border border-slate-300 text-slate-500 transition hover:border-indigo-500 hover:bg-indigo-50 hover:text-indigo-700 sm:h-9 sm:w-9" aria-label={`Complete ${errand.title}`}><Check className="h-4 w-4" /></button>
         <div className="min-w-0 flex-1"><div className="flex flex-wrap items-center gap-2"><h3 className="font-semibold text-slate-950">{errand.title}</h3>{errand.priority === "high" ? <Badge className="bg-rose-50 text-rose-700">High</Badge> : null}<Badge className={errand.included_in_next_plan ? "bg-indigo-50 text-indigo-700" : "bg-slate-100 text-slate-600"}>{errand.included_in_next_plan ? "In next trip" : "Not in trip"}</Badge><Badge className={errand.place_resolution_status === "resolved" ? "bg-emerald-50 text-emerald-700" : "bg-amber-50 text-amber-700"}>{errand.place_resolution_status === "resolved" ? "Location ready" : "Needs location"}</Badge>{errand.place_resolution_method === "automatic" ? <Badge variant="secondary">Auto-selected</Badge> : null}{errand.resolved_open_now === true ? <Badge className="bg-emerald-50 text-emerald-700">Open now</Badge> : null}</div><div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-slate-600">{errand.place_resolution_status === "resolved" ? <span className="inline-flex items-center gap-1"><MapPin className="h-3.5 w-3.5" />{errand.resolved_place_name} · {errand.resolved_place_address}</span> : errand.place_name ? <span>Looking for: {errand.place_name}</span> : null}{errand.due_at ? <span className="inline-flex items-center gap-1"><CalendarClock className="h-3.5 w-3.5" />{dueLabel(errand.due_at)}</span> : null}{errand.estimated_duration_minutes !== null ? <span className="inline-flex items-center gap-1"><Clock3 className="h-3.5 w-3.5" />{errand.estimated_duration_minutes} min</span> : null}</div>{errand.place_resolution_status !== "resolved" ? <Button variant="outline" size="sm" className="mt-2" onClick={onChoosePlace} disabled={busy}><MapPin className="h-3.5 w-3.5" />Choose location</Button> : <Button variant="ghost" size="sm" className="mt-2" onClick={onChoosePlace} disabled={busy}>Change location</Button>}{errand.linked_household_items.length ? <p className="mt-2 text-xs text-indigo-700">Includes {errand.linked_household_items.map((item) => item.name).join(", ")}</p> : null}</div>
         <div className="flex shrink-0 flex-wrap justify-end gap-1"><IconButton label={errand.included_in_next_plan ? "Exclude from next trip" : "Include in next trip"} onClick={onToggle}>{errand.included_in_next_plan ? <CircleOff className="h-4 w-4" /> : <Plus className="h-4 w-4" />}</IconButton><IconButton label={`Edit ${errand.title}`} onClick={onEdit}><Pencil className="h-4 w-4" /></IconButton><IconButton label={`Skip ${errand.title}`} onClick={onSkip}><X className="h-4 w-4" /></IconButton><IconButton label={`Delete ${errand.title}`} danger onClick={onDelete}><Trash2 className="h-4 w-4" /></IconButton></div>
       </div>
@@ -1553,7 +1553,7 @@ function RouteSequence({ plan, compact = false }: { plan: ErrandPlan; compact?: 
 
 function Field({ label, children }: { label: string; children: React.ReactNode }) { return <label className="grid gap-1.5 text-xs font-medium text-slate-700">{label}{children}</label>; }
 
-function IconButton({ label, children, onClick, danger = false }: { label: string; children: React.ReactNode; onClick: () => void; danger?: boolean }) { return <button type="button" onClick={onClick} aria-label={label} title={label} className={`rounded-lg p-2 transition focus-visible:ring-2 focus-visible:ring-indigo-500/40 ${danger ? "text-rose-600 hover:bg-rose-50" : "text-slate-500 hover:bg-slate-100 hover:text-slate-900"}`}>{children}</button>; }
+function IconButton({ label, children, onClick, danger = false }: { label: string; children: React.ReactNode; onClick: () => void; danger?: boolean }) { return <button type="button" onClick={onClick} aria-label={label} title={label} className={`inline-flex h-11 w-11 items-center justify-center rounded-lg transition focus-visible:ring-2 focus-visible:ring-indigo-500/40 sm:h-10 sm:w-10 ${danger ? "text-rose-600 hover:bg-rose-50" : "text-slate-500 hover:bg-slate-100 hover:text-slate-900"}`}>{children}</button>; }
 
 function EmptyPanel({ icon: Icon, title, description, compact = false }: { icon: typeof House; title: string; description: string; compact?: boolean }) { return <div className={`flex flex-col items-center justify-center rounded-xl border border-dashed border-slate-300 bg-slate-50/50 px-5 text-center ${compact ? "min-h-32 py-5" : "min-h-44 py-8"}`}><span className="flex h-10 w-10 items-center justify-center rounded-xl bg-white text-slate-500 shadow-sm ring-1 ring-slate-200"><Icon className="h-5 w-5" /></span><h3 className="mt-3 text-sm font-semibold text-slate-900">{title}</h3><p className="mt-1 max-w-sm text-xs leading-5 text-slate-600">{description}</p></div>; }
 

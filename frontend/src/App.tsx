@@ -887,7 +887,7 @@ function ReviewFilters({
 
   return (
     <FilterToolbar
-      activeFilters={active.length ? active.map((filter) => <button key={filter.key} type="button" onClick={() => onChange(filter.key, "")} className="inline-flex min-h-9 items-center gap-1.5 rounded-full border border-indigo-200 bg-ui-primary-tint px-3 text-xs font-medium text-indigo-800 hover:bg-indigo-100" aria-label={`Remove ${filter.label} filter`}>{filter.label}<X className="h-3.5 w-3.5" aria-hidden="true" /></button>) : undefined}
+      activeFilters={active.length ? active.map((filter) => <button key={filter.key} type="button" onClick={() => onChange(filter.key, "")} className="inline-flex min-h-11 items-center gap-1.5 rounded-full border border-indigo-200 bg-ui-primary-tint px-3 text-xs font-medium text-indigo-800 hover:bg-indigo-100" aria-label={`Remove ${filter.label} filter`}>{filter.label}<X className="h-3.5 w-3.5" aria-hidden="true" /></button>) : undefined}
     >
       <div className="min-w-0 flex-1 px-2">
         <p className="text-sm font-semibold text-ink">Review queue</p>
@@ -915,7 +915,7 @@ function SearchFilters({
   compact?: boolean;
 }) {
   const controlClass =
-    "h-10 rounded-lg border-slate-300 bg-white text-slate-800 hover:border-slate-400 focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/20";
+    "h-11 rounded-lg border-slate-300 bg-white text-slate-800 hover:border-slate-400 focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/20 sm:h-10";
   return (
     <Card>
       <CardContent className="p-5">
@@ -1415,7 +1415,7 @@ function Header({
 }
 
 function ExpenseTabs({active,onChange}:{active:"review"|"insights"|"activity";onChange:(value:"review"|"insights"|"activity")=>void}) {
-  return <nav className="flex gap-1 rounded-xl border border-slate-200 bg-white p-1 shadow-sm" aria-label="Expense Review views">{(["review","insights","activity"] as const).map(value=><button key={value} type="button" aria-current={active===value?"page":undefined} onClick={()=>onChange(value)} className={`flex-1 rounded-lg px-4 py-2.5 text-sm font-semibold capitalize transition focus-visible:ring-2 focus-visible:ring-indigo-500 ${active===value?"bg-indigo-600 text-white":"text-slate-600 hover:bg-slate-50 hover:text-slate-950"}`}>{value}</button>)}</nav>
+  return <nav className="flex gap-1 rounded-xl border border-slate-200 bg-white p-1 shadow-sm" aria-label="Expense Review views">{(["review","insights","activity"] as const).map(value=><button key={value} type="button" aria-current={active===value?"page":undefined} onClick={()=>onChange(value)} className={`min-h-11 flex-1 rounded-lg px-4 py-2.5 text-sm font-semibold capitalize transition focus-visible:ring-2 focus-visible:ring-indigo-500 ${active===value?"bg-indigo-600 text-white":"text-slate-600 hover:bg-slate-50 hover:text-slate-950"}`}>{value}</button>)}</nav>
 }
 
 function relativeTime(value: Date) {
@@ -1748,7 +1748,7 @@ function TransactionCard({
           <div className="mb-2 grid grid-cols-2 rounded-full bg-slate-100/90 p-1 ring-1 ring-slate-200/70">
             <button
               type="button"
-              className={`inline-flex items-center justify-center gap-2 rounded-full px-3 py-1.5 text-sm font-medium transition-all ${
+              className={`inline-flex min-h-11 items-center justify-center gap-2 rounded-full px-3 py-1.5 text-sm font-medium transition-all ${
                 splitMode === "people"
                   ? "bg-indigo-600 text-white shadow-sm shadow-indigo-950/15"
                   : "text-slate-600 hover:bg-white/70 hover:text-slate-950"
@@ -1760,7 +1760,7 @@ function TransactionCard({
             </button>
             <button
               type="button"
-              className={`inline-flex items-center justify-center gap-2 rounded-full px-3 py-1.5 text-sm font-medium transition-all ${
+              className={`inline-flex min-h-11 items-center justify-center gap-2 rounded-full px-3 py-1.5 text-sm font-medium transition-all ${
                 splitMode === "group"
                   ? "bg-indigo-600 text-white shadow-sm shadow-indigo-950/15"
                   : "text-slate-600 hover:bg-white/70 hover:text-slate-950"
@@ -1893,7 +1893,7 @@ function CustomSplitPanel({
             <button
               key={value}
               type="button"
-              className={`rounded-full px-2.5 py-1 text-xs font-medium transition ${
+              className={`min-h-11 min-w-11 rounded-full px-2.5 py-1 text-xs font-medium transition ${
                 mode === value
                   ? "bg-indigo-600 text-white shadow-sm"
                   : "text-slate-600 hover:bg-white"
@@ -1904,7 +1904,7 @@ function CustomSplitPanel({
             </button>
           ))}
         </div>
-        <label className="inline-flex items-center gap-2 text-xs font-medium text-slate-600">
+        <label className="inline-flex min-h-11 items-center gap-2 text-xs font-medium text-slate-600">
           <input
             type="checkbox"
             className="h-4 w-4 rounded border-slate-300 text-emerald-600"
@@ -1931,7 +1931,7 @@ function CustomSplitPanel({
                 </span>
               ) : (
                 <Input
-                  className="h-8 text-right"
+                  className="h-11 text-right sm:h-8"
                   inputMode="decimal"
                   value={values[participant.id] || ""}
                   placeholder={mode === "percentages" ? "0%" : mode === "shares" ? "1" : "0.00"}
@@ -2063,7 +2063,7 @@ function FriendPicker({
     <div className="space-y-2.5">
       <div className="flex flex-col gap-2 sm:flex-row">
         <Input
-          className="h-9"
+          className="h-11 sm:h-9"
           value={query}
           onChange={(event) => onQueryChange(event.target.value)}
           onKeyDown={(event) => {
@@ -2117,7 +2117,7 @@ function ParticipantChip({ label, onRemove }: { label: string; onRemove: () => v
   const initials = label.trim().split(/\s+/).slice(0, 2).map((part) => part[0]?.toUpperCase()).join("") || "?";
   return (
     <button
-      className="inline-flex max-w-full items-center gap-1.5 rounded-full bg-indigo-50 px-2.5 py-1 text-sm font-medium text-indigo-800 ring-1 ring-indigo-100 transition hover:bg-indigo-100"
+      className="inline-flex min-h-11 max-w-full items-center gap-1.5 rounded-full bg-indigo-50 px-2.5 py-1 text-sm font-medium text-indigo-800 ring-1 ring-indigo-100 transition hover:bg-indigo-100"
       onClick={onRemove}
       type="button"
     >
@@ -2163,7 +2163,7 @@ function GroupPicker({
     <div className="space-y-2.5">
       <div className="flex flex-col gap-2 sm:flex-row">
         <Input
-          className="h-9"
+          className="h-11 sm:h-9"
           value={query}
           onChange={(event) => onQueryChange(event.target.value)}
           onKeyDown={(event) => {

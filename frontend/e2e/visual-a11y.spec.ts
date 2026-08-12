@@ -162,8 +162,8 @@ async function mockSettings(page: Page, role = "owner") {
   await page.route("**/splitwise/groups/10/members", (route) => route.fulfill({ json: friends }));
 }
 
-async function mockDeals(page: Page, options: { connected?: boolean; empty?: boolean } = {}) {
-  const offers = options.empty ? [] : [
+async function mockDeals(page: Page, options: { connected?: boolean; empty?: boolean; offers?: unknown[] } = {}) {
+  const offers = options.offers ?? (options.empty ? [] : [
     {
       id: 71,
       merchant: "Target",
@@ -208,7 +208,7 @@ async function mockDeals(page: Page, options: { connected?: boolean; empty?: boo
       why: ["Relevant to groceries"],
       source_count: 1,
     },
-  ];
+  ]);
   await page.route("**/api/promotions?**", (route) => route.fulfill({ json: offers }));
   await page.route("**/api/promotions/categories", (route) => route.fulfill({ json: ["Groceries", "Shopping"] }));
   await page.route("**/api/integrations", (route) => route.fulfill({ json: {
@@ -225,6 +225,31 @@ async function chooseSettingsSection(page: Page, value: string, desktopLabel: Re
   const mobileSelect = page.getByLabel("Settings section");
   if (await mobileSelect.isVisible()) await mobileSelect.selectOption(value);
   else await page.getByRole("button", { name: desktopLabel }).click();
+}
+
+async function expectMobileTouchTargets(page: Page) {
+  const undersized = await page.evaluate(() => {
+    const selector = "button, a[href], input, select, textarea, summary, [role='button']";
+    return Array.from(document.querySelectorAll<HTMLElement>(selector))
+      .filter((element) => {
+        const style = window.getComputedStyle(element);
+        const rect = element.getBoundingClientRect();
+        return style.display !== "none" && style.visibility !== "hidden" && rect.width > 0 && rect.height > 0;
+      })
+      .map((element) => {
+        const input = element instanceof HTMLInputElement ? element : null;
+        const labeledControl = input && (input.type === "checkbox" || input.type === "radio") ? element.closest("label") : null;
+        const rect = (labeledControl || element).getBoundingClientRect();
+        return {
+          element: element.tagName.toLowerCase(),
+          name: element.getAttribute("aria-label") || labeledControl?.textContent?.trim().replace(/\s+/g, " ").slice(0, 80) || element.textContent?.trim().replace(/\s+/g, " ").slice(0, 80) || "unnamed",
+          width: Math.round(rect.width),
+          height: Math.round(rect.height),
+        };
+      })
+      .filter(({ width, height }) => width < 44 || height < 44);
+  });
+  expect(undersized, `Undersized touch targets: ${JSON.stringify(undersized, null, 2)}`).toEqual([]);
 }
 
 test("visual foundation keeps the expense dashboard stable", async ({ page }) => {
@@ -385,8 +410,11 @@ test("deals prioritize value and disclose destination trust", async ({ page }) =
   await expect(page).toHaveScreenshot("deals-populated.png", { fullPage: true, timeout: 15_000 });
 
   await page.getByRole("button", { name: /Review link/ }).click();
-  await expect(page.getByRole("dialog", { name: "Review this destination" })).toContainText("offers.example.net");
+  const destinationDialog = page.getByRole("dialog", { name: "Review this destination" });
+  await expect(destinationDialog).toContainText("offers.example.net");
+  await expect(destinationDialog.locator(":focus")).toHaveCount(1);
   await page.getByRole("button", { name: "Cancel" }).click();
+  await expect(page.getByRole("button", { name: /Review link/ })).toBeFocused();
 
   await page.getByRole("button", { name: "More actions for Target" }).click();
   await expect(page.getByRole("menuitem", { name: "Dismiss" })).toBeVisible();
@@ -412,6 +440,44 @@ test("deals combine disconnected Gmail and an empty feed into one next step", as
   await expect(page.getByText("No deals in this view")).toHaveCount(0);
 });
 
+test("deal expiry styling follows actual urgency", async ({ page }) => {
+  const hour = 3_600_000;
+  const base = {
+    category: "Shopping",
+    description: null,
+    offer_type: "percent_off",
+    percent_off: 10,
+    amount_off: null,
+    minimum_spend: null,
+    promo_code: null,
+    expiry_precision: "exact",
+    destination_url: null,
+    terms_summary: null,
+    trust_status: "review",
+    status: "active",
+    score: 80,
+    saved: false,
+    why: [],
+    source_count: 1,
+  };
+  await mockExpenseDashboard(page);
+  await mockDeals(page, { offers: [
+    { ...base, id: 81, merchant: "Past Offer", headline: "Expired offer", expires_at: new Date(Date.now() - hour).toISOString() },
+    { ...base, id: 82, merchant: "Tomorrow Offer", headline: "Tomorrow offer", expires_at: new Date(Date.now() + 12 * hour).toISOString() },
+    { ...base, id: 83, merchant: "Soon Offer", headline: "Soon offer", expires_at: new Date(Date.now() + 4 * 24 * hour).toISOString() },
+    { ...base, id: 84, merchant: "Later Offer", headline: "Later offer", expires_at: new Date(Date.now() + 14 * 24 * hour).toISOString() },
+    { ...base, id: 85, merchant: "Open Offer", headline: "No-expiry offer", expires_at: null },
+  ] });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Deals" }).click();
+
+  await expect(page.getByText(/^Expired /)).toBeVisible();
+  await expect(page.getByText("Expires tomorrow")).toBeVisible();
+  await expect(page.getByText("Expires in 4 days")).toBeVisible();
+  await expect(page.getByText("No expiry provided")).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Later offer" })).toBeVisible();
+});
+
 test("deals remain usable without mobile document overflow", async ({ page }) => {
   await page.setViewportSize({ width: 320, height: 844 });
   await mockExpenseDashboard(page);
@@ -426,6 +492,123 @@ test("deals remain usable without mobile document overflow", async ({ page }) =>
   }));
   expect(dimensions.scrollWidth).toBeLessThanOrEqual(dimensions.clientWidth);
   await expect(page).toHaveScreenshot("deals-320.png", { fullPage: true, timeout: 15_000 });
+});
+
+test("primary mobile destinations keep touch targets at least 44px", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await mockExpenseDashboard(page);
+  await mockSpendingInsights(page);
+  await mockHouseholdOps(page);
+  await mockDeals(page);
+  await mockSettings(page);
+  await page.goto("/");
+
+  await expectMobileTouchTargets(page);
+  await page.getByRole("button", { name: /insights/i, exact: true }).click();
+  await expect(page.getByRole("heading", { name: "Spending Insights" })).toBeVisible();
+  await expectMobileTouchTargets(page);
+  await page.getByText("Refine view", { exact: true }).click();
+  await page.getByRole("combobox", { name: "Account", exact: true }).selectOption("Chase checking");
+  await expect(page.getByRole("button", { name: "Remove Account: Chase checking" })).toBeVisible();
+  await expectMobileTouchTargets(page);
+
+  await page.getByRole("button", { name: "Household" }).click();
+  await expect(page.getByRole("heading", { name: "Household operations" })).toBeVisible();
+  await expectMobileTouchTargets(page);
+  for (const section of ["Errands", "Receipts", "Staples", "History"]) {
+    await page.getByRole("button", { name: section, exact: true }).click();
+    await expectMobileTouchTargets(page);
+  }
+
+  await page.getByRole("button", { name: "Deals" }).click();
+  await expect(page.getByRole("heading", { name: "Deals worth your attention" })).toBeVisible();
+  await expectMobileTouchTargets(page);
+  await page.getByText("Terms and conditions").first().click();
+  await page.getByRole("button", { name: /Review link/ }).click();
+  await expectMobileTouchTargets(page);
+  await page.keyboard.press("Escape");
+
+  await page.getByRole("button", { name: "Open account menu for Gunjan Patil" }).click();
+  await page.getByRole("menuitem", { name: "Settings" }).click();
+  await expect(page.getByRole("heading", { name: "Settings", exact: true })).toBeVisible();
+  await expectMobileTouchTargets(page);
+  await page.getByLabel("Settings section").selectOption("splitwise");
+  await expect(page.getByRole("heading", { name: "Manage groups and participants" })).toBeVisible();
+  await expectMobileTouchTargets(page);
+});
+
+test("keyboard users can skip repeated navigation and overlays restore focus", async ({ page }) => {
+  await mockExpenseDashboard(page);
+  await mockDeals(page);
+  await page.goto("/");
+
+  const skipLink = page.getByRole("link", { name: "Skip to main content" });
+  await skipLink.focus();
+  await expect(skipLink).toBeFocused();
+  await page.keyboard.press("Enter");
+  await expect(page.locator("#main-content")).toBeFocused();
+
+  await page.getByRole("button", { name: "Deals" }).click();
+  const reviewLink = page.getByRole("button", { name: /Review link/ });
+  await reviewLink.focus();
+  await page.keyboard.press("Enter");
+  await expect(page.getByRole("dialog", { name: "Review this destination" })).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(reviewLink).toBeFocused();
+});
+
+test("reduced-motion preference suppresses application animation", async ({ page }) => {
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  await mockExpenseDashboard(page);
+  await page.goto("/");
+  const timings = await page.evaluate(() => {
+    const probe = document.createElement("div");
+    probe.className = "ui-skeleton";
+    document.body.appendChild(probe);
+    const style = window.getComputedStyle(probe);
+    const result = { animationDuration: style.animationDuration, transitionDuration: style.transitionDuration };
+    probe.remove();
+    return result;
+  });
+  expect(Number.parseFloat(timings.animationDuration)).toBeLessThanOrEqual(0.001);
+  expect(Number.parseFloat(timings.transitionDuration)).toBeLessThanOrEqual(0.001);
+});
+
+test("primary workflows remain usable at a 200 percent zoom equivalent", async ({ page }) => {
+  await page.setViewportSize({ width: 640, height: 900 });
+  await mockExpenseDashboard(page);
+  await mockHouseholdOps(page);
+  await mockDeals(page);
+  await page.goto("/");
+
+  await expect(page.getByRole("heading", { name: "Expense Review" })).toBeVisible();
+  await page.getByRole("button", { name: "Household" }).click();
+  await expect(page.getByRole("heading", { name: "Household operations" })).toBeVisible();
+  await page.getByRole("button", { name: "Deals" }).click();
+  await expect(page.getByRole("heading", { name: "Deals worth your attention" })).toBeVisible();
+  const dimensions = await page.evaluate(() => ({
+    clientWidth: document.documentElement.clientWidth,
+    scrollWidth: document.documentElement.scrollWidth,
+  }));
+  expect(dimensions.scrollWidth).toBeLessThanOrEqual(dimensions.clientWidth);
+});
+
+test("mobile navigation leaves the end of page content unobscured", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await mockExpenseDashboard(page);
+  await mockDeals(page);
+  await page.goto("/");
+  await page.getByRole("button", { name: "Deals" }).click();
+  await expect(page.getByText("$25 off", { exact: true })).toBeVisible();
+  await page.evaluate(() => window.scrollTo(0, document.documentElement.scrollHeight));
+  await page.waitForFunction(() => window.scrollY > 0);
+
+  const spacing = await page.evaluate(() => {
+    const main = document.querySelector("#main-content")!.getBoundingClientRect();
+    const navigation = document.querySelector<HTMLElement>("nav[aria-label='Primary mobile navigation']")!.getBoundingClientRect();
+    return { mainBottom: Math.round(main.bottom), navigationTop: Math.round(navigation.top) };
+  });
+  expect(spacing.mainBottom).toBeLessThanOrEqual(spacing.navigationTop);
 });
 
 test("expense views provide their own page identity", async ({ page }) => {
@@ -516,10 +699,58 @@ test("review card prioritizes Personal and Split with progressive split steps", 
   await expect(page.getByRole("menuitem", { name: "Save as draft" })).toBeVisible();
   await page.keyboard.press("Escape");
 
+  await page.setViewportSize({ width: 390, height: 844 });
   await page.getByRole("button", { name: "Split", exact: true }).click();
   await expect(page.getByRole("heading", { name: "Choose people" })).toBeVisible();
   await expect(page.getByRole("heading", { name: "Choose split" })).toBeVisible();
   await expect(page.getByText("Step 3 · Review and post")).toBeVisible();
+  await expectMobileTouchTargets(page);
+  const dimensions = await page.evaluate(() => ({ clientWidth: document.documentElement.clientWidth, scrollWidth: document.documentElement.scrollWidth }));
+  expect(dimensions.scrollWidth).toBeLessThanOrEqual(dimensions.clientWidth);
+});
+
+test("long merchant names, large spend, and refunds remain readable on phones", async ({ page }) => {
+  await page.setViewportSize({ width: 320, height: 844 });
+  const transaction = {
+    id: 91,
+    plaid_transaction_id: "plaid-91",
+    merchant_name: "A Very Long Neighborhood Cooperative Grocery and Household Market",
+    name: "LONG MERCHANT",
+    amount_cents: 12_345_678,
+    amount: "123456.78",
+    iso_currency_code: "USD",
+    institution_name: "Chase Freedom Unlimited ending in 1234",
+    category: "Groceries and household essentials",
+    payment_channel: "in store",
+    date: "2026-08-12",
+    authorized_date: "2026-08-12",
+    pending: false,
+    status: "ask_user",
+    agent_question: "Review this transaction.",
+    splitwise_expense_id: null,
+    splitwise_payload_json: null,
+    last_error: null,
+    classification_suggestion: "unsure",
+    classification_reason: null,
+    can_undo_transaction: false,
+    created_at: "2026-08-12T12:00:00Z",
+    updated_at: "2026-08-12T12:00:00Z",
+  };
+  await mockExpenseDashboard(page, [transaction, {
+    ...transaction,
+    id: 92,
+    plaid_transaction_id: "plaid-92",
+    merchant_name: "Refund from Neighborhood Cooperative Market",
+    amount_cents: -25_050,
+    amount: "-250.50",
+  }]);
+  await page.goto("/");
+
+  await expect(page.getByRole("heading", { name: transaction.merchant_name })).toBeVisible();
+  await expect(page.getByText("$123,456.78", { exact: true })).toBeVisible();
+  await expect(page.getByText("-$250.50", { exact: true })).toBeVisible();
+  const dimensions = await page.evaluate(() => ({ clientWidth: document.documentElement.clientWidth, scrollWidth: document.documentElement.scrollWidth }));
+  expect(dimensions.scrollWidth).toBeLessThanOrEqual(dimensions.clientWidth);
 });
 
 for (const width of [320, 375, 390, 768, 1024, 1440]) {

@@ -34,7 +34,7 @@ visual-foundation changes began.
 | V5 — Household command center | Complete (visual layer) | Household-wide page identity, one prioritized Today action, compact all-clear state, route summary on Today, full builder under Errands, Start → Stops → End sequence, active/history receipt separation, and mobile tab fades |
 | V6 — Settings information architecture | Complete (visual layer) | Eight explicit destinations, desktop sidebar/mobile selector, owner-aware workspace controls, separated connection scopes, discoverable Splitwise group tools, dedicated privacy/danger section, and completed-onboarding suppression |
 | V7 — Deals hierarchy | Complete (visual layer) | Value-first deal cards, merchant identity, trusted-domain disclosure, review interstitials for unverified links, visible Open/Save actions, feedback overflow, purposeful empty/disconnected states, and urgency-based expiry treatment |
-| V8 — visual/accessibility validation | Not started | — |
+| V8 — visual/accessibility validation | Complete (automated gate) | Six-width responsive matrix, 44px touch-target audit across primary and expanded flows, keyboard skip/focus restoration, reduced motion, 200%-zoom-equivalent layout, mobile-nav clearance, edge-state fixtures, and four-project Playwright coverage |
 | Phase 2 — UX action integrity | Not started | — |
 | Phase 3 — identity and tenancy | Not started | — |
 | Phase 4 — financial correctness | Not started | — |
@@ -199,3 +199,28 @@ deletion remain assigned to the identity/tenancy and security phases.
 V7 does not claim complete Deals domain correctness. Save/Unsave, reversible merchant mute,
 pagination and complete totals, backend trust reasons, durable sync status, and failure-safe mutations
 remain assigned to Phases 2 and 6.
+
+## V8 validation evidence
+
+| Check | Result |
+| --- | --- |
+| Viewport matrix | No document-level overflow at 320, 375, 390, 768, 1024, and 1440 CSS pixels |
+| Touch targets | Runtime audit verifies visible interactive controls are at least 44×44px on touch layouts across Expenses, expanded Insights filters, every Household tab, Deals terms/dialog, Settings, and Splitwise group management |
+| Defects found and fixed | Expense tabs, shared small buttons, date presets, Insight selects/toggles/split bars, Household disclosure/icon controls, Splitwise group controls, and transaction split controls were enlarged; WebKit-native select collapse was corrected |
+| Keyboard navigation | A visible-on-focus skip link targets the main content; the unverified-link dialog traps focus and returns it to its trigger after close/Escape |
+| Reduced motion | Application animation and transition durations collapse under `prefers-reduced-motion: reduce` and are browser-tested |
+| Zoom/reflow | Primary Expenses → Household → Deals journey remains usable without horizontal overflow at a 640px layout viewport, equivalent to 200% zoom on a 1280px display |
+| Mobile fixed navigation | End-of-page content clears the fixed bottom navigation and remains reachable |
+| Edge-state coverage | Disconnected/empty Deals, loaded/error preservation, all-clear Household, available route, expanded split workflow, every deal expiry urgency, long merchant text, six-figure amount, and refund display are covered |
+| Chart access | Insights charts retain keyboard-focusable data points and expandable semantic data tables |
+| Automated accessibility | Axe reports zero critical or serious WCAG A/AA violations in the covered Expense, Insights, Household, Settings, Splitwise, and Deals journeys |
+| Cross-browser projects | Desktop Chromium, Pixel 5 Chromium, Desktop Firefox, and Desktop WebKit are configured in Playwright |
+| Visual regression | Browser-specific baselines pass in Chromium, mobile Chromium, Firefox, and WebKit |
+| Final browser gate | 116 passed; `test-results/.last-run.json` reports `passed` with no failed tests |
+| Frontend unit tests | 15 passed |
+| Frontend production build | Passed; existing bundle-size advisory remains tracked |
+| Frontend lint | Zero errors; 19 pre-existing warnings remain and are not represented as a clean-warning gate |
+
+The automated V8 gate is complete. Manual VoiceOver/NVDA journeys, physical-device validation,
+and formal human contrast review remain release evidence to collect in Phase 8; they are not
+represented as completed by Axe or browser emulation.

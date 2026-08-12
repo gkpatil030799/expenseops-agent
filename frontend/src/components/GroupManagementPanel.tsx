@@ -241,7 +241,7 @@ export function GroupManagementPanel({ currentUserId }: { currentUserId: number 
         <Button
           variant="ghost"
           size="icon"
-          className="h-9 w-9 shrink-0 rounded-lg border border-slate-200 bg-white text-slate-600 shadow-sm hover:bg-slate-50"
+          className="shrink-0 rounded-lg border border-slate-200 bg-white text-slate-600 shadow-sm hover:bg-slate-50"
           onClick={loadDirectory}
           disabled={busy !== null}
           aria-label="Refresh Splitwise groups"
@@ -287,7 +287,7 @@ export function GroupManagementPanel({ currentUserId }: { currentUserId: number 
               <label className="grid gap-1.5 text-xs font-medium text-slate-700">
                 Category
                 <select
-                  className="h-10 rounded-lg border border-slate-300 bg-white px-3 text-sm text-slate-800 outline-none transition hover:border-slate-400 focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/20"
+                  className="h-11 rounded-lg border border-slate-300 bg-white px-3 text-sm text-slate-800 outline-none transition hover:border-slate-400 focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/20 sm:h-10"
                   value={newGroupType}
                   onChange={(event) => setNewGroupType(event.target.value as GroupType)}
                 >
@@ -334,7 +334,7 @@ export function GroupManagementPanel({ currentUserId }: { currentUserId: number 
               </div>
             </div>
             <div className="flex flex-col items-stretch gap-3 sm:flex-row sm:items-center sm:justify-between">
-              <label className="inline-flex items-center gap-2 text-xs font-medium text-slate-600">
+              <label className="inline-flex min-h-11 items-center gap-2 text-xs font-medium text-slate-600">
                 <input
                   type="checkbox"
                   checked={simplifyByDefault}
@@ -358,7 +358,7 @@ export function GroupManagementPanel({ currentUserId }: { currentUserId: number 
             <label className="grid gap-1.5 text-xs font-medium text-slate-700">
               Group
               <select
-              className="h-10 w-full rounded-lg border border-slate-300 bg-white px-3 text-sm text-slate-800 outline-none transition hover:border-slate-400 focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/20"
+              className="h-11 w-full rounded-lg border border-slate-300 bg-white px-3 text-sm text-slate-800 outline-none transition hover:border-slate-400 focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/20 sm:h-10"
               value={selectedGroupId ?? ""}
               onChange={(event) => setSelectedGroupId(event.target.value ? Number(event.target.value) : null)}
               disabled={!groups.length}
@@ -376,7 +376,7 @@ export function GroupManagementPanel({ currentUserId }: { currentUserId: number 
             <div className="flex flex-col gap-2 sm:flex-row">
               <select
                 aria-label="Friend to add"
-                className="h-10 min-w-0 flex-1 rounded-lg border border-slate-300 bg-white px-3 text-sm text-slate-800 outline-none transition hover:border-slate-400 focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/20"
+                className="h-11 min-h-11 w-full min-w-0 rounded-lg border border-slate-300 bg-white px-3 text-sm text-slate-800 outline-none transition hover:border-slate-400 focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/20 sm:h-10 sm:min-h-10 sm:flex-1"
                 value={memberToAdd}
                 onChange={(event) => setMemberToAdd(event.target.value)}
                 disabled={selectedGroupId === null || !availableMembers.length}
@@ -410,7 +410,7 @@ export function GroupManagementPanel({ currentUserId }: { currentUserId: number 
               </div>
               <div className="flex flex-col gap-2 sm:flex-row">
                 <Input
-                  className="min-w-0 flex-1"
+                  className="min-w-0 sm:flex-1"
                   type="email"
                   value={inviteEmail}
                   onChange={(event) => setInviteEmail(event.target.value)}
