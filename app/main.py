@@ -124,5 +124,5 @@ def readiness() -> dict:
         raise HTTPException(status_code=503, detail="Database unavailable") from exc
     checks["database"] = "ok"
     checks["migration_revision"] = revision
-    checks["migration_current"] = revision == "20260811_0013"
+    checks["migration_current"] = revision == "20260811_0014"
     return {"status": "ready", "checks": checks}

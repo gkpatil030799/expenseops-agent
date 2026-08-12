@@ -7,7 +7,7 @@ external user until every preflight item is green.
 
 - Confirm `https://expenseops-production.up.railway.app/health` and `/readiness` return success.
 - Confirm Railway `Postgres` has a fresh manual backup under **Postgres → Backups**.
-- Confirm migrations report revision `20260811_0013` after deployment.
+- Confirm migrations report revision `20260811_0014` after deployment.
 - Confirm Google OAuth is in **External / Testing** and both the owner and design user are listed
   under **Google Auth Platform → Audience → Test users**.
 - Confirm the Google OAuth web client allows these exact redirect URIs:

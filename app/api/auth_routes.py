@@ -6,6 +6,7 @@ from urllib.parse import urlencode
 import httpx
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import RedirectResponse, Response
+from sqlalchemy.exc import SQLAlchemyError
 
 from app.api.deps import CurrentUser, CurrentWorkspace, DbSession
 from app.config import get_settings
@@ -97,7 +98,8 @@ def callback(request: Request, code: str, state: str, db: DbSession) -> Redirect
             settings=settings,
         )
         raw_session, _session = create_auth_session(db, user.id, workspace.id, settings)
-    except (OAuthStateError, OIDCValidationError, httpx.HTTPError) as exc:
+    except (OAuthStateError, OIDCValidationError, httpx.HTTPError, SQLAlchemyError) as exc:
+        db.rollback()
         log_event(
             logger,
             "oidc_login_failed",
