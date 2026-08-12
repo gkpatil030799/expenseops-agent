@@ -85,6 +85,53 @@ async function mockSpendingInsights(page: Page) {
   } }));
 }
 
+async function mockHouseholdOps(page: Page, options: { allClear?: boolean } = {}) {
+  const errands = options.allClear ? [] : [
+    { id: 11, title: "Pick up prescription", errand_type: "pickup", status: "planned", priority: "normal", place_name: "CVS Pharmacy", place_address: "500 N Central Ave, Phoenix, AZ", resolved_place_name: "CVS Pharmacy", resolved_place_address: "500 N Central Ave, Phoenix, AZ", resolved_latitude: 33.45, resolved_longitude: -112.07, resolved_provider_place_id: "cvs-1", resolved_open_now: true, resolved_opening_hours: null, place_resolution_status: "resolved", place_resolution_method: "automatic", due_at: null, estimated_duration_minutes: 10, notes: null, included_in_next_plan: true, linked_household_items: [], created_at: "2026-08-12T12:00:00Z", updated_at: "2026-08-12T12:00:00Z" },
+    { id: 12, title: "Shop for groceries", errand_type: "purchase", status: "planned", priority: "normal", place_name: "Aldi", place_address: "1401 E Bell Rd, Phoenix, AZ", resolved_place_name: "Aldi", resolved_place_address: "1401 E Bell Rd, Phoenix, AZ", resolved_latitude: 33.64, resolved_longitude: -112.05, resolved_provider_place_id: "aldi-1", resolved_open_now: true, resolved_opening_hours: null, place_resolution_status: "resolved", place_resolution_method: "automatic", due_at: null, estimated_duration_minutes: 15, notes: null, included_in_next_plan: true, linked_household_items: [], created_at: "2026-08-12T12:00:00Z", updated_at: "2026-08-12T12:00:00Z" },
+  ];
+  const plan = options.allClear ? null : {
+    id: 7,
+    planned_for: null,
+    base_location: "Home, 123 W Main Street",
+    status: "planned",
+    routing_provider: "google_routes",
+    routing_is_optimized: true,
+    route_url: "https://www.google.com/maps/dir/",
+    estimated_stop_minutes: 25,
+    travel_duration_minutes: 31,
+    distance_meters: 19312,
+    baseline_travel_duration_minutes: 18,
+    incremental_travel_duration_minutes: 13,
+    available_minutes: 75,
+    planning_mode: "while_out",
+    primary_destination: null,
+    final_destination: "Home, 123 W Main Street",
+    stop_count: 2,
+    stops: [
+      { id: 21, stop_order: 1, place_name: "CVS Pharmacy", place_address: "500 N Central Ave, Phoenix, AZ", errands: [], household_items: [] },
+      { id: 22, stop_order: 2, place_name: "Aldi", place_address: "1401 E Bell Rd, Phoenix, AZ", errands: [], household_items: [] },
+    ],
+    created_at: "2026-08-12T12:00:00Z",
+    updated_at: "2026-08-12T12:00:00Z",
+  };
+  const responses: Record<string, unknown> = {
+    "/api/household/errands": errands,
+    "/api/household/items": [],
+    "/api/household/errand-plans/latest": plan,
+    "/api/household/locations": [{ id: 1, label: "Home", address: "123 W Main Street", latitude: 33.4, longitude: -112.1, location_type: "home", created_at: "2026-08-01T12:00:00Z", updated_at: "2026-08-01T12:00:00Z" }],
+    "/api/replenishment/summary": { this_week: [], learning: { confirmed_acquisitions: 0, items_with_history: 0, active_model: null }, accuracy: { evaluated_predictions: 0, confidence_level: "insufficient" } },
+    "/api/replenishment/receipts": [],
+    "/api/replenishment/gmail/status": { configured: false, last_successful_sync_at: null, latest_receipt_at: null },
+  };
+  await page.route("**/api/**", (route) => {
+    const url = new URL(route.request().url());
+    const key = url.pathname === "/api/replenishment/receipts" ? url.pathname : url.pathname;
+    if (key in responses) return route.fulfill({ json: responses[key] });
+    return route.fallback();
+  });
+}
+
 test("visual foundation keeps the expense dashboard stable", async ({ page }) => {
   await mockExpenseDashboard(page);
   await page.goto("/");
@@ -109,13 +156,64 @@ test("primary destinations remain reachable from the responsive shell", async ({
   await page.goto("/");
 
   await page.getByRole("button", { name: "Household" }).click();
-  await expect(page.getByRole("heading", { name: "Household command center" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Household operations" })).toBeVisible();
 
   await page.getByRole("button", { name: "Deals" }).click();
   await expect(page.getByRole("heading", { name: "Deals worth your attention" })).toBeVisible();
 
   await page.getByRole("button", { name: "Expenses", exact: true }).click();
   await expect(page.getByRole("heading", { name: "Expense Review" })).toBeVisible();
+});
+
+test("household Today prioritizes one action and summarizes the route", async ({ page }) => {
+  await mockExpenseDashboard(page);
+  await mockHouseholdOps(page);
+  await page.goto("/");
+  await page.getByRole("button", { name: "Household" }).click();
+
+  await expect(page.getByRole("heading", { name: "Household operations" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Recommended next action" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Review your next route" })).toBeVisible();
+  await expect(page.getByLabel("Route sequence")).toContainText("Start");
+  await expect(page.getByLabel("Route sequence")).toContainText("CVS Pharmacy");
+  await expect(page.getByLabel("Route sequence")).toContainText("Aldi");
+  await expect(page.getByRole("heading", { name: "Find useful life-admin stops" })).toHaveCount(0);
+  await expect(page).toHaveScreenshot("household-today.png", { fullPage: true, timeout: 15_000 });
+
+  const results = await new AxeBuilder({ page }).withTags(["wcag2a", "wcag2aa"]).analyze();
+  const blocking = results.violations.filter(
+    (violation) => violation.impact === "critical" || violation.impact === "serious",
+  );
+  expect(blocking).toEqual([]);
+
+  await page.getByRole("button", { name: "Errands", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "Find useful life-admin stops" })).toBeVisible();
+});
+
+test("household Today uses one compact all-clear state", async ({ page }) => {
+  await mockExpenseDashboard(page);
+  await mockHouseholdOps(page, { allClear: true });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Household" }).click();
+
+  await expect(page.getByRole("heading", { name: "Household queue is clear" })).toBeVisible();
+  await expect(page.getByText("Receipts to review")).toHaveCount(0);
+  await expect(page.getByText("Active errands")).toHaveCount(0);
+});
+
+test("household tabs do not create mobile document overflow", async ({ page }) => {
+  await page.setViewportSize({ width: 320, height: 844 });
+  await mockExpenseDashboard(page);
+  await mockHouseholdOps(page);
+  await page.goto("/");
+  await page.getByRole("button", { name: "Household" }).click();
+  await expect(page.getByRole("heading", { name: "Household operations" })).toBeVisible();
+
+  const dimensions = await page.evaluate(() => ({
+    clientWidth: document.documentElement.clientWidth,
+    scrollWidth: document.documentElement.scrollWidth,
+  }));
+  expect(dimensions.scrollWidth).toBeLessThanOrEqual(dimensions.clientWidth);
 });
 
 test("account identity exposes settings without occupying primary navigation", async ({ page }) => {

@@ -31,7 +31,7 @@ visual-foundation changes began.
 | V2 — navigation, mobile shell, page headers | Complete | Responsive app shell, three-destination primary nav, account menu, mobile bottom nav, and shared contextual headers; implementation checkpoint on `agent/launch-readiness` |
 | V3 — Expense Review hierarchy | Complete | Compact filter sheet/chips, trustworthy transaction metadata, neutral amount hierarchy, two dominant decisions, overflow actions, guided split steps, and five-row recent activity; implementation checkpoint on `agent/launch-readiness` |
 | V4 — Insights narrative and charts | Complete (visual layer) | Scoped reporting context, primary Total Spend hierarchy, comparison narrative, collapsed filters, coherent chart order, keyboard-readable points, mobile alternatives, and data tables; accounting release gate remains open until Phase 6 |
-| V5 — Household command center | Not started | — |
+| V5 — Household command center | Complete (visual layer) | Household-wide page identity, one prioritized Today action, compact all-clear state, route summary on Today, full builder under Errands, Start → Stops → End sequence, active/history receipt separation, and mobile tab fades |
 | V6 — Settings information architecture | Not started | — |
 | V7 — Deals hierarchy | Not started | — |
 | V8 — visual/accessibility validation | Not started | — |
@@ -125,3 +125,26 @@ developer server from producing misleading screenshots or accessibility results.
 V4 changes only presentation, interaction, and reporting-scope disclosure. It does not certify the
 underlying accounting model. Insights remains non-releasable for general availability until the
 Phase 6 currency, viewer-share, refund, deduplication, and reconciliation invariants pass.
+
+## V5 validation evidence
+
+| Check | Result |
+| --- | --- |
+| Household identity | Errand-specific hero replaced with the household-wide “Household operations” page identity |
+| Today hierarchy | Exactly one recommended next action is selected in order: receipt review → unresolved location → replenishment estimate → active route work |
+| Empty state | Four large zero cards replaced by one compact, explicit all-clear state |
+| Loading truth | Initial load keeps skeletons visible instead of briefly rendering false zeroes |
+| Route placement | Today shows only a compact latest-route summary; the complete route builder remains under Errands |
+| Route comprehension | Route summaries render a semantic Start → Stops → End sequence at desktop and as a vertical sequence on mobile |
+| Receipt density | Only needs-review/failed receipts occupy the active queue; confirmed/ignored receipts remain under History |
+| Mobile navigation | Household tabs remain horizontally scrollable inside their container with edge fades; no document-level overflow at 320px |
+| Duplicate actions | Repeated route-detail action removed when the recommended next action already opens the route |
+| Frontend unit tests | 15 passed |
+| Frontend production build | Passed; existing bundle-size advisory remains non-blocking and tracked |
+| Household visual baselines | Added full-page desktop Chromium and Pixel 5 mobile Chromium snapshots using deterministic errands and a concrete route |
+| Household accessibility | Zero critical or serious axe violations |
+| Full Playwright suite | 34 passed across desktop Chromium and Pixel 5 mobile Chromium |
+
+V5 does not certify provider location verification, route-plan freshness, independent panel loading,
+receipt pagination, or batch receipt decisions. Those product-domain and resilience invariants remain
+assigned to the later backend/UX phases in the remediation plan.

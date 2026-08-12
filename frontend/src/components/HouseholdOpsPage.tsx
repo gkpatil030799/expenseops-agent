@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import {
   AlertCircle,
-  Archive,
+  ArrowRight,
   CalendarClock,
   Check,
   CheckCircle2,
@@ -195,7 +195,7 @@ export function HouseholdOpsPage() {
   }, []);
 
   async function loadHouseholdOps() {
-    setBusy("refresh");
+    setBusy((current) => current === "initial" ? "initial" : "refresh");
     setError(null);
     try {
       const [loadedErrands, loadedItems, latestPlan, loadedLocations, loadedLearning, loadedReceipts, loadedGmailStatus] = await Promise.all([
@@ -730,8 +730,8 @@ export function HouseholdOpsPage() {
     <div className="space-y-5">
       <PageHeader
         eyebrow={<span className="inline-flex items-center gap-2"><House className="h-4 w-4" aria-hidden="true" />Household</span>}
-        title="Household command center"
-        description="Capture errands, anticipate staples, and combine work into fewer stops."
+        title="Household operations"
+        description="See what needs attention, plan errands, and keep recurring household work moving."
         actions={<Button
             variant="secondary"
             className="bg-white/10 text-white ring-1 ring-white/15 hover:bg-white/15"
@@ -767,6 +767,8 @@ export function HouseholdOpsPage() {
           unresolvedErrandCount={activeErrands.filter((errand) => errand.place_resolution_status !== "resolved").length}
           activeErrandCount={activeErrands.length}
           dueItemCount={dueItems.length}
+          plan={plan}
+          loading={busy === "initial"}
           onChange={setHouseholdView}
         />
       ) : null}
@@ -863,7 +865,7 @@ export function HouseholdOpsPage() {
         </CardContent>
       </Card> : null}
 
-      {householdView === "today" || householdView === "errands" ? <WhileOutPanel
+      {householdView === "errands" ? <WhileOutPanel
         locations={locations}
         originChoice={originChoice}
         manualOrigin={manualOrigin}
@@ -1074,17 +1076,55 @@ function HouseholdNavigation({ active, onChange, receiptCount }: { active: House
     { value: "staples", label: "Staples" },
     { value: "history", label: "History" },
   ];
-  return <nav className="flex gap-1 overflow-x-auto rounded-xl border border-slate-200 bg-white p-1 shadow-sm" aria-label="Household Ops sections">{views.map((view) => <button key={view.value} type="button" onClick={() => onChange(view.value)} aria-current={active === view.value ? "page" : undefined} className={`whitespace-nowrap rounded-lg px-4 py-2 text-sm font-medium transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500 ${active === view.value ? "bg-indigo-600 text-white shadow-sm" : "text-slate-600 hover:bg-slate-50 hover:text-slate-950"}`}>{view.label}{view.value === "receipts" && receiptCount ? <span className={`ml-2 rounded-full px-1.5 py-0.5 text-xs ${active === view.value ? "bg-white/20 text-white" : "bg-amber-100 text-amber-800"}`}>{receiptCount}</span> : null}</button>)}</nav>;
+  return <div className="relative overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm">
+    <span className="pointer-events-none absolute inset-y-0 left-0 z-10 w-5 bg-gradient-to-r from-white to-transparent sm:hidden" aria-hidden="true" />
+    <nav className="flex gap-1 overflow-x-auto p-1 px-4 sm:px-1" aria-label="Household Ops sections">{views.map((view) => <button key={view.value} type="button" onClick={() => onChange(view.value)} aria-current={active === view.value ? "page" : undefined} className={`min-h-11 whitespace-nowrap rounded-lg px-4 py-2 text-sm font-medium transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500 ${active === view.value ? "bg-indigo-600 text-white shadow-sm" : "text-slate-600 hover:bg-slate-50 hover:text-slate-950"}`}>{view.label}{view.value === "receipts" && receiptCount ? <span className={`ml-2 rounded-full px-1.5 py-0.5 text-xs ${active === view.value ? "bg-white/20 text-white" : "bg-amber-100 text-amber-800"}`}>{receiptCount}</span> : null}</button>)}</nav>
+    <span className="pointer-events-none absolute inset-y-0 right-0 z-10 w-8 bg-gradient-to-l from-white to-transparent sm:hidden" aria-hidden="true" />
+  </div>;
 }
 
-function TodayOverview({ receiptCount, unresolvedErrandCount, activeErrandCount, dueItemCount, onChange }: { receiptCount: number; unresolvedErrandCount: number; activeErrandCount: number; dueItemCount: number; onChange: (value: HouseholdView) => void }) {
-  const cards: Array<{ label: string; value: number; detail: string; view: HouseholdView; icon: typeof House; attention: boolean }> = [
-    { label: "Receipts to review", value: receiptCount, detail: receiptCount ? "Classify purchases for learning" : "Queue is clear", view: "receipts", icon: ReceiptText, attention: receiptCount > 0 },
-    { label: "Errands needing locations", value: unresolvedErrandCount, detail: unresolvedErrandCount ? "Resolve before routing" : "All active stops are concrete", view: "errands", icon: MapPin, attention: unresolvedErrandCount > 0 },
-    { label: "Active errands", value: activeErrandCount, detail: activeErrandCount ? "Ready to combine into a trip" : "Nothing waiting", view: "errands", icon: ListChecks, attention: false },
-    { label: "Staples probably due", value: dueItemCount, detail: dueItemCount ? "Review replenishment suggestions" : "Nothing surfaced today", view: "staples", icon: ShoppingBasket, attention: dueItemCount > 0 },
-  ];
-  return <section><div className="mb-3"><h2 className="text-xl font-semibold text-slate-950">What needs attention</h2><p className="mt-1 text-sm text-slate-600">Start with decisions that unblock today’s errands and learning.</p></div><div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">{cards.map(({ label, value, detail, view, icon: Icon, attention }) => <button key={label} type="button" onClick={() => onChange(view)} className="rounded-xl border border-slate-200 bg-white p-4 text-left shadow-sm transition hover:border-indigo-200 hover:shadow-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500"><span className="flex items-start justify-between gap-3"><span><span className="block text-xs font-semibold uppercase tracking-wide text-slate-600">{label}</span><span className="mt-2 block text-3xl font-semibold text-slate-950">{value}</span></span><span className={`flex h-9 w-9 items-center justify-center rounded-xl ${attention ? "bg-amber-50 text-amber-700" : "bg-slate-100 text-slate-600"}`}><Icon className="h-4 w-4" /></span></span><span className="mt-2 block text-xs text-slate-600">{detail}</span></button>)}</div></section>;
+function TodayOverview({ receiptCount, unresolvedErrandCount, activeErrandCount, dueItemCount, plan, loading, onChange }: { receiptCount: number; unresolvedErrandCount: number; activeErrandCount: number; dueItemCount: number; plan: ErrandPlan | null; loading: boolean; onChange: (value: HouseholdView) => void }) {
+  if (loading) return <section aria-label="Loading household overview" role="status" className="space-y-3"><span className="sr-only">Loading household overview</span><div className="ui-skeleton h-40 rounded-xl" /><div className="ui-skeleton h-28 rounded-xl" /></section>;
+
+  const recommendation = receiptCount
+    ? { icon: ReceiptText, eyebrow: "Learning needs a decision", title: `Review ${receiptCount} receipt${receiptCount === 1 ? "" : "s"}`, detail: "Confirm which purchases should teach replenishment timing.", action: "Review receipts", view: "receipts" as HouseholdView }
+    : unresolvedErrandCount
+      ? { icon: MapPin, eyebrow: "Route is blocked", title: `Choose locations for ${unresolvedErrandCount} errand${unresolvedErrandCount === 1 ? "" : "s"}`, detail: "Every stop needs a concrete destination before it can be routed.", action: "Resolve locations", view: "errands" as HouseholdView }
+      : dueItemCount
+        ? { icon: ShoppingBasket, eyebrow: "Likely needed soon", title: `Review ${dueItemCount} staple${dueItemCount === 1 ? "" : "s"}`, detail: "These are timing estimates based on confirmed purchase history, not inventory claims.", action: "Review staples", view: "staples" as HouseholdView }
+        : activeErrandCount
+          ? { icon: Route, eyebrow: plan ? "Next trip is ready" : "Errands can be combined", title: plan ? "Review your next route" : `Plan ${activeErrandCount} active errand${activeErrandCount === 1 ? "" : "s"}`, detail: plan ? "Check the latest stops before you leave." : "Choose an origin and endpoint to reduce separate trips.", action: plan ? "Open route details" : "Build a route", view: "errands" as HouseholdView }
+          : null;
+
+  if (!recommendation) {
+    return <section className="rounded-xl border border-emerald-200 bg-emerald-50/70 px-5 py-6" aria-labelledby="household-all-clear"><div className="flex flex-col gap-4 sm:flex-row sm:items-center"><span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-white text-emerald-700 shadow-sm ring-1 ring-emerald-200"><CheckCircle2 className="h-5 w-5" /></span><div><h2 id="household-all-clear" className="text-lg font-semibold text-slate-950">Household queue is clear</h2><p className="mt-1 text-sm text-slate-700">No receipts, errands, or replenishment estimates need attention right now.</p></div></div></section>;
+  }
+
+  const Icon = recommendation.icon;
+  return <section className="space-y-4" aria-labelledby="household-next-action">
+    <div><h2 id="household-next-action" className="text-xl font-semibold text-slate-950">Recommended next action</h2><p className="mt-1 text-sm text-slate-600">One useful step, based on what is currently waiting.</p></div>
+    <Card variant="command" className="overflow-hidden">
+      <CardContent className="flex flex-col gap-5 p-5 sm:flex-row sm:items-center sm:justify-between">
+        <div className="flex items-start gap-4"><span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-white/10 text-indigo-100 ring-1 ring-white/15"><Icon className="h-5 w-5" /></span><div><p className="text-xs font-semibold uppercase tracking-[0.12em] text-indigo-200">{recommendation.eyebrow}</p><h3 className="mt-1 text-xl font-semibold text-white">{recommendation.title}</h3><p className="mt-1 max-w-2xl text-sm leading-6 text-slate-300">{recommendation.detail}</p></div></div>
+        <Button className="shrink-0 bg-white text-indigo-950 hover:bg-indigo-50" onClick={() => onChange(recommendation.view)}>{recommendation.action}<ArrowRight className="h-4 w-4" /></Button>
+      </CardContent>
+    </Card>
+    <div className="flex flex-wrap gap-2 text-xs text-slate-700" aria-label="Household queue summary">
+      <QueuePill icon={ListChecks} value={activeErrandCount} label="active errands" onClick={() => onChange("errands")} />
+      <QueuePill icon={ReceiptText} value={receiptCount} label="receipts to review" onClick={() => onChange("receipts")} />
+      <QueuePill icon={ShoppingBasket} value={dueItemCount} label="staples surfaced" onClick={() => onChange("staples")} />
+    </div>
+    {plan ? <TodayRouteSummary plan={plan} onOpen={() => onChange("errands")} showAction={recommendation.view !== "errands"} /> : null}
+  </section>;
+}
+
+function QueuePill({ icon: Icon, value, label, onClick }: { icon: typeof House; value: number; label: string; onClick: () => void }) {
+  return <button type="button" onClick={onClick} className="inline-flex min-h-11 items-center gap-2 rounded-full border border-slate-200 bg-white px-3 font-medium shadow-sm hover:border-indigo-200 hover:bg-indigo-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500"><Icon className="h-4 w-4 text-slate-500" /><strong className="tabular-nums text-slate-950">{value}</strong>{label}</button>;
+}
+
+function TodayRouteSummary({ plan, onOpen, showAction }: { plan: ErrandPlan; onOpen: () => void; showAction: boolean }) {
+  const totalMinutes = plan.travel_duration_minutes !== null ? plan.travel_duration_minutes + plan.estimated_stop_minutes : null;
+  return <Card variant="secondary"><CardContent className="space-y-4 p-4 sm:p-5"><div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between"><div><p className="text-xs font-semibold uppercase tracking-[0.12em] text-slate-500">Latest route</p><h3 className="mt-1 font-semibold text-slate-950">{plan.stop_count} {plan.stop_count === 1 ? "stop" : "stops"}{totalMinutes !== null ? ` · about ${totalMinutes} minutes` : ""}</h3></div>{showAction ? <Button variant="outline" size="sm" onClick={onOpen}>Open route details<ArrowRight className="h-4 w-4" /></Button> : null}</div><RouteSequence plan={plan} compact /></CardContent></Card>;
 }
 
 function GmailSyncStatus({ status, busy }: { status: GmailReceiptSyncStatus | null; busy: boolean }) {
@@ -1476,10 +1516,39 @@ function PlanSummary({ plan }: { plan: ErrandPlan }) {
   return (
     <div className="overflow-hidden rounded-xl border border-slate-200 bg-slate-50/60">
       <div className="flex items-start justify-between gap-3 border-b border-slate-200 px-4 py-3"><div><h3 className="font-semibold text-slate-950">Next trip</h3><p className="mt-0.5 text-xs text-slate-600">{plan.stop_count} {plan.stop_count === 1 ? "stop" : "stops"}{plan.travel_duration_minutes !== null ? ` · Travel ${plan.travel_duration_minutes} min` : ""}{distanceMiles !== null ? ` · ${distanceMiles} mi` : ""}{plan.estimated_stop_minutes ? ` · Stops ${plan.estimated_stop_minutes} min` : ""}{totalMinutes !== null ? ` · Total ${totalMinutes} min` : ""}</p>{plan.incremental_travel_duration_minutes !== null ? <p className="mt-1 text-xs font-medium text-indigo-700">Approximately +{plan.incremental_travel_duration_minutes} routed minutes versus the baseline.</p> : null}</div><Badge variant="secondary">{plan.routing_is_optimized ? "Route optimized" : plan.travel_duration_minutes !== null ? "Measured route" : "Routing unavailable"}</Badge></div>
+      <div className="border-b border-slate-200 bg-white px-4 py-4"><RouteSequence plan={plan} /></div>
       <ol className="divide-y divide-slate-200">{plan.stops.map((stop) => <li key={stop.id} className="flex gap-3 px-4 py-3"><span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-slate-900 text-xs font-semibold text-white">{stop.stop_order}</span><div className="min-w-0"><p className="text-sm font-semibold text-slate-900">{stop.place_name}</p>{stop.place_address ? <p className="truncate text-xs text-slate-600">{stop.place_address}</p> : null}<ul className="mt-1 space-y-0.5 text-xs text-slate-600">{stop.errands.map((errand) => <li key={`errand-${errand.id}`}>• {errand.title}</li>)}{stop.household_items.map((item) => <li key={`item-${item.id}`} className="text-indigo-700">• Buy {item.quantity ? `${item.quantity} ` : ""}{item.unit ? `${item.unit} ` : ""}{item.name}</li>)}</ul></div></li>)}</ol>
       <div className="p-3">{plan.route_url ? <Button asChild className="w-full"><a href={plan.route_url} target="_blank" rel="noreferrer"><ExternalLink className="h-4 w-4" />Start route</a></Button> : <p className="text-center text-xs text-slate-600">Add a place to at least one errand to start a route.</p>}</div>
     </div>
   );
+}
+
+function RouteSequence({ plan, compact = false }: { plan: ErrandPlan; compact?: boolean }) {
+  const finalStop = plan.stops.at(-1);
+  const hasSeparateEnd = Boolean(plan.final_destination);
+  const nodes = [
+    { key: "start", kind: "Start", name: plan.base_location || "Starting point", address: null as string | null },
+    ...plan.stops.map((stop, index) => ({
+      key: `stop-${stop.id}`,
+      kind: !hasSeparateEnd && index === plan.stops.length - 1 ? "End" : `Stop ${index + 1}`,
+      name: stop.place_name,
+      address: stop.place_address,
+    })),
+    ...(hasSeparateEnd ? [{ key: "end", kind: "End", name: plan.final_destination || "Final destination", address: null as string | null }] : []),
+  ];
+  if (!plan.stops.length && !plan.final_destination) return <p className="text-sm text-slate-600">No concrete route stops yet.</p>;
+
+  return <ol className={`flex flex-col ${compact ? "gap-1" : "gap-2"} sm:flex-row sm:items-stretch`} aria-label="Route sequence">
+    {nodes.map((node, index) => <li key={node.key} className="flex min-w-0 flex-1 flex-col sm:flex-row sm:items-center">
+      <div className={`min-w-0 flex-1 rounded-lg border px-3 ${compact ? "py-2" : "py-3"} ${node.kind === "Start" || node.kind === "End" ? "border-indigo-200 bg-indigo-50" : "border-slate-200 bg-white"}`}>
+        <p className="text-[10px] font-semibold uppercase tracking-[0.12em] text-slate-600">{node.kind}</p>
+        <p className="mt-0.5 truncate text-xs font-semibold text-slate-900">{shortLocation(node.name)}</p>
+        {!compact && node.address ? <p className="mt-0.5 truncate text-[11px] text-slate-500">{node.address}</p> : null}
+      </div>
+      {index < nodes.length - 1 ? <ArrowRight className="mx-auto my-1 h-4 w-4 shrink-0 rotate-90 text-slate-400 sm:mx-2 sm:my-0 sm:rotate-0" aria-hidden="true" /> : null}
+    </li>)}
+    {!hasSeparateEnd && finalStop ? <li className="sr-only">Route ends at {finalStop.place_name}</li> : null}
+  </ol>;
 }
 
 function Field({ label, children }: { label: string; children: React.ReactNode }) { return <label className="grid gap-1.5 text-xs font-medium text-slate-700">{label}{children}</label>; }
@@ -1498,6 +1567,7 @@ function toLocalInput(value: string | null) { if (!value) return ""; const date 
 function dueLabel(value: string) { const due = new Date(value); const today = new Date(); const days = Math.ceil((due.getTime() - today.getTime()) / 86_400_000); if (days < 0) return "Overdue"; if (days === 0) return "Due today"; if (days === 1) return "Due tomorrow"; return `Due ${due.toLocaleDateString(undefined, { month: "short", day: "numeric" })}`; }
 function receiptDate(receipt: PurchaseReceipt) { return new Date(receipt.purchased_at || receipt.created_at).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" }); }
 function receiptTotal(receipt: PurchaseReceipt) { return receipt.total_cents === null ? "" : ` · ${new Intl.NumberFormat(undefined, { style: "currency", currency: receipt.currency || "USD" }).format(receipt.total_cents / 100)}`; }
+function shortLocation(value: string) { const trimmed = value.trim(); if (!trimmed) return "Location"; try { const parsed = JSON.parse(trimmed) as { label?: string; address?: string }; return parsed.label || parsed.address || trimmed; } catch { return trimmed.split(",")[0] || trimmed; } }
 function formatRelativeTime(value: string) { const seconds = Math.max(0, Math.round((Date.now() - new Date(value).getTime()) / 1000)); if (seconds < 60) return "just now"; if (seconds < 3600) return `${Math.floor(seconds / 60)} min ago`; if (seconds < 86400) return `${Math.floor(seconds / 3600)} hr ago`; return new Date(value).toLocaleDateString(undefined, { month: "short", day: "numeric" }); }
 function selectedLocation(choice: string, locations: SavedLocation[], current: PlanningLocation | null, manual: string): PlanningLocation | null { if (choice === "current") return current; if (choice.startsWith("saved:")) { const location = locations.find((item) => item.id === Number(choice.slice(6))); return location ? { saved_location_id: location.id } : null; } return manual.trim() ? { label: "Starting point", address: manual.trim() } : null; }
 async function deleteRequest(path: string) { const response = await fetch(path, { method: "DELETE" }); if (!response.ok) { const data = await response.json(); throw data; } }
