@@ -32,7 +32,10 @@ def issue_api_token() -> tuple[str, str]:
 
 
 def ensure_default_tenancy(db: Session) -> TenantContext:
-    user = db.scalar(select(User).where(User.email == DEFAULT_USER_EMAIL))
+    # Migration 0012 and a fresh local database both reserve the first user as the
+    # legacy/default owner. Its email may later change when a verified OIDC owner
+    # claims the workspace, so the email cannot remain the lookup key.
+    user = db.get(User, 1)
     if user is None:
         user = User(email=DEFAULT_USER_EMAIL, display_name="Local user", status="active")
         db.add(user)

@@ -16,6 +16,7 @@ from app.config import get_settings
 from app.logging_config import log_event
 from app.models import (
     ExpenseTransaction,
+    GmailAccount,
     TelegramIdentity,
     TelegramLinkCode,
     TransactionStatus,
@@ -35,7 +36,7 @@ from app.services.entity_resolution_service import (
 from app.services.llm_ai_chat_parser import AIChatIntent, AICustomValue, LLMAIChatParser
 from app.services.llm_conversation_parser import LLMConversationIntent, LLMConversationParser
 from app.services.llm_split_parser import LLMSplitParser
-from app.services.managed_auth_service import record_audit
+from app.services.managed_auth_service import record_audit, record_audit_once
 from app.services.receipt_ingestion_service import ReceiptIngestionService
 from app.services.share_calculator import (
     CustomSplitInput,
@@ -199,6 +200,16 @@ def _handle_telegram_connect(update: dict, db: DbSession) -> bool:
         .where(TelegramLinkCode.code_hash == hash_api_token(code))
     )
     if link is None or link.used_at is not None or _aware_datetime(link.expires_at) <= utc_now():
+        if link is not None:
+            record_audit(
+                db,
+                workspace_id=link.workspace_id,
+                user_id=link.user_id,
+                event_type="telegram_connect_failed",
+                resource_type="telegram_identity",
+                metadata={"reason": "expired_or_used"},
+            )
+            db.commit()
         TelegramService().send_message(
             "That ExpenseOps link code is invalid or expired. Generate a new one in Settings.",
             chat_id=chat_id,
@@ -215,6 +226,15 @@ def _handle_telegram_connect(update: dict, db: DbSession) -> bool:
     if existing is not None and (
         existing.user_id != link.user_id or existing.workspace_id != link.workspace_id
     ):
+        record_audit(
+            db,
+            workspace_id=link.workspace_id,
+            user_id=link.user_id,
+            event_type="telegram_connect_failed",
+            resource_type="telegram_identity",
+            metadata={"reason": "identity_already_linked"},
+        )
+        db.commit()
         TelegramService().send_message(
             "This Telegram account is already linked. Disconnect it before linking elsewhere.",
             chat_id=chat_id,
@@ -240,6 +260,14 @@ def _handle_telegram_connect(update: dict, db: DbSession) -> bool:
         event_type="telegram_connected",
         resource_type="telegram_identity",
     )
+    gmail_connected = db.scalar(select(GmailAccount.id)) is not None
+    if gmail_connected:
+        record_audit_once(
+            db,
+            workspace_id=link.workspace_id,
+            user_id=link.user_id,
+            event_type="onboarding_completed",
+        )
     db.commit()
     TelegramService().send_message(
         "Telegram is connected to your ExpenseOps workspace.", chat_id=chat_id

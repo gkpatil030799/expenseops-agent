@@ -30,6 +30,12 @@ def test_frontend_origin_parses_csv():
     assert settings.frontend_origin == ["https://a.example", "https://b.example"]
 
 
+def test_admin_user_emails_parse_csv():
+    settings = Settings(admin_user_emails="a@example.test,b@example.test")
+
+    assert settings.admin_user_emails == ["a@example.test", "b@example.test"]
+
+
 @pytest.mark.parametrize("scheme", ["postgres://", "postgresql://"])
 def test_database_url_uses_installed_psycopg3_driver(scheme):
     settings = Settings(database_url=f"{scheme}user:secret@db.example/expenseops")

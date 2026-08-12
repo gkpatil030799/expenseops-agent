@@ -9,6 +9,7 @@ from sqlalchemy import text
 from starlette.responses import Response
 
 from app.api import (
+    admin_routes,
     ai_memory_routes,
     auth_routes,
     context_routes,
@@ -67,6 +68,7 @@ def startup() -> None:
 
 
 app.include_router(plaid_routes.router)
+app.include_router(admin_routes.router)
 app.include_router(auth_routes.router)
 app.include_router(context_routes.router)
 app.include_router(integration_routes.router)
@@ -89,9 +91,38 @@ def root() -> FileResponse:
 
 @app.get("/health")
 def health() -> dict[str, str]:
+    return {"status": "ok", "app": settings.app_name}
+
+
+@app.get("/readiness")
+def readiness() -> dict:
+    checks: dict[str, object] = {
+        "database": "unknown",
+        "auth_mode": settings.auth_mode,
+        "oidc_configured": bool(
+            settings.oidc_issuer
+            and settings.oidc_audience
+            and settings.oidc_client_id
+            and settings.oidc_redirect_uri
+        ),
+        "gmail_configured": bool(settings.gmail_client_id and settings.gmail_client_secret),
+        "telegram_configured": bool(settings.telegram_bot_token),
+        "plaid_configured": bool(settings.plaid_client_id and settings.plaid_secret),
+        "splitwise_configured": bool(
+            settings.splitwise_api_key or settings.has_splitwise_oauth1_consumer
+        ),
+        "openai_configured": bool(settings.openai_api_key),
+        "google_maps_configured": bool(settings.google_maps_api_key),
+        "migration_revision": None,
+        "migration_current": False,
+    }
     try:
         with engine.connect() as connection:
             connection.execute(text("SELECT 1"))
+            revision = connection.scalar(text("SELECT version_num FROM alembic_version"))
     except Exception as exc:
         raise HTTPException(status_code=503, detail="Database unavailable") from exc
-    return {"status": "ok", "app": settings.app_name}
+    checks["database"] = "ok"
+    checks["migration_revision"] = revision
+    checks["migration_current"] = revision == "20260811_0013"
+    return {"status": "ready", "checks": checks}

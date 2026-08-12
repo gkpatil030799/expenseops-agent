@@ -11,7 +11,7 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
 import app.auth as auth
-from app.api import integration_routes, plaid_routes
+from app.api import admin_routes, integration_routes, plaid_routes
 from app.config import Settings
 from app.db import Base, get_db
 from app.main import app
@@ -211,6 +211,48 @@ def test_verified_bootstrap_owner_claims_migrated_workspace_without_sql(database
         assert user.email == "person@example.test"
         assert db.scalar(select(func.count(Workspace.id))) == 1
         assert db.scalar(select(func.count(AuthIdentity.id))) == 1
+
+
+def test_verified_bootstrap_claims_legacy_integrations_and_default_stays_stable(
+    database, monkeypatch
+):
+    import app.services.managed_auth_service as managed_auth
+
+    monkeypatch.setattr(managed_auth, "encrypt_secret", lambda value: f"encrypted:{value}")
+    with database() as db:
+        migrated = ensure_default_tenancy(db)
+        settings = _oidc_settings().model_copy(
+            update={
+                "oidc_bootstrap_email": "person@example.test",
+                "gmail_refresh_token": "gmail-token",
+                "gmail_user_id": "owner@gmail.test",
+                "telegram_allowed_user_id": "123",
+                "telegram_chat_id": "456",
+                "splitwise_api_key": "splitwise-key",
+            }
+        )
+        provision_oidc_identity(
+            db,
+            _verifier().validate(_identity_token()),
+            provider="https://identity.example",
+            settings=settings,
+        )
+        assert ensure_default_tenancy(db) == migrated
+        gmail = db.scalar(select(GmailAccount).execution_options(skip_tenant_scope=True))
+        telegram = db.scalar(
+            select(TelegramIdentity).execution_options(skip_tenant_scope=True)
+        )
+        from app.models import SplitwiseIntegration
+
+        splitwise = db.scalar(
+            select(SplitwiseIntegration).execution_options(skip_tenant_scope=True)
+        )
+        assert gmail.workspace_id == migrated.workspace_id
+        assert gmail.refresh_token_encrypted == "encrypted:gmail-token"
+        assert telegram.telegram_user_id == "123"
+        assert splitwise.credentials_encrypted.startswith("encrypted:")
+        assert db.scalar(select(func.count(User.id))) == 1
+        assert db.scalar(select(func.count(Workspace.id))) == 1
 
 
 @pytest.mark.parametrize(
@@ -554,6 +596,63 @@ def test_audit_metadata_drops_sensitive_fields(database):
         db.commit()
         event = db.scalar(select(AuditEvent))
         assert event.metadata_json == {"provider": "oidc"}
+
+
+def test_admin_onboarding_funnel_is_allowlisted_and_contains_no_user_payload(
+    onboarding_app, monkeypatch
+):
+    client, database, contexts = onboarding_app
+    with database() as db:
+        for event_type in (
+            "user_first_login",
+            "workspace_created",
+            "gmail_connected",
+            "telegram_connected",
+            "onboarding_completed",
+            "first_errand_created",
+        ):
+            record_audit(
+                db,
+                workspace_id=contexts["owner"].workspace_id,
+                user_id=contexts["owner"].user_id,
+                event_type=event_type,
+            )
+        db.commit()
+    monkeypatch.setattr(
+        admin_routes,
+        "get_settings",
+        lambda: Settings(admin_user_emails=["owner@example.test"], _env_file=None),
+    )
+    allowed = client.get(
+        "/api/admin/onboarding-funnel",
+        headers={"Authorization": "Bearer owner-token"},
+    )
+    denied = client.get(
+        "/api/admin/onboarding-funnel",
+        headers={"Authorization": "Bearer guest-token"},
+    )
+    assert allowed.status_code == 200
+    assert allowed.json()["authenticated_users"] == 1
+    assert allowed.json()["users_with_successful_workflow"] == 1
+    assert denied.status_code == 404
+
+
+def test_first_login_records_safe_onboarding_events(database):
+    with database() as db:
+        user, workspace, _created = provision_oidc_identity(
+            db,
+            _verifier().validate(_identity_token()),
+            provider="https://identity.example",
+        )
+        events = set(
+            db.scalars(
+                select(AuditEvent.event_type).where(
+                    AuditEvent.workspace_id == workspace.id,
+                    AuditEvent.user_id == user.id,
+                )
+            )
+        )
+        assert {"user_first_login", "workspace_created", "onboarding_started"} <= events
 
 
 def test_in_memory_rate_limit_backend_enforces_window():

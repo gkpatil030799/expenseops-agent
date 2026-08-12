@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from urllib.parse import urlencode
 
 import httpx
@@ -8,6 +9,7 @@ from fastapi.responses import RedirectResponse, Response
 
 from app.api.deps import CurrentUser, CurrentWorkspace, DbSession
 from app.config import get_settings
+from app.logging_config import log_event
 from app.models import AuthSession, utc_now
 from app.rate_limit import rate_limiter
 from app.services.managed_auth_service import (
@@ -24,6 +26,7 @@ from app.services.oauth_state_service import (
 )
 
 router = APIRouter(prefix="/auth", tags=["authentication"])
+logger = logging.getLogger(__name__)
 
 
 @router.get("/login")
@@ -90,6 +93,12 @@ def callback(request: Request, code: str, state: str, db: DbSession) -> Redirect
         )
         raw_session, _session = create_auth_session(db, user.id, workspace.id, settings)
     except (OAuthStateError, OIDCValidationError, httpx.HTTPError) as exc:
+        log_event(
+            logger,
+            "oidc_login_failed",
+            level=logging.WARNING,
+            error_class=type(exc).__name__,
+        )
         raise HTTPException(status_code=400, detail="Authentication failed") from exc
     response = RedirectResponse(stored.redirect_after or "/")
     response.set_cookie(

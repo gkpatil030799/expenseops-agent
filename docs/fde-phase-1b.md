@@ -83,3 +83,6 @@ Use `AUTH_MODE=local` locally. For a production-style smoke test, use a test OID
 test users: verify separate personal workspaces, invite the second user into a shared workspace,
 switch both users between workspaces, and confirm each integration appears only in its connected
 workspace.
+
+For the first Railway design-user deployment, follow
+[first-design-user-onboarding.md](first-design-user-onboarding.md).

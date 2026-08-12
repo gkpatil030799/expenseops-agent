@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import secrets
 from datetime import timedelta
 from urllib.parse import urlencode
@@ -11,6 +12,7 @@ from sqlalchemy import select
 
 from app.api.deps import CurrentUser, CurrentWorkspace, DbSession
 from app.config import get_settings
+from app.logging_config import log_event
 from app.models import (
     GmailAccount,
     PlaidItem,
@@ -21,7 +23,7 @@ from app.models import (
 )
 from app.rate_limit import rate_limiter
 from app.security import encrypt_secret
-from app.services.managed_auth_service import record_audit
+from app.services.managed_auth_service import record_audit, record_audit_once
 from app.services.oauth_state_service import (
     OAuthStateError,
     consume_oauth_state,
@@ -30,6 +32,7 @@ from app.services.oauth_state_service import (
 from app.tenancy import hash_api_token
 
 router = APIRouter(prefix="/api/integrations", tags=["integrations"])
+logger = logging.getLogger(__name__)
 
 
 @router.get("")
@@ -78,6 +81,13 @@ def connect_gmail(
     if not settings.gmail_client_id or not settings.gmail_client_secret:
         raise HTTPException(status_code=400, detail="Gmail OAuth is not configured")
     rate_limiter.check(f"gmail-oauth:{user.id}", limit=10, window_seconds=600)
+    record_audit(
+        db,
+        workspace_id=workspace.id,
+        user_id=user.id,
+        event_type="gmail_connect_started",
+        resource_type="gmail_account",
+    )
     state = create_oauth_state(
         db,
         provider="gmail",
@@ -104,6 +114,7 @@ def connect_gmail(
 def gmail_callback(
     code: str,
     state: str,
+    request: Request,
     db: DbSession,
     user: CurrentUser,
     workspace: CurrentWorkspace,
@@ -154,8 +165,25 @@ def gmail_callback(
             event_type="gmail_connected",
             resource_type="gmail_account",
         )
+        _record_onboarding_complete_if_ready(db, user.id, workspace.id)
         db.commit()
     except (OAuthStateError, httpx.HTTPError, ValueError) as exc:
+        record_audit(
+            db,
+            workspace_id=workspace.id,
+            user_id=user.id,
+            event_type="gmail_connect_failed",
+            resource_type="gmail_account",
+            metadata={"error_class": type(exc).__name__},
+        )
+        db.commit()
+        log_event(
+            logger,
+            "gmail_connect_failed",
+            level=logging.WARNING,
+            error_class=type(exc).__name__,
+            request_id=request.headers.get("X-Request-ID"),
+        )
         raise HTTPException(status_code=400, detail="Gmail connection failed") from exc
     return RedirectResponse(url="/?workspace=settings", status_code=303)
 
@@ -183,6 +211,13 @@ def telegram_link_code(
         expires_at=utc_now() + timedelta(minutes=10),
     )
     db.add(code)
+    record_audit(
+        db,
+        workspace_id=workspace.id,
+        user_id=user.id,
+        event_type="telegram_connect_started",
+        resource_type="telegram_identity",
+    )
     db.commit()
     return {"code": raw, "command": f"/connect {raw}", "expires_at": code.expires_at}
 
@@ -227,3 +262,15 @@ def disconnect_splitwise(db: DbSession, user: CurrentUser, workspace: CurrentWor
         db, workspace_id=workspace.id, user_id=user.id, event_type="splitwise_disconnected"
     )
     db.commit()
+
+
+def _record_onboarding_complete_if_ready(db: DbSession, user_id: int, workspace_id: int) -> None:
+    gmail_connected = db.scalar(select(GmailAccount.id)) is not None
+    telegram_connected = db.scalar(select(TelegramIdentity.id)) is not None
+    if gmail_connected and telegram_connected:
+        record_audit_once(
+            db,
+            workspace_id=workspace_id,
+            user_id=user_id,
+            event_type="onboarding_completed",
+        )

@@ -28,6 +28,17 @@ def test_health_route_is_public():
     assert response.status_code == 200
 
 
+def test_readiness_reports_database_and_optional_configuration_without_secrets():
+    response = TestClient(app).get("/readiness")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "ready"
+    assert payload["checks"]["database"] == "ok"
+    assert "client_secret" not in str(payload).casefold()
+    assert "api_key" not in str(payload).casefold()
+
+
 def test_dashboard_api_requires_auth_in_production(monkeypatch):
     import app.auth as auth
 
@@ -90,7 +101,7 @@ def test_production_oidc_mode_rejects_static_dev_token():
 def test_public_webhook_paths_are_not_auth_protected():
     import app.auth as auth
 
-    for path in ["/telegram/webhook", "/plaid/webhook", "/health"]:
+    for path in ["/telegram/webhook", "/plaid/webhook", "/health", "/readiness"]:
         request = type(
             "Request",
             (),
@@ -107,3 +118,39 @@ def test_button_mode_routes_are_not_changed_by_auth_helpers():
     assert keyboard["inline_keyboard"][0][0]["text"] == "Personal"
     assert keyboard["inline_keyboard"][0][1]["text"] == "Draft"
     assert keyboard["inline_keyboard"][1][0]["text"] == "Split"
+
+
+def test_production_cookie_writes_require_allowed_origin():
+    import app.auth as auth
+
+    settings = _safe_production_settings(
+        auth_mode="oidc",
+        oidc_issuer="https://identity.example",
+        oidc_audience="expenseops",
+        oidc_client_id="client-id",
+        oidc_redirect_uri="https://expenseops.example/auth/callback",
+        app_public_url="https://expenseops.example",
+        frontend_origin=["https://expenseops.example"],
+    )
+
+    def request(origin: str):
+        return type(
+            "Request",
+            (),
+            {
+                "method": "POST",
+                "cookies": {settings.auth_session_cookie_name: "session"},
+                "headers": {"origin": origin},
+                "url": type(
+                    "Url",
+                    (),
+                    {
+                        "scheme": "https",
+                        "netloc": "expenseops.example",
+                    },
+                )(),
+            },
+        )()
+
+    assert auth._csrf_origin_allowed(request("https://expenseops.example"), settings)
+    assert not auth._csrf_origin_allowed(request("https://attacker.example"), settings)

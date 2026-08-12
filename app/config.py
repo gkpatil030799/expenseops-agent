@@ -40,6 +40,7 @@ class Settings(BaseSettings):
     oidc_bootstrap_email: str = ""
     auth_session_cookie_name: str = "expenseops_session"
     auth_session_hours: int = Field(default=168, ge=1, le=720)
+    admin_user_emails: Annotated[list[str], NoDecode] = Field(default_factory=list)
     rate_limit_backend: Literal["memory"] = "memory"
     enable_postgres_rls: bool = False
 
@@ -123,7 +124,12 @@ class Settings(BaseSettings):
     household_provider_cache_ttl_seconds: int = Field(default=900, ge=0, le=86400)
 
     @field_validator(
-        "frontend_origin", "plaid_country_codes", "plaid_products", "oidc_algorithms", mode="before"
+        "frontend_origin",
+        "plaid_country_codes",
+        "plaid_products",
+        "oidc_algorithms",
+        "admin_user_emails",
+        mode="before",
     )
     @classmethod
     def parse_csv(cls, value: str | list[str]) -> list[str]:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import secrets
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
@@ -10,15 +11,20 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.config import Settings, get_settings
+from app.logging_config import get_trace_id
 from app.models import (
     AuditEvent,
     AuthIdentity,
     AuthSession,
+    GmailAccount,
+    SplitwiseIntegration,
+    TelegramIdentity,
     User,
     Workspace,
     WorkspaceMembership,
     utc_now,
 )
+from app.security import encrypt_secret
 from app.tenancy import DEFAULT_USER_EMAIL, TenantContext, hash_api_token
 
 
@@ -96,6 +102,7 @@ def provision_oidc_identity(
         )
     )
     created = identity is None
+    claimed_legacy_workspace = False
     if identity is None:
         user = None
         if claims.get("email_verified") is True:
@@ -111,6 +118,7 @@ def provision_oidc_identity(
                 )
                 if has_identity is None:
                     user = candidate
+                    claimed_legacy_workspace = candidate.email == DEFAULT_USER_EMAIL
         if user is None:
             user = User(
                 email=email,
@@ -176,6 +184,8 @@ def provision_oidc_identity(
         )
     else:
         workspace = db.get(Workspace, membership.workspace_id)
+    if claimed_legacy_workspace:
+        _claim_legacy_integrations(db, user.id, workspace.id, settings)
     record_audit(
         db,
         workspace_id=workspace.id,
@@ -183,6 +193,20 @@ def provision_oidc_identity(
         event_type="login",
         metadata={"provider": provider},
     )
+    if created:
+        record_audit_once(
+            db,
+            workspace_id=workspace.id,
+            user_id=user.id,
+            event_type="user_first_login",
+            metadata={"provider": provider},
+        )
+        record_audit_once(
+            db,
+            workspace_id=workspace.id,
+            user_id=user.id,
+            event_type="onboarding_started",
+        )
     db.commit()
     return user, workspace, created
 
@@ -247,12 +271,148 @@ def record_audit(
         event_type=event_type,
         resource_type=resource_type,
         resource_id=resource_id,
-        request_id=request_id,
+        request_id=request_id or get_trace_id(),
         metadata_json=safe_metadata,
     )
     db.add(event)
     return event
 
 
+def record_audit_once(
+    db: Session,
+    *,
+    workspace_id: int | None = None,
+    user_id: int | None = None,
+    event_type: str,
+    resource_type: str | None = None,
+    resource_id: str | None = None,
+    metadata: dict | None = None,
+) -> AuditEvent | None:
+    workspace_id = workspace_id or db.info.get("workspace_id")
+    user_id = user_id if user_id is not None else db.info.get("user_id")
+    if workspace_id is None:
+        return None
+    pending = any(
+        isinstance(value, AuditEvent)
+        and value.workspace_id == workspace_id
+        and value.event_type == event_type
+        for value in db.new
+    )
+    if pending:
+        return None
+    existing = db.scalar(
+        select(AuditEvent.id).where(
+            AuditEvent.workspace_id == workspace_id,
+            AuditEvent.event_type == event_type,
+        )
+    )
+    if existing is not None:
+        return None
+    return record_audit(
+        db,
+        workspace_id=workspace_id,
+        user_id=user_id,
+        event_type=event_type,
+        resource_type=resource_type,
+        resource_id=resource_id,
+        metadata=metadata,
+    )
+
+
 def _aware(value: datetime) -> datetime:
     return value if value.tzinfo else value.replace(tzinfo=UTC)
+
+
+def _claim_legacy_integrations(
+    db: Session, user_id: int, workspace_id: int, settings: Settings
+) -> None:
+    gmail_connected = db.scalar(
+        select(GmailAccount.id).where(GmailAccount.workspace_id == workspace_id)
+    ) is not None
+    if settings.gmail_refresh_token and not gmail_connected:
+        db.add(
+            GmailAccount(
+                workspace_id=workspace_id,
+                user_id=user_id,
+                google_user_id=settings.gmail_user_id or "me",
+                refresh_token_encrypted=encrypt_secret(settings.gmail_refresh_token),
+            )
+        )
+        record_audit(
+            db,
+            workspace_id=workspace_id,
+            user_id=user_id,
+            event_type="gmail_connected",
+            resource_type="gmail_account",
+            metadata={"source": "verified_owner_bootstrap"},
+        )
+        gmail_connected = True
+    telegram_connected = db.scalar(
+        select(TelegramIdentity.id).where(TelegramIdentity.workspace_id == workspace_id)
+    ) is not None
+    if (
+        settings.telegram_allowed_user_id
+        and settings.telegram_chat_id
+        and not telegram_connected
+    ):
+        db.add(
+            TelegramIdentity(
+                workspace_id=workspace_id,
+                user_id=user_id,
+                telegram_user_id=settings.telegram_allowed_user_id,
+                chat_id=settings.telegram_chat_id,
+            )
+        )
+        record_audit(
+            db,
+            workspace_id=workspace_id,
+            user_id=user_id,
+            event_type="telegram_connected",
+            resource_type="telegram_identity",
+            metadata={"source": "verified_owner_bootstrap"},
+        )
+        telegram_connected = True
+    splitwise_credentials: dict[str, str] = {}
+    if settings.splitwise_api_key:
+        splitwise_credentials["splitwise_api_key"] = settings.splitwise_api_key
+    elif settings.splitwise_access_token:
+        splitwise_credentials.update(
+            {
+                "splitwise_access_token": settings.splitwise_access_token,
+                "splitwise_auth_scheme": settings.splitwise_auth_scheme,
+            }
+        )
+    elif settings.splitwise_oauth_token and settings.splitwise_oauth_token_secret:
+        splitwise_credentials.update(
+            {
+                "splitwise_oauth_token": settings.splitwise_oauth_token,
+                "splitwise_oauth_token_secret": settings.splitwise_oauth_token_secret,
+            }
+        )
+    if splitwise_credentials and db.scalar(
+        select(SplitwiseIntegration.id).where(
+            SplitwiseIntegration.workspace_id == workspace_id
+        )
+    ) is None:
+        db.add(
+            SplitwiseIntegration(
+                workspace_id=workspace_id,
+                credentials_encrypted=encrypt_secret(json.dumps(splitwise_credentials)),
+            )
+        )
+        record_audit(
+            db,
+            workspace_id=workspace_id,
+            user_id=user_id,
+            event_type="splitwise_connected",
+            resource_type="splitwise_integration",
+            metadata={"source": "verified_owner_bootstrap"},
+        )
+    if gmail_connected and telegram_connected:
+        record_audit_once(
+            db,
+            workspace_id=workspace_id,
+            user_id=user_id,
+            event_type="onboarding_completed",
+            metadata={"source": "verified_owner_bootstrap"},
+        )

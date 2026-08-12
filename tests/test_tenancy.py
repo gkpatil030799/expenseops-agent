@@ -221,6 +221,52 @@ def test_workspace_session_blocks_cross_tenant_direct_ids(tenant_db, model, key)
         assert db.get(model, values["b"][key]) is None
 
 
+def test_two_design_users_have_symmetric_data_and_integration_isolation(tenant_db):
+    factory, contexts = tenant_db
+    values = _seed_representative_data(factory, contexts)
+    for key, context in contexts.items():
+        with _scoped(factory, context) as db:
+            db.add(
+                GmailAccount(
+                    user_id=context.user_id,
+                    google_user_id=f"{key}@gmail.test",
+                    refresh_token_encrypted=f"encrypted-gmail-{key}",
+                )
+            )
+            db.commit()
+
+    protected = (
+        (PlaidItem, "plaid"),
+        (PurchaseReceipt, "receipt"),
+        (HouseholdItem, "item"),
+        (ReplenishmentPrediction, "prediction"),
+        (Errand, "errand"),
+        (PromotionOffer, "promotion"),
+    )
+    for own, other in (("a", "b"), ("b", "a")):
+        with _scoped(factory, contexts[own]) as db:
+            for model, identifier in protected:
+                assert db.get(model, values[own][identifier]) is not None
+                assert db.get(model, values[other][identifier]) is None
+            account = db.scalar(select(GmailAccount))
+            telegram = db.scalar(select(TelegramIdentity))
+            assert account.google_user_id == f"{own}@gmail.test"
+            assert telegram.telegram_user_id == f"telegram-{own}"
+
+        response = TestClient(app).get(
+            "/api/integrations",
+            headers={"Authorization": f"Bearer token-{own}"},
+        )
+        assert response.status_code == 200
+        assert response.json()["gmail"]["connected"] is True
+        assert response.json()["telegram"]["connected"] is True
+        listed = TestClient(app).get(
+            "/api/household/items",
+            headers={"Authorization": f"Bearer token-{own}"},
+        )
+        assert {item["id"] for item in listed.json()} == {values[own]["item"]}
+
+
 def test_transaction_lists_and_gets_do_not_leak_other_workspace(tenant_db):
     factory, contexts = tenant_db
     values = _seed_representative_data(factory, contexts)

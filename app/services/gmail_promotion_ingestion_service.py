@@ -16,6 +16,7 @@ from app.config import Settings, get_settings
 from app.job_tenancy import gmail_settings_for_session
 from app.models import GmailSyncCheckpoint, PromotionMessage, PromotionOffer, utc_now
 from app.services.gmail_client_service import GmailClient
+from app.services.managed_auth_service import record_audit_once
 from app.services.promotion_extraction_service import PromotionExtractionService
 from app.services.promotion_ranking_service import PromotionRankingService
 from app.services.promotion_trust_service import is_high_risk, safe_destination
@@ -179,6 +180,12 @@ class GmailPromotionIngestionService:
         message.parse_status = "parsed"
         message.parse_confidence = max(v.confidence for v in extracted)
         message.processed_at = utc_now()
+        if created:
+            record_audit_once(
+                self.db,
+                event_type="first_promotion_processed",
+                resource_type="promotion_offer",
+            )
         self.db.commit()
         return True, created
 

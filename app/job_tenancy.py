@@ -6,9 +6,14 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.config import Settings
-from app.models import GmailAccount, TelegramIdentity, Workspace
+from app.models import GmailAccount, TelegramIdentity, User, Workspace
 from app.security import decrypt_secret
-from app.tenancy import clear_session_tenant, ensure_default_tenancy, set_trusted_workspace
+from app.tenancy import (
+    DEFAULT_USER_EMAIL,
+    clear_session_tenant,
+    ensure_default_tenancy,
+    set_trusted_workspace,
+)
 
 
 @dataclass(frozen=True)
@@ -101,7 +106,9 @@ def gmail_settings_for_session(db: Session, settings: Settings) -> Settings:
         )
     default = ensure_default_tenancy(db)
     if default.workspace_id == workspace_id:
-        return settings
+        default_user = db.get(User, default.user_id)
+        if default_user is not None and default_user.email == DEFAULT_USER_EMAIL:
+            return settings
     return settings.model_copy(update={"gmail_refresh_token": ""})
 
 
@@ -119,5 +126,7 @@ def _telegram_settings(db: Session, workspace_id: int, settings: Settings) -> Se
         return settings.model_copy(update={"telegram_chat_id": identity.chat_id})
     default = ensure_default_tenancy(db)
     if default.workspace_id == workspace_id:
-        return settings
+        default_user = db.get(User, default.user_id)
+        if default_user is not None and default_user.email == DEFAULT_USER_EMAIL:
+            return settings
     return settings.model_copy(update={"telegram_chat_id": ""})

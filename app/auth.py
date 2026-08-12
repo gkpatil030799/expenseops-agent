@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import secrets
 from collections.abc import Awaitable, Callable
+from urllib.parse import urlsplit
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
@@ -29,6 +30,7 @@ from app.tenancy import (
 PUBLIC_EXACT_PATHS = {
     "/",
     "/health",
+    "/readiness",
     "/telegram/webhook",
     "/plaid/webhook",
     "/auth/login",
@@ -45,6 +47,8 @@ def install_dashboard_auth(app: FastAPI, settings: Settings) -> None:
         if _is_public_request(request):
             return await call_next(request)
         if settings.auth_mode == "oidc":
+            if not _csrf_origin_allowed(request, settings):
+                return JSONResponse(status_code=403, content={"detail": "Invalid request origin"})
             resolved = _managed_auth_context(request, settings)
             if resolved is not None:
                 context, auth_session_id = resolved
@@ -157,6 +161,26 @@ def _is_public_request(request: Request) -> bool:
     if request.method == "OPTIONS":
         return True
     return request.url.path in PUBLIC_EXACT_PATHS or request.url.path.startswith("/static/")
+
+
+def _csrf_origin_allowed(request: Request, settings: Settings) -> bool:
+    if request.method not in {"POST", "PUT", "PATCH", "DELETE"}:
+        return True
+    if not request.cookies.get(settings.auth_session_cookie_name):
+        return True
+    origin = _header_value(request, "origin").rstrip("/")
+    if not origin:
+        return not settings.is_production_mode
+    allowed = {value.rstrip("/") for value in settings.frontend_origin}
+    if settings.app_public_url:
+        allowed.add(settings.app_public_url.rstrip("/"))
+    request_origin = f"{request.url.scheme}://{request.url.netloc}".rstrip("/")
+    allowed.add(request_origin)
+    try:
+        parsed = urlsplit(origin)
+    except ValueError:
+        return False
+    return bool(parsed.scheme in {"http", "https"} and parsed.netloc and origin in allowed)
 
 
 def _auth_not_required(settings: Settings) -> bool:

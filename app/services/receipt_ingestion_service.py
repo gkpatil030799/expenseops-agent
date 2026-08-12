@@ -23,6 +23,7 @@ from app.services.item_normalization_service import (
     normalize_item_name,
     normalize_merchant,
 )
+from app.services.managed_auth_service import record_audit_once
 from app.services.quantity_normalization_service import normalize_quantity
 from app.services.receipt_parser_service import (
     ParsedReceipt,
@@ -342,6 +343,12 @@ class ReceiptIngestionService:
                     ),
                 )
             )
+        record_audit_once(
+            self.db,
+            event_type="first_receipt_processed",
+            resource_type="purchase_receipt",
+            resource_id=str(receipt.id),
+        )
         self.db.commit()
         receipt = self.get(receipt.id)
         matched = [

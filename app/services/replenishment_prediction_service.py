@@ -19,6 +19,7 @@ from app.models import (
     ReplenishmentPrediction,
     utc_now,
 )
+from app.services.managed_auth_service import record_audit_once
 from app.services.training_eligibility_service import (
     training_eligibility,
 )
@@ -293,6 +294,11 @@ class ReplenishmentPredictionService:
             feature_snapshot=dict(zip(FEATURE_NAMES, features, strict=True)),
         )
         self.db.add(prediction)
+        record_audit_once(
+            self.db,
+            event_type="first_replenishment_recommendation",
+            resource_type="replenishment_prediction",
+        )
         if commit:
             self.db.commit()
             self.db.refresh(prediction)

@@ -13,6 +13,7 @@ from app.models import (
     HouseholdItem,
     utc_now,
 )
+from app.services.managed_auth_service import record_audit_once
 
 
 class HouseholdOpsError(RuntimeError):
@@ -70,6 +71,12 @@ class ErrandService:
             self.db.add(
                 ErrandHouseholdItem(errand_id=errand.id, household_item_id=household_item.id)
             )
+        record_audit_once(
+            self.db,
+            event_type="first_errand_created",
+            resource_type="errand",
+            resource_id=str(errand.id),
+        )
         self.db.commit()
         return self.get_errand(errand.id)
 
