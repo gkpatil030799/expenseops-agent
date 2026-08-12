@@ -91,6 +91,15 @@ SCOPED_UNIQUES = (
 )
 
 
+def _existing_unique_name(table_name: str, columns: tuple[str, ...], fallback: str) -> str:
+    """Resolve database-generated constraint names across SQLite and PostgreSQL."""
+    inspector = sa.inspect(op.get_bind())
+    for constraint in inspector.get_unique_constraints(table_name):
+        if tuple(constraint.get("column_names") or ()) == columns:
+            return constraint.get("name") or fallback
+    return fallback
+
+
 def upgrade() -> None:
     op.create_table(
         "users",
@@ -217,8 +226,9 @@ def upgrade() -> None:
 
     naming_convention = {"uq": "uq_%(table_name)s_%(column_0_name)s"}
     for table_name, old_name, new_name, columns in SCOPED_UNIQUES:
+        actual_old_name = _existing_unique_name(table_name, tuple(columns[1:]), old_name)
         with op.batch_alter_table(table_name, naming_convention=naming_convention) as batch_op:
-            batch_op.drop_constraint(old_name, type_="unique")
+            batch_op.drop_constraint(actual_old_name, type_="unique")
             batch_op.create_unique_constraint(new_name, list(columns))
     with op.batch_alter_table("household_item_acquisitions") as batch_op:
         batch_op.drop_index("ix_household_item_acquisitions_logical_purchase_key")
