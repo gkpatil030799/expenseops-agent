@@ -31,6 +31,60 @@ async function mockExpenseDashboard(page: Page, transactions: unknown[] = []) {
   await page.route("**/ai/memory", (route) => route.fulfill({ json: [] }));
 }
 
+async function mockSpendingInsights(page: Page) {
+  await page.route("**/api/insights/spending?**", (route) => route.fulfill({ json: {
+    range: {
+      start_date: "2026-07-14",
+      end_date: "2026-08-12",
+      previous_start_date: "2026-06-14",
+      previous_end_date: "2026-07-13",
+      granularity: "week",
+    },
+    summary: { total_cents: 128450, personal_cents: 74200, shared_cents: 43800, transaction_count: 31, average_cents: 4144 },
+    comparison: { total_cents: 116200, personal_cents: 68100, shared_cents: 39400, transaction_count: 28, average_cents: 4150 },
+    trend: [
+      { period: "2026-07-13", total_cents: 17400, personal_cents: 11200, shared_cents: 5100, transactions: 5 },
+      { period: "2026-07-20", total_cents: 28200, personal_cents: 16100, shared_cents: 9800, transactions: 7 },
+      { period: "2026-07-27", total_cents: 22150, personal_cents: 12400, shared_cents: 8400, transactions: 6 },
+      { period: "2026-08-03", total_cents: 37600, personal_cents: 19700, shared_cents: 14500, transactions: 8 },
+      { period: "2026-08-10", total_cents: 23100, personal_cents: 14800, shared_cents: 6000, transactions: 5 },
+    ],
+    category_breakdown: [
+      { name: "Food & Dining", amount_cents: 46200, transaction_count: 12, percentage: 36, previous_amount_cents: 38200 },
+      { name: "Home & Bills", amount_cents: 31800, transaction_count: 5, percentage: 25, previous_amount_cents: 34000 },
+      { name: "Transportation", amount_cents: 22800, transaction_count: 7, percentage: 18, previous_amount_cents: 19100 },
+      { name: "Lifestyle", amount_cents: 17650, transaction_count: 4, percentage: 14, previous_amount_cents: 16400 },
+      { name: "Health", amount_cents: 10000, transaction_count: 3, percentage: 8, previous_amount_cents: 8500 },
+    ],
+    subcategory_breakdown: [],
+    merchant_breakdown: [
+      { name: "Aldi", amount_cents: 24100, transaction_count: 4 },
+      { name: "APS", amount_cents: 19800, transaction_count: 1 },
+      { name: "Costco", amount_cents: 17600, transaction_count: 2 },
+      { name: "Shell", amount_cents: 9200, transaction_count: 3 },
+      { name: "Target", amount_cents: 8700, transaction_count: 2 },
+    ],
+    personal_shared: { personal: 74200, shared: 43800 },
+    shared_people: [{ name: "Janhavi", amount_cents: 27600 }, { name: "Rahul", amount_cents: 16200 }],
+    shared_groups: [{ name: "Apartment", amount_cents: 43800 }],
+    category_trend: [
+      { period: "2026-07-13", categories: { "Food & Dining": 6500, "Home & Bills": 5800, Transportation: 5100 } },
+      { period: "2026-07-20", categories: { "Food & Dining": 9800, "Home & Bills": 8200, Transportation: 5300, Lifestyle: 4900 } },
+      { period: "2026-07-27", categories: { "Food & Dining": 7100, "Home & Bills": 6000, Transportation: 4550, Health: 4500 } },
+      { period: "2026-08-03", categories: { "Food & Dining": 15100, "Home & Bills": 7800, Transportation: 5200, Lifestyle: 9500 } },
+      { period: "2026-08-10", categories: { "Food & Dining": 7700, "Home & Bills": 4000, Transportation: 2650, Lifestyle: 3250, Health: 5500 } },
+    ],
+    notable_changes: [
+      { kind: "category", direction: "up", label: "Food & Dining", amount_cents: 8000, detail: "+$80 vs previous period" },
+      { kind: "merchant", direction: "neutral", label: "Aldi", amount_cents: 24100, detail: "Top merchant · $241" },
+    ],
+    accounts: ["Chase checking", "Freedom card"],
+    categories: ["Food & Dining", "Health", "Home & Bills", "Lifestyle", "Transportation"],
+    merchants: ["Aldi", "APS", "Costco", "Shell", "Target"],
+    data_quality: { unknown_share_transactions: 0, pending_review_cents: 12500, uncategorized_cents: 0, pending_transactions_excluded: true },
+  } }));
+}
+
 test("visual foundation keeps the expense dashboard stable", async ({ page }) => {
   await mockExpenseDashboard(page);
   await page.goto("/");
@@ -82,6 +136,41 @@ test("expense views provide their own page identity", async ({ page }) => {
 
   await page.getByRole("button", { name: /activity/i, exact: true }).click();
   await expect(page.getByRole("heading", { name: "Expense Activity" })).toBeVisible();
+});
+
+test("insights tell a scoped, accessible spending story", async ({ page }) => {
+  await mockExpenseDashboard(page);
+  await mockSpendingInsights(page);
+  await page.goto("/");
+  await page.getByRole("button", { name: /insights/i, exact: true }).click();
+
+  await expect(page.getByRole("heading", { name: "Spending Insights" })).toBeVisible();
+  await expect(page.getByText("Jul 14–Aug 12, 2026", { exact: true })).toBeVisible();
+  await expect(page.getByText("Compared with Jun 14–Jul 13, 2026 · Displayed as USD; no currency conversion applied")).toBeVisible();
+  await expect(page.getByLabel("Spending overview").getByText("$1,285")).toBeVisible();
+  await expect(page.getByRole("heading", { name: "What changed" })).toBeVisible();
+  await expect(page).toHaveScreenshot("spending-insights.png", { fullPage: true, timeout: 15_000 });
+
+  const results = await new AxeBuilder({ page }).withTags(["wcag2a", "wcag2aa"]).analyze();
+  const blocking = results.violations.filter(
+    (violation) => violation.impact === "critical" || violation.impact === "serious",
+  );
+  expect(blocking).toEqual([]);
+});
+
+test("insights remain usable without horizontal document overflow", async ({ page }) => {
+  await page.setViewportSize({ width: 320, height: 844 });
+  await mockExpenseDashboard(page);
+  await mockSpendingInsights(page);
+  await page.goto("/");
+  await page.getByRole("button", { name: /insights/i, exact: true }).click();
+  await expect(page.getByLabel("Spending overview").getByText("$1,285")).toBeVisible();
+
+  const dimensions = await page.evaluate(() => ({
+    clientWidth: document.documentElement.clientWidth,
+    scrollWidth: document.documentElement.scrollWidth,
+  }));
+  expect(dimensions.scrollWidth).toBeLessThanOrEqual(dimensions.clientWidth);
 });
 
 test("review card prioritizes Personal and Split with progressive split steps", async ({ page }) => {

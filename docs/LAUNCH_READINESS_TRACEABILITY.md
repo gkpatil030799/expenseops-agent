@@ -30,7 +30,7 @@ visual-foundation changes began.
 | V1 — visual foundation and regression harness | Complete | Shared tokens/primitives; TypeScript-aware lint; Playwright visual, overflow, and axe gates; implementation checkpoint on `agent/launch-readiness` |
 | V2 — navigation, mobile shell, page headers | Complete | Responsive app shell, three-destination primary nav, account menu, mobile bottom nav, and shared contextual headers; implementation checkpoint on `agent/launch-readiness` |
 | V3 — Expense Review hierarchy | Complete | Compact filter sheet/chips, trustworthy transaction metadata, neutral amount hierarchy, two dominant decisions, overflow actions, guided split steps, and five-row recent activity; implementation checkpoint on `agent/launch-readiness` |
-| V4 — Insights narrative and charts | Not started | — |
+| V4 — Insights narrative and charts | Complete (visual layer) | Scoped reporting context, primary Total Spend hierarchy, comparison narrative, collapsed filters, coherent chart order, keyboard-readable points, mobile alternatives, and data tables; accounting release gate remains open until Phase 6 |
 | V5 — Household command center | Not started | — |
 | V6 — Settings information architecture | Not started | — |
 | V7 — Deals hierarchy | Not started | — |
@@ -101,3 +101,27 @@ developer server from producing misleading screenshots or accessibility results.
 | Frontend unit tests | 15 passed |
 | Playwright review workflow | Desktop and mobile card flow passed, with focused transaction-card visual baselines |
 | Full Playwright suite | 24 passed across desktop Chromium and Pixel 5 mobile Chromium |
+
+## V4 validation evidence
+
+| Check | Result |
+| --- | --- |
+| Reporting scope | Exact current and comparison ranges are visible; bank-pending exclusions and classified Personal/Shared scope are disclosed |
+| Currency safety | UI explicitly says values are displayed as USD and that no currency conversion is applied; multi-currency correctness remains assigned to Phase 6 |
+| KPI hierarchy | Total Spend is the dominant analytical KPI; Personal, Shared, Transactions, and Average are secondary |
+| Narrative order | What changed follows the KPI tier, then trend, category composition, merchants, category trend, and shared-spend detail |
+| Filter density | Date presets remain available; account/category/merchant/type/basis controls collapse under Refine view with active-count and removable chips |
+| Chart integrity | Split trend focus points follow their actual series; explicit legends replace ambiguous color inference; synthetic grouped Other is not exposed as a misleading filter |
+| Nonvisual access | Trend and category data have expandable semantic tables; SVG points are keyboard-focusable with meaningful accessible names |
+| Mobile behavior | Desktop category chart becomes a readable period summary on phone widths; no fixed-width analytical canvas creates document overflow |
+| Error recovery | Retry performs a real refetch; stale last-loaded data remains visible and explicitly marked when a refresh fails |
+| Frontend unit tests | 15 passed |
+| Frontend production build | Passed; existing bundle-size advisory remains non-blocking and is tracked for later optimization |
+| Frontend lint | Zero errors; 20 pre-existing cleanup warnings remain |
+| Insights visual baselines | Added full-page desktop Chromium and Pixel 5 mobile Chromium snapshots using deterministic spending fixtures |
+| Insights accessibility | Zero critical or serious axe violations |
+| Full Playwright suite | 28 passed across desktop Chromium and Pixel 5 mobile Chromium |
+
+V4 changes only presentation, interaction, and reporting-scope disclosure. It does not certify the
+underlying accounting model. Insights remains non-releasable for general availability until the
+Phase 6 currency, viewer-share, refund, deduplication, and reconciliation invariants pass.
