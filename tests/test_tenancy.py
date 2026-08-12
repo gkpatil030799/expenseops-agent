@@ -39,6 +39,7 @@ from app.models import (
 )
 from app.services.oauth_state_service import create_oauth_state
 from app.services.receipt_ingestion_service import ReceiptIngestionService
+from app.services.transaction_service import TransactionService
 from app.tenancy import TenantContext, hash_api_token, set_session_tenant
 
 
@@ -265,6 +266,30 @@ def test_two_design_users_have_symmetric_data_and_integration_isolation(tenant_d
             headers={"Authorization": f"Bearer token-{own}"},
         )
         assert {item["id"] for item in listed.json()} == {values[own]["item"]}
+
+
+def test_transaction_notifications_resolve_telegram_chat_from_active_workspace(
+    tenant_db, monkeypatch
+):
+    factory, contexts = tenant_db
+    _seed_representative_data(factory, contexts)
+    monkeypatch.setattr(
+        "app.services.transaction_service.get_settings",
+        lambda: Settings(
+            telegram_bot_token="bot-token",
+            telegram_chat_id="legacy-chat-must-not-be-used",
+            _env_file=None,
+        ),
+    )
+
+    resolved = {}
+    for key, context in contexts.items():
+        with _scoped(factory, context) as db:
+            service = TransactionService(db)
+            resolved[key] = service.settings.telegram_chat_id
+            assert service.notification_service.settings.telegram_chat_id == f"chat-{key}"
+
+    assert resolved == {"a": "chat-a", "b": "chat-b"}
 
 
 def test_transaction_lists_and_gets_do_not_leak_other_workspace(tenant_db):

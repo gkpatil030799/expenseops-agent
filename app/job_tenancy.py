@@ -30,7 +30,7 @@ def all_workspace_job_contexts(db: Session, settings: Settings) -> list[Workspac
     return [
         WorkspaceJobContext(
             workspace_id=value,
-            settings=_telegram_settings(db, value, settings),
+            settings=telegram_settings_for_workspace(db, value, settings),
         )
         for value in workspace_ids
     ]
@@ -47,7 +47,7 @@ def gmail_job_contexts(db: Session, settings: Settings) -> list[WorkspaceJobCont
         return [
             WorkspaceJobContext(
                 workspace_id=account.workspace_id,
-                settings=_telegram_settings(
+                settings=telegram_settings_for_workspace(
                     db,
                     account.workspace_id,
                     settings.model_copy(
@@ -66,7 +66,7 @@ def gmail_job_contexts(db: Session, settings: Settings) -> list[WorkspaceJobCont
     return [
         WorkspaceJobContext(
             workspace_id=default.workspace_id,
-            settings=_telegram_settings(db, default.workspace_id, settings),
+            settings=telegram_settings_for_workspace(db, default.workspace_id, settings),
         )
     ]
 
@@ -112,7 +112,9 @@ def gmail_settings_for_session(db: Session, settings: Settings) -> Settings:
     return settings.model_copy(update={"gmail_refresh_token": ""})
 
 
-def _telegram_settings(db: Session, workspace_id: int, settings: Settings) -> Settings:
+def telegram_settings_for_workspace(
+    db: Session, workspace_id: int, settings: Settings
+) -> Settings:
     identity = db.scalar(
         select(TelegramIdentity)
         .execution_options(skip_tenant_scope=True)

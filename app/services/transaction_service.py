@@ -14,6 +14,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.config import Settings, get_settings
+from app.job_tenancy import telegram_settings_for_workspace
 from app.logging_config import log_event
 from app.models import ExpenseTransaction, PlaidItem, TransactionStatus, utc_now
 from app.security import decrypt_secret
@@ -88,6 +89,12 @@ class TransactionService:
     ):
         self.db = db
         self.settings = settings or get_settings()
+        session_info = getattr(db, "info", {})
+        workspace_id = session_info.get("workspace_id") if settings is None else None
+        if workspace_id is not None:
+            self.settings = telegram_settings_for_workspace(
+                db, int(workspace_id), self.settings
+            )
         self.plaid_service = plaid_service
         self.splitwise_service = splitwise_service or SplitwiseService(self.settings)
         self.notification_service = notification_service or NotificationService(self.settings)
