@@ -88,6 +88,10 @@ function App() {
     return <SandboxLabPage />;
   }
 
+  return <DashboardApp />;
+}
+
+function DashboardApp() {
   const [transactions, setTransactions] = useState<Transaction[]>([]);
   const [recentTransactions, setRecentTransactions] = useState<Transaction[]>([]);
   const [allTransactions, setAllTransactions] = useState<Transaction[]>([]);
@@ -564,7 +568,7 @@ function App() {
 
   return (
     <main className="min-h-screen bg-[radial-gradient(circle_at_top,rgba(79,70,229,0.06),transparent_30rem)]">
-      <section className="mx-auto flex w-full max-w-[1500px] flex-col gap-5 px-3 py-3 sm:px-6 sm:py-5 lg:px-8">
+      <section className="page-frame flex flex-col gap-5 py-3 sm:py-5">
         <WorkspaceNavigation
           active={activeWorkspace}
           onChange={changeWorkspace}
@@ -717,14 +721,14 @@ function WorkspaceNavigation({
   return (
     <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
       <nav
-        className="flex w-full gap-1 rounded-xl border border-slate-200 bg-white p-1 shadow-sm sm:w-fit"
+        className="flex w-full min-w-0 gap-1 overflow-x-auto rounded-xl border border-slate-200 bg-white p-1 shadow-sm sm:w-fit"
         aria-label="ExpenseOps sections"
       >
       <button
         type="button"
         onClick={() => onChange("expenses")}
         aria-current={active === "expenses" ? "page" : undefined}
-        className={`flex flex-1 items-center justify-center gap-2 rounded-lg px-4 py-2 text-sm font-medium transition sm:flex-none ${
+        className={`flex shrink-0 items-center justify-center gap-2 rounded-lg px-4 py-2 text-sm font-medium transition ${
           active === "expenses"
             ? "bg-slate-900 text-white shadow-sm"
             : "text-slate-600 hover:bg-slate-50 hover:text-slate-950"
@@ -733,17 +737,17 @@ function WorkspaceNavigation({
         <WalletCards className="h-4 w-4" />
         Expense review
       </button>
-      <button type="button" onClick={() => onChange("settings")} aria-current={active === "settings" ? "page" : undefined} className={`flex flex-1 items-center justify-center gap-2 rounded-lg px-4 py-2 text-sm font-medium transition sm:flex-none ${active === "settings" ? "bg-indigo-600 text-white shadow-sm" : "text-slate-600 hover:bg-slate-50 hover:text-slate-950"}`}>
+      <button type="button" onClick={() => onChange("settings")} aria-current={active === "settings" ? "page" : undefined} className={`flex shrink-0 items-center justify-center gap-2 rounded-lg px-4 py-2 text-sm font-medium transition ${active === "settings" ? "bg-indigo-600 text-white shadow-sm" : "text-slate-600 hover:bg-slate-50 hover:text-slate-950"}`}>
         <Settings2 className="h-4 w-4" />Settings
       </button>
-      <button type="button" onClick={() => onChange("promotions")} aria-current={active === "promotions" ? "page" : undefined} className={`flex flex-1 items-center justify-center gap-2 rounded-lg px-4 py-2 text-sm font-medium transition sm:flex-none ${active === "promotions" ? "bg-indigo-600 text-white shadow-sm" : "text-slate-600 hover:bg-slate-50 hover:text-slate-950"}`}>
+      <button type="button" onClick={() => onChange("promotions")} aria-current={active === "promotions" ? "page" : undefined} className={`flex shrink-0 items-center justify-center gap-2 rounded-lg px-4 py-2 text-sm font-medium transition ${active === "promotions" ? "bg-indigo-600 text-white shadow-sm" : "text-slate-600 hover:bg-slate-50 hover:text-slate-950"}`}>
         <Tags className="h-4 w-4" />Deals
       </button>
       <button
         type="button"
         onClick={() => onChange("household")}
         aria-current={active === "household" ? "page" : undefined}
-        className={`flex flex-1 items-center justify-center gap-2 rounded-lg px-4 py-2 text-sm font-medium transition sm:flex-none ${
+        className={`flex shrink-0 items-center justify-center gap-2 rounded-lg px-4 py-2 text-sm font-medium transition ${
           active === "household"
             ? "bg-indigo-600 text-white shadow-sm"
             : "text-slate-600 hover:bg-slate-50 hover:text-slate-950"
@@ -1489,7 +1493,7 @@ function StatusPill({
     <div className="flex min-w-0 items-center gap-3 rounded-lg px-3 py-2.5 transition hover:bg-white">
       <span className={`h-2.5 w-2.5 shrink-0 rounded-full ring-4 ${connected ? "bg-emerald-500 ring-emerald-100" : "bg-slate-400 ring-slate-200"}`} />
       <span className="min-w-0">
-        <span className="block text-[11px] font-semibold uppercase tracking-wide text-slate-600">
+        <span className="block text-xs font-semibold uppercase tracking-wide text-slate-600">
           {label}
         </span>
         <span className="block truncate text-sm font-medium text-slate-900">{value}</span>

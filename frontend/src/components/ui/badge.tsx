@@ -4,13 +4,15 @@ import { cva, type VariantProps } from "class-variance-authority";
 import { cn } from "@/lib/utils";
 
 const badgeVariants = cva(
-  "inline-flex items-center rounded-md px-2 py-1 text-xs font-medium transition-colors",
+  "inline-flex items-center rounded-md px-2 py-1 text-xs font-medium transition-colors duration-hover",
   {
     variants: {
       variant: {
-        default: "bg-teal-50 text-teal-700",
+        default: "bg-ui-primary-tint text-indigo-700",
         secondary: "bg-slate-100 text-slate-700",
         outline: "border border-slate-200 text-slate-700",
+        success: "bg-emerald-50 text-emerald-700",
+        warning: "bg-amber-50 text-amber-800",
         destructive: "bg-rose-50 text-rose-700",
       },
     },

@@ -12,5 +12,7 @@ expenseops.db
 frontend/node_modules/
 frontend/dist/
 frontend/.vite/
+frontend/playwright-report/
+frontend/test-results/
 sandbox/logs/*.jsonl
 sandbox/state/*.local.json

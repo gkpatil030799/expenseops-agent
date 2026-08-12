@@ -123,7 +123,7 @@ export function PromotionsPage() {
 }
 
 function DealViewButton({ active, onClick, label, count }: { active: boolean; onClick: () => void; label: string; count: number }) {
-  return <button type="button" onClick={onClick} aria-current={active ? "page" : undefined} className={`whitespace-nowrap rounded-lg px-3 py-2 text-sm font-medium transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500 ${active ? "bg-indigo-600 text-white" : "text-slate-600 hover:bg-slate-50 hover:text-slate-950"}`}>{label}<span className={`ml-2 rounded-full px-1.5 py-0.5 text-[11px] ${active ? "bg-white/20" : "bg-slate-100"}`}>{count}</span></button>;
+  return <button type="button" onClick={onClick} aria-current={active ? "page" : undefined} className={`whitespace-nowrap rounded-lg px-3 py-2 text-sm font-medium transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500 ${active ? "bg-indigo-600 text-white" : "text-slate-600 hover:bg-slate-50 hover:text-slate-950"}`}>{label}<span className={`ml-2 rounded-full px-1.5 py-0.5 text-xs ${active ? "bg-white/20" : "bg-slate-100"}`}>{count}</span></button>;
 }
 
 function DealCard({ offer, busy, copied, onCopy, onAction }: { offer: PromotionOffer; busy: boolean; copied: boolean; onCopy: () => void; onAction: (kind: "save" | "dismiss" | "not_relevant" | "mute_merchant") => void }) {
