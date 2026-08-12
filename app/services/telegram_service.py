@@ -27,7 +27,7 @@ class TelegramService:
 
     @property
     def is_configured(self) -> bool:
-        return bool(self.settings.telegram_bot_token and self.settings.telegram_chat_id)
+        return bool(self.settings.telegram_bot_token)
 
     def send_ask_user_transaction(self, tx: ExpenseTransaction) -> bool:
         return self.send_message(
@@ -41,17 +41,18 @@ class TelegramService:
         reply_markup: dict[str, Any] | None = None,
         chat_id: str | None = None,
     ) -> bool:
-        if not self.is_configured:
+        target_chat_id = chat_id or self.settings.telegram_chat_id
+        if not self.is_configured or not target_chat_id:
             log_event(
                 logger,
                 "telegram_message_skipped",
                 reason="telegram_not_configured",
-                chat_id_set=bool(chat_id or self.settings.telegram_chat_id),
+                chat_id_set=bool(target_chat_id),
             )
             return False
         url = f"https://api.telegram.org/bot{self.settings.telegram_bot_token}/sendMessage"
         payload: dict[str, Any] = {
-            "chat_id": chat_id or self.settings.telegram_chat_id,
+            "chat_id": target_chat_id,
             "text": message,
             "parse_mode": "HTML",
             "disable_web_page_preview": True,
@@ -65,7 +66,7 @@ class TelegramService:
             log_event(
                 logger,
                 "telegram_message_sent",
-                chat_id=chat_id or self.settings.telegram_chat_id,
+                chat_id=target_chat_id,
                 has_reply_markup=bool(reply_markup),
             )
             return True
@@ -76,7 +77,7 @@ class TelegramService:
                 level=logging.WARNING,
                 error_type=type(exc).__name__,
                 safe_error=self._safe_error(exc),
-                chat_id=chat_id or self.settings.telegram_chat_id,
+                chat_id=target_chat_id,
             )
             return False
 

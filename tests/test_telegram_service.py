@@ -153,7 +153,7 @@ def test_telegram_failure_does_not_raise_and_redacts_token(monkeypatch, caplog):
 
 
 def test_send_message_accepts_chat_id_override(monkeypatch):
-    settings = Settings(telegram_bot_token="secret-token", telegram_chat_id="default-chat")
+    settings = Settings(telegram_bot_token="secret-token", telegram_chat_id="")
     service = TelegramService(settings)
     captured = {}
 
@@ -178,6 +178,8 @@ def test_send_message_accepts_chat_id_override(monkeypatch):
     monkeypatch.setattr("app.services.telegram_service.httpx.Client", FakeClient)
 
     service.send_message("hello", chat_id="override-chat")
+
+    assert captured["json"]["chat_id"] == "override-chat"
 
     assert captured["json"]["chat_id"] == "override-chat"
 

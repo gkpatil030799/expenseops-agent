@@ -18,7 +18,8 @@ external user until every preflight item is green.
 - Confirm `AUTH_MODE=oidc`, production URL/origin, OIDC, Gmail, and Telegram variables are set in
   Railway. Keep secrets in Railway variables, never chat or source control.
 - Confirm the Telegram bot webhook is healthy and points to
-  `https://expenseops-production.up.railway.app/telegram/webhook` using its secret query value.
+  `https://expenseops-production.up.railway.app/telegram/webhook` using Telegram's
+  `X-Telegram-Bot-Api-Secret-Token` header (configured with `secret_token` in `setWebhook`).
 - For the owner's migration only, set `OIDC_BOOTSTRAP_EMAIL` to the owner's exact verified Google
   email. Sign in once, verify the existing data checklist below, then remove this variable.
 - Confirm `/api/admin/onboarding-funnel` works for the email listed in `ADMIN_USER_EMAILS`.

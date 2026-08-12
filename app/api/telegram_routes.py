@@ -7,7 +7,7 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from urllib.parse import quote
 
-from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi import APIRouter, Header, HTTPException, Query, Request
 from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError
 
@@ -119,8 +119,12 @@ async def telegram_webhook(
     request: Request,
     db: DbSession,
     secret: str | None = Query(default=None),
+    telegram_secret: str | None = Header(
+        default=None,
+        alias="X-Telegram-Bot-Api-Secret-Token",
+    ),
 ) -> dict[str, bool]:
-    _verify_webhook_secret(secret)
+    _verify_webhook_secret(telegram_secret or secret)
     update = await request.json()
     if _handle_telegram_connect(update, db):
         return {"ok": True}

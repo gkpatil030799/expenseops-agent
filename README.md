@@ -214,7 +214,9 @@ APP_PUBLIC_URL="https://your-expenseops-domain.example"
 4. Register the webhook:
 
 ```bash
-curl "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/setWebhook?url=https://YOUR_DOMAIN/telegram/webhook?secret=${TELEGRAM_WEBHOOK_SECRET}"
+curl --request POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/setWebhook" \
+  --data-urlencode "url=https://YOUR_DOMAIN/telegram/webhook" \
+  --data-urlencode "secret_token=${TELEGRAM_WEBHOOK_SECRET}"
 ```
 
 Now you can review transactions with buttons or natural language. You can also

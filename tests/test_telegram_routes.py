@@ -203,7 +203,11 @@ def test_telegram_webhook_allows_correct_secret(monkeypatch):
         lambda: Settings(telegram_webhook_secret="expected-secret"),
     )
 
-    response = TestClient(app).post("/telegram/webhook?secret=expected-secret", json={})
+    response = TestClient(app).post(
+        "/telegram/webhook",
+        headers={"X-Telegram-Bot-Api-Secret-Token": "expected-secret"},
+        json={},
+    )
 
     assert response.status_code == 200
     assert response.json() == {"ok": True}
