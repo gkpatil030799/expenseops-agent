@@ -29,6 +29,7 @@ class Settings(BaseSettings):
     dashboard_password: str = ""
     dashboard_api_token: str = ""
     app_public_url: str = ""
+    process_role: Literal["web", "worker"] = "web"
     auth_mode: Literal["local", "oidc"] = "local"
     oidc_issuer: str = ""
     oidc_audience: str = ""
@@ -155,20 +156,21 @@ class Settings(BaseSettings):
             errors.append("APP_SECRET_KEY must be configured for production.")
         if not self.telegram_webhook_secret:
             errors.append("TELEGRAM_WEBHOOK_SECRET must be configured for production.")
-        if self.auth_mode != "oidc":
-            errors.append("AUTH_MODE must be oidc in production.")
-        if not all(
-            [
-                self.oidc_issuer,
-                self.oidc_audience,
-                self.oidc_client_id,
-                self.oidc_redirect_uri,
-            ]
-        ):
-            errors.append(
-                "OIDC_ISSUER, OIDC_AUDIENCE, OIDC_CLIENT_ID, and OIDC_REDIRECT_URI "
-                "must be configured for production."
-            )
+        if self.process_role == "web":
+            if self.auth_mode != "oidc":
+                errors.append("AUTH_MODE must be oidc in production.")
+            if not all(
+                [
+                    self.oidc_issuer,
+                    self.oidc_audience,
+                    self.oidc_client_id,
+                    self.oidc_redirect_uri,
+                ]
+            ):
+                errors.append(
+                    "OIDC_ISSUER, OIDC_AUDIENCE, OIDC_CLIENT_ID, and OIDC_REDIRECT_URI "
+                    "must be configured for production web processes."
+                )
         if self.allow_unverified_plaid_webhooks_for_local_test:
             errors.append(
                 "ALLOW_UNVERIFIED_PLAID_WEBHOOKS_FOR_LOCAL_TEST must be false in production."

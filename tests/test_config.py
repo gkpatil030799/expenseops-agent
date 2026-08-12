@@ -77,3 +77,16 @@ def test_production_config_rejects_local_auth_mode():
         _safe_production_settings(
             auth_mode="local",
         )
+
+
+def test_production_worker_does_not_require_web_oidc_settings():
+    settings = _safe_production_settings(
+        process_role="worker",
+        auth_mode="local",
+        oidc_issuer="",
+        oidc_audience="",
+        oidc_client_id="",
+        oidc_redirect_uri="",
+    )
+
+    assert settings.process_role == "worker"
