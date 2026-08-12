@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -172,6 +173,17 @@ def test_first_login_provisions_user_personal_workspace_and_owner(database):
         assert membership is not None
         assert membership.role == "owner"
         assert membership.is_default is True
+
+
+def test_oidc_at_hash_is_validated_when_access_token_is_available():
+    access_token = "provider-access-token"
+    token = _identity_token(at_hash=jwt.calculate_at_hash(access_token, hashlib.sha256))
+
+    claims = _verifier().validate(token, access_token=access_token)
+
+    assert claims["sub"] == "subject-123"
+    with pytest.raises(OIDCValidationError):
+        _verifier().validate(token, access_token="different-access-token")
 
 
 def test_repeat_login_is_idempotent_and_email_change_uses_subject(database):

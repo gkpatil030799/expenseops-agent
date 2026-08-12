@@ -41,7 +41,7 @@ class OIDCVerifier:
         self.settings = settings or get_settings()
         self.key_resolver = key_resolver or self._jwks_key
 
-    def validate(self, token: str) -> dict:
+    def validate(self, token: str, *, access_token: str | None = None) -> dict:
         try:
             header = jwt.get_unverified_header(token)
             algorithm = str(header.get("alg") or "")
@@ -54,7 +54,16 @@ class OIDCVerifier:
                 algorithms=self.settings.oidc_algorithms,
                 audience=self.settings.oidc_audience,
                 issuer=self.settings.oidc_issuer.rstrip("/"),
-                options={"require_sub": True, "require_exp": True},
+                access_token=access_token,
+                options={
+                    "require_sub": True,
+                    "require_exp": True,
+                    # OIDC authorization-code callbacks pass the access token and
+                    # validate its at_hash binding. Standalone bearer ID tokens do
+                    # not have a paired access token, so that optional claim cannot
+                    # be checked in that context.
+                    "verify_at_hash": access_token is not None,
+                },
             )
         except (JWTError, OIDCValidationError, httpx.HTTPError, KeyError, ValueError) as exc:
             raise OIDCValidationError("Invalid identity token") from exc

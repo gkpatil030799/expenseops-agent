@@ -83,8 +83,13 @@ def callback(request: Request, code: str, state: str, db: DbSession) -> Redirect
             timeout=15,
         )
         token_response.raise_for_status()
-        id_token = str(token_response.json().get("id_token") or "")
-        claims = OIDCVerifier(settings).validate(id_token)
+        token_payload = token_response.json()
+        id_token = str(token_payload.get("id_token") or "")
+        access_token = str(token_payload.get("access_token") or "")
+        claims = OIDCVerifier(settings).validate(
+            id_token,
+            access_token=access_token or None,
+        )
         user, workspace, _created = provision_oidc_identity(
             db,
             claims,
