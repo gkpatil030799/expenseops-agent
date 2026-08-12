@@ -29,7 +29,6 @@ class Settings(BaseSettings):
     dashboard_password: str = ""
     dashboard_api_token: str = ""
     app_public_url: str = ""
-    process_role: Literal["web", "worker"] = "web"
     auth_mode: Literal["local", "oidc"] = "local"
     oidc_issuer: str = ""
     oidc_audience: str = ""
@@ -154,31 +153,10 @@ class Settings(BaseSettings):
         errors: list[str] = []
         if not self.app_secret_key or self.app_secret_key == "paste-a-generated-fernet-key-here":
             errors.append("APP_SECRET_KEY must be configured for production.")
-        if not self.telegram_webhook_secret:
-            errors.append("TELEGRAM_WEBHOOK_SECRET must be configured for production.")
-        if self.process_role == "web":
-            if self.auth_mode != "oidc":
-                errors.append("AUTH_MODE must be oidc in production.")
-            if not all(
-                [
-                    self.oidc_issuer,
-                    self.oidc_audience,
-                    self.oidc_client_id,
-                    self.oidc_redirect_uri,
-                ]
-            ):
-                errors.append(
-                    "OIDC_ISSUER, OIDC_AUDIENCE, OIDC_CLIENT_ID, and OIDC_REDIRECT_URI "
-                    "must be configured for production web processes."
-                )
         if self.allow_unverified_plaid_webhooks_for_local_test:
             errors.append(
                 "ALLOW_UNVERIFIED_PLAID_WEBHOOKS_FOR_LOCAL_TEST must be false in production."
             )
-        if _env_bool("ENABLE_EXPENSEOPS_SANDBOX_LAB"):
-            errors.append("ENABLE_EXPENSEOPS_SANDBOX_LAB must be false for production deploys.")
-        if not self.plaid_webhook_verification_required:
-            errors.append("Plaid webhook verification must be enabled for production.")
         if self.enable_postgres_rls:
             errors.append(
                 "ENABLE_POSTGRES_RLS is reserved for Phase 1C until jobs/webhooks use "
@@ -187,6 +165,39 @@ class Settings(BaseSettings):
         if errors:
             raise ValueError("Unsafe production configuration: " + " ".join(errors))
         return self
+
+    def validate_web_runtime(self) -> None:
+        """Validate settings used only by the public HTTP application."""
+        if not self.is_production_mode:
+            return
+
+        errors: list[str] = []
+        if not self.telegram_webhook_secret:
+            errors.append("TELEGRAM_WEBHOOK_SECRET must be configured for production.")
+        if self.auth_mode != "oidc":
+            errors.append("AUTH_MODE must be oidc in production.")
+        if not all(
+            [
+                self.oidc_issuer,
+                self.oidc_audience,
+                self.oidc_client_id,
+                self.oidc_redirect_uri,
+            ]
+        ):
+            errors.append(
+                "OIDC_ISSUER, OIDC_AUDIENCE, OIDC_CLIENT_ID, and OIDC_REDIRECT_URI "
+                "must be configured for production."
+            )
+        if _env_bool("ENABLE_EXPENSEOPS_SANDBOX_LAB"):
+            errors.append("ENABLE_EXPENSEOPS_SANDBOX_LAB must be false for production deploys.")
+        if not self.plaid_webhook_verification_required:
+            errors.append("Plaid webhook verification must be enabled for production.")
+        if errors:
+            raise ValueError("Unsafe production web configuration: " + " ".join(errors))
+
+    def validate_worker_runtime(self) -> None:
+        """Mark the worker boundary; shared checks already ran during construction."""
+        return
 
     @property
     def is_production_mode(self) -> bool:

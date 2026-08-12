@@ -30,6 +30,7 @@ from app.logging_config import configure_logging, new_trace_id, reset_trace_id, 
 from sandbox.backend.router import router as sandbox_router
 
 settings = get_settings()
+settings.validate_web_runtime()
 configure_logging(settings)
 app = FastAPI(
     title=settings.app_name,

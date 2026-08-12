@@ -21,6 +21,7 @@ logger = logging.getLogger(__name__)
 
 def run(command: str) -> dict:
     settings = get_settings()
+    settings.validate_worker_runtime()
     with SessionLocal() as db:
         results = []
         contexts = (

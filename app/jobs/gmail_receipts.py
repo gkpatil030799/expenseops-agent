@@ -14,6 +14,7 @@ logger = logging.getLogger(__name__)
 
 def run(max_results: int = 25) -> dict[str, int]:
     settings = get_settings()
+    settings.validate_worker_runtime()
     with SessionLocal() as db:
         totals = {"scanned": 0, "ingested": 0, "skipped": 0}
         for context in gmail_job_contexts(db, settings):

@@ -14,6 +14,7 @@ logger = logging.getLogger(__name__)
 
 
 def main() -> None:
+    get_settings().validate_worker_runtime()
     with SessionLocal() as db:
         for context in all_workspace_job_contexts(db, get_settings()):
             try:
