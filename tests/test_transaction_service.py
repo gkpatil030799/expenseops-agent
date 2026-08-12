@@ -824,7 +824,7 @@ def test_duplicate_review_notification_claim_logs_skip(tmp_path, caplog):
     db.close()
 
 
-def test_failed_review_notification_stays_claimed_to_avoid_spam(tmp_path, monkeypatch):
+def test_failed_review_notification_releases_claim_for_later_retry(tmp_path, monkeypatch):
     db = _sqlite_session(tmp_path)
     item = db.get(PlaidItem, 1)
 
@@ -861,6 +861,61 @@ def test_failed_review_notification_stays_claimed_to_avoid_spam(tmp_path, monkey
     assert result["notification_sent"] == 0
     assert result["notification_skipped"] == 1
     assert notifications.review_notifications == [tx.id]
+    assert tx.review_notification_sent_at is None
+    db.close()
+
+
+def test_failed_review_notification_retries_on_next_sync(tmp_path, monkeypatch):
+    db = _sqlite_session(tmp_path)
+    item = db.get(PlaidItem, 1)
+
+    class FlakyNotificationService:
+        def __init__(self):
+            self.review_notifications = []
+
+        def notify_transaction_needs_review(self, tx):
+            self.review_notifications.append(tx.id)
+            return len(self.review_notifications) > 1
+
+    responses = iter(
+        [
+            {
+                "added": [_plaid_tx("tx-retry-notification", pending=False)],
+                "modified": [],
+                "removed": [],
+                "next_cursor": "cursor-1",
+                "has_more": False,
+            },
+            {
+                "added": [],
+                "modified": [],
+                "removed": [],
+                "next_cursor": "cursor-2",
+                "has_more": False,
+            },
+        ]
+    )
+
+    class FakePlaidService:
+        def transactions_sync(self, *, access_token, cursor):
+            return next(responses)
+
+    monkeypatch.setattr(transaction_service, "decrypt_secret", lambda _encrypted: "access-token")
+    notifications = FlakyNotificationService()
+    service = TransactionService(
+        db,
+        plaid_service=FakePlaidService(),
+        splitwise_service=object(),
+        notification_service=notifications,
+    )
+
+    first = service.sync_item(item)
+    second = service.sync_item(item)
+    tx = db.query(ExpenseTransaction).filter_by(plaid_transaction_id="tx-retry-notification").one()
+
+    assert first["notification_sent"] == 0
+    assert second["notification_sent"] == 1
+    assert notifications.review_notifications == [tx.id, tx.id]
     assert tx.review_notification_sent_at is not None
     db.close()
 

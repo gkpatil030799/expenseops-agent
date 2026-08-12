@@ -118,6 +118,7 @@ function App() {
   const [currentSplitwiseUser, setCurrentSplitwiseUser] = useState<SplitwiseUser | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [log, setLog] = useState<unknown>({ status: "Ready" });
+  const [onboardingNotice, setOnboardingNotice] = useState<{ tone: "success" | "error"; text: string } | null>(null);
   const [accountContext, setAccountContext] = useState<AccountContext | null>(null);
   const [authResolved, setAuthResolved] = useState(false);
   const [activeWorkspace, setActiveWorkspace] = useState<"expenses" | "household" | "promotions" | "settings">(() => {
@@ -172,6 +173,7 @@ function App() {
     const params = new URLSearchParams(window.location.search);
     const invitation = params.get("invite");
     if (invitation) {
+      setOnboardingNotice(null);
       void api("/api/workspaces/invitations/accept", {
         method: "POST",
         body: JSON.stringify({ token: invitation }),
@@ -180,6 +182,14 @@ function App() {
         params.set("workspace", "settings");
         window.history.replaceState({}, "", `/?${params.toString()}`);
         setActiveWorkspace("settings");
+        setOnboardingNotice({ tone: "success", text: "Invitation accepted. The shared workspace is now available in Settings." });
+      }).catch((error) => {
+        params.delete("invite");
+        params.set("workspace", "settings");
+        window.history.replaceState({}, "", `/?${params.toString()}`);
+        setActiveWorkspace("settings");
+        const detail = typeof error === "object" && error && "detail" in error && typeof error.detail === "string" ? error.detail : "The invitation could not be accepted.";
+        setOnboardingNotice({ tone: "error", text: `${detail} Ask the workspace owner for a new link or sign in with the invited Google account.` });
       });
       return;
     }
@@ -522,6 +532,13 @@ function App() {
           onChange={setActiveWorkspace}
           accountContext={accountContext}
         />
+
+        {onboardingNotice ? (
+          <div role={onboardingNotice.tone === "error" ? "alert" : "status"} className={`flex items-start justify-between gap-3 rounded-xl border px-4 py-3 text-sm ${onboardingNotice.tone === "error" ? "border-rose-200 bg-rose-50 text-rose-800" : "border-emerald-200 bg-emerald-50 text-emerald-800"}`}>
+            <span>{onboardingNotice.text}</span>
+            <button type="button" aria-label="Dismiss onboarding message" onClick={() => setOnboardingNotice(null)} className="rounded p-1 hover:bg-black/5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500"><X className="h-4 w-4" /></button>
+          </div>
+        ) : null}
 
         {activeWorkspace === "settings" ? (
           <AccountSettingsPage context={accountContext} />

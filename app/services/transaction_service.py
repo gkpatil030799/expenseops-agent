@@ -114,6 +114,7 @@ class TransactionService:
         notification_eligible_count = 0
         notification_sent_count = 0
         notification_skipped_count = 0
+        attempted_notification_tx_ids: set[int] = set()
 
         while True:
             response = plaid.transactions_sync(access_token=access_token, cursor=cursor)
@@ -125,6 +126,8 @@ class TransactionService:
                 notification_skipped_count += int(
                     result.notification_eligible and not result.notification_sent
                 )
+                if result.notification_eligible and result.tx_id is not None:
+                    attempted_notification_tx_ids.add(result.tx_id)
                 if result.created:
                     added_count += 1
             for tx_data in response.get("modified", []):
@@ -134,6 +137,8 @@ class TransactionService:
                 notification_skipped_count += int(
                     result.notification_eligible and not result.notification_sent
                 )
+                if result.notification_eligible and result.tx_id is not None:
+                    attempted_notification_tx_ids.add(result.tx_id)
                 modified_count += 1
             for removed in response.get("removed", []):
                 self.mark_removed(str(removed.get("transaction_id")))
@@ -149,6 +154,13 @@ class TransactionService:
         item.cursor = cursor or original_cursor
         item.updated_at = utc_now()
         self.db.commit()
+        retried = self._notify_ready_transactions_for_item(
+            item,
+            exclude_tx_ids=attempted_notification_tx_ids,
+        )
+        notification_eligible_count += retried["eligible"]
+        notification_sent_count += retried["sent"]
+        notification_skipped_count += retried["skipped"]
         log_event(
             logger,
             "plaid_sync_completed",
@@ -558,6 +570,7 @@ class TransactionService:
                 status="failed",
                 payload={"reason": "sandbox_fault_fail_next_telegram_send"},
             )
+            self._release_notification_claim(tx)
             return False
         notification_result = self.notification_service.notify_transaction_needs_review(tx)
         notification_sent = notification_result is not False
@@ -588,7 +601,24 @@ class TransactionService:
                 status="failed",
                 payload={"reason": "telegram_send_returned_false"},
             )
+            self._release_notification_claim(tx)
         return notification_sent
+
+    def _release_notification_claim(self, tx: ExpenseTransaction) -> None:
+        self.db.execute(
+            update(ExpenseTransaction)
+            .where(ExpenseTransaction.id == tx.id)
+            .values(review_notification_sent_at=None, updated_at=utc_now())
+        )
+        self.db.commit()
+        self.db.refresh(tx)
+        log_event(
+            logger,
+            "telegram_notification_claim_released",
+            transaction_id=tx.id,
+            plaid_transaction_id=tx.plaid_transaction_id,
+            reason="delivery_failed",
+        )
 
     def _claim_review_notification(self, tx: ExpenseTransaction) -> bool:
         with _NOTIFICATION_CLAIM_LOCK:
