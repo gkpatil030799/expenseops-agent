@@ -162,6 +162,65 @@ async function mockSettings(page: Page, role = "owner") {
   await page.route("**/splitwise/groups/10/members", (route) => route.fulfill({ json: friends }));
 }
 
+async function mockDeals(page: Page, options: { connected?: boolean; empty?: boolean } = {}) {
+  const offers = options.empty ? [] : [
+    {
+      id: 71,
+      merchant: "Target",
+      category: "Shopping",
+      headline: "Save on your next home order",
+      description: "A practical offer for household essentials and pickup orders.",
+      offer_type: "amount_off",
+      percent_off: null,
+      amount_off: 25,
+      minimum_spend: 100,
+      promo_code: "HOME25",
+      expires_at: "2099-12-31T23:59:59Z",
+      expiry_precision: "exact",
+      destination_url: "https://www.target.com/circle/o/target-circle/-/123",
+      terms_summary: "Valid on one qualifying order.",
+      trust_status: "trusted",
+      status: "active",
+      score: 91,
+      saved: false,
+      why: ["Matches household shopping", "Strong offer value"],
+      source_count: 1,
+    },
+    {
+      id: 72,
+      merchant: "Neighborhood Market",
+      category: "Groceries",
+      headline: "Weekend grocery savings",
+      description: "An offer imported from a promotional email.",
+      offer_type: "percent_off",
+      percent_off: 15,
+      amount_off: null,
+      minimum_spend: null,
+      promo_code: null,
+      expires_at: null,
+      expiry_precision: "unknown",
+      destination_url: "https://offers.example.net/weekend",
+      terms_summary: null,
+      trust_status: "review",
+      status: "active",
+      score: 77,
+      saved: true,
+      why: ["Relevant to groceries"],
+      source_count: 1,
+    },
+  ];
+  await page.route("**/api/promotions?**", (route) => route.fulfill({ json: offers }));
+  await page.route("**/api/promotions/categories", (route) => route.fulfill({ json: ["Groceries", "Shopping"] }));
+  await page.route("**/api/integrations", (route) => route.fulfill({ json: {
+    gmail: { connected: options.connected ?? true },
+    plaid: { connected: true, institutions: [] },
+    telegram: { connected: true },
+    splitwise: { connected: true, available: true },
+    google_maps: { connected: true, managed_by: "application" },
+    openai: { connected: true, managed_by: "application" },
+  } }));
+}
+
 async function chooseSettingsSection(page: Page, value: string, desktopLabel: RegExp) {
   const mobileSelect = page.getByLabel("Settings section");
   if (await mobileSelect.isVisible()) await mobileSelect.selectOption(value);
@@ -309,6 +368,64 @@ test("settings label personal and workspace connections and hide owner actions f
   await expect(page.getByText("Chase", { exact: true })).toBeVisible();
   await expect(page.getByRole("button", { name: /Disconnect/ })).toHaveCount(0);
   await expect(page.getByText("Owner managed").first()).toBeVisible();
+});
+
+test("deals prioritize value and disclose destination trust", async ({ page }) => {
+  await mockExpenseDashboard(page);
+  await mockDeals(page);
+  await page.goto("/");
+  await page.getByRole("button", { name: "Deals" }).click();
+
+  await expect(page.getByRole("heading", { name: "Deals worth your attention" })).toBeVisible();
+  await expect(page.getByText("$25 off", { exact: true })).toBeVisible();
+  await expect(page.getByText("Opens target.com")).toBeVisible();
+  await expect(page.getByRole("link", { name: /Open deal/ })).toBeVisible();
+  await expect(page.getByText("Unverified · offers.example.net")).toBeVisible();
+  await expect(page.getByRole("button", { name: /Review link/ })).toBeVisible();
+  await expect(page).toHaveScreenshot("deals-populated.png", { fullPage: true, timeout: 15_000 });
+
+  await page.getByRole("button", { name: /Review link/ }).click();
+  await expect(page.getByRole("dialog", { name: "Review this destination" })).toContainText("offers.example.net");
+  await page.getByRole("button", { name: "Cancel" }).click();
+
+  await page.getByRole("button", { name: "More actions for Target" }).click();
+  await expect(page.getByRole("menuitem", { name: "Dismiss" })).toBeVisible();
+  await expect(page.getByRole("menuitem", { name: "Not relevant" })).toBeVisible();
+  await expect(page.getByRole("menuitem", { name: "Mute Target" })).toBeVisible();
+  await page.keyboard.press("Escape");
+
+  const results = await new AxeBuilder({ page }).withTags(["wcag2a", "wcag2aa"]).analyze();
+  const blocking = results.violations.filter(
+    (violation) => violation.impact === "critical" || violation.impact === "serious",
+  );
+  expect(blocking).toEqual([]);
+});
+
+test("deals combine disconnected Gmail and an empty feed into one next step", async ({ page }) => {
+  await mockExpenseDashboard(page);
+  await mockDeals(page, { connected: false, empty: true });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Deals" }).click();
+
+  await expect(page.getByRole("heading", { name: "Connect Gmail to find your deals" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Connect Gmail" })).toBeVisible();
+  await expect(page.getByText("No deals in this view")).toHaveCount(0);
+});
+
+test("deals remain usable without mobile document overflow", async ({ page }) => {
+  await page.setViewportSize({ width: 320, height: 844 });
+  await mockExpenseDashboard(page);
+  await mockDeals(page);
+  await page.goto("/");
+  await page.getByRole("button", { name: "Deals" }).click();
+  await expect(page.getByText("$25 off", { exact: true })).toBeVisible();
+
+  const dimensions = await page.evaluate(() => ({
+    clientWidth: document.documentElement.clientWidth,
+    scrollWidth: document.documentElement.scrollWidth,
+  }));
+  expect(dimensions.scrollWidth).toBeLessThanOrEqual(dimensions.clientWidth);
+  await expect(page).toHaveScreenshot("deals-320.png", { fullPage: true, timeout: 15_000 });
 });
 
 test("expense views provide their own page identity", async ({ page }) => {

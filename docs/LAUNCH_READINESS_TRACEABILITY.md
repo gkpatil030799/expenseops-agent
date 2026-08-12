@@ -33,7 +33,7 @@ visual-foundation changes began.
 | V4 — Insights narrative and charts | Complete (visual layer) | Scoped reporting context, primary Total Spend hierarchy, comparison narrative, collapsed filters, coherent chart order, keyboard-readable points, mobile alternatives, and data tables; accounting release gate remains open until Phase 6 |
 | V5 — Household command center | Complete (visual layer) | Household-wide page identity, one prioritized Today action, compact all-clear state, route summary on Today, full builder under Errands, Start → Stops → End sequence, active/history receipt separation, and mobile tab fades |
 | V6 — Settings information architecture | Complete (visual layer) | Eight explicit destinations, desktop sidebar/mobile selector, owner-aware workspace controls, separated connection scopes, discoverable Splitwise group tools, dedicated privacy/danger section, and completed-onboarding suppression |
-| V7 — Deals hierarchy | Not started | — |
+| V7 — Deals hierarchy | Complete (visual layer) | Value-first deal cards, merchant identity, trusted-domain disclosure, review interstitials for unverified links, visible Open/Save actions, feedback overflow, purposeful empty/disconnected states, and urgency-based expiry treatment |
 | V8 — visual/accessibility validation | Not started | — |
 | Phase 2 — UX action integrity | Not started | — |
 | Phase 3 — identity and tenancy | Not started | — |
@@ -174,3 +174,28 @@ assigned to the later backend/UX phases in the remediation plan.
 V6 intentionally does not claim that backend authorization is complete. API-enforced permission
 matrices, exact provider identity contracts, member removal/ownership transfer, and self-service data
 deletion remain assigned to the identity/tenancy and security phases.
+
+## V7 validation evidence
+
+| Check | Result |
+| --- | --- |
+| Offer hierarchy | Concrete percentage or amount-off value is the strongest card content, followed by headline and supporting description |
+| Merchant recognition | Every featured and compact deal uses the shared merchant-initial avatar |
+| Primary actions | Open and Save remain visible; Dismiss, Not relevant, and Mute merchant move into a labeled overflow menu |
+| Destination disclosure | Every actionable link displays its destination domain before the user leaves ExpenseOps |
+| Trust presentation | Backend-trusted links receive the primary Open deal action; review-status links use a neutral Review link action and a domain-disclosing warning dialog |
+| Expiry semantics | Neutral treatment is used for distant or missing expiry, amber within seven days, and rose for today, tomorrow, or expired offers |
+| Empty and disconnected state | An empty feed plus disconnected Gmail resolves to one purposeful Connect Gmail state instead of stacked alerts and empty panels |
+| Failure distinction | A failed feed load is shown as an explicit recoverable error and does not overwrite previously loaded deals with an empty state |
+| Loading state | Card-shaped skeletons replace bare or misleading empty content during initial loading |
+| Responsive behavior | Featured cards stack cleanly; deal action rows wrap; no document-level overflow at 320px |
+| Deals visual baselines | Added populated desktop Chromium, Pixel 5 mobile Chromium, and explicit 320px snapshots |
+| Deals accessibility | Trusted-link, review-dialog, overflow-menu, and populated-feed flow has zero critical or serious axe violations |
+| Frontend unit tests | 15 passed |
+| Frontend production build | Passed; existing bundle-size advisory remains tracked |
+| Frontend lint | Zero errors; 19 pre-existing cleanup warnings remain |
+| Full Playwright suite | 44 passed across desktop Chromium and Pixel 5 mobile Chromium after deterministic snapshot correction |
+
+V7 does not claim complete Deals domain correctness. Save/Unsave, reversible merchant mute,
+pagination and complete totals, backend trust reasons, durable sync status, and failure-safe mutations
+remain assigned to Phases 2 and 6.
