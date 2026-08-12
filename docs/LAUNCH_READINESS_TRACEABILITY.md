@@ -32,7 +32,7 @@ visual-foundation changes began.
 | V3 — Expense Review hierarchy | Complete | Compact filter sheet/chips, trustworthy transaction metadata, neutral amount hierarchy, two dominant decisions, overflow actions, guided split steps, and five-row recent activity; implementation checkpoint on `agent/launch-readiness` |
 | V4 — Insights narrative and charts | Complete (visual layer) | Scoped reporting context, primary Total Spend hierarchy, comparison narrative, collapsed filters, coherent chart order, keyboard-readable points, mobile alternatives, and data tables; accounting release gate remains open until Phase 6 |
 | V5 — Household command center | Complete (visual layer) | Household-wide page identity, one prioritized Today action, compact all-clear state, route summary on Today, full builder under Errands, Start → Stops → End sequence, active/history receipt separation, and mobile tab fades |
-| V6 — Settings information architecture | Not started | — |
+| V6 — Settings information architecture | Complete (visual layer) | Eight explicit destinations, desktop sidebar/mobile selector, owner-aware workspace controls, separated connection scopes, discoverable Splitwise group tools, dedicated privacy/danger section, and completed-onboarding suppression |
 | V7 — Deals hierarchy | Not started | — |
 | V8 — visual/accessibility validation | Not started | — |
 | Phase 2 — UX action integrity | Not started | — |
@@ -148,3 +148,29 @@ Phase 6 currency, viewer-share, refund, deduplication, and reconciliation invari
 V5 does not certify provider location verification, route-plan freshness, independent panel loading,
 receipt pagination, or batch receipt decisions. Those product-domain and resilience invariants remain
 assigned to the later backend/UX phases in the remediation plan.
+
+## V6 validation evidence
+
+| Check | Result |
+| --- | --- |
+| Desktop information architecture | Sticky category navigation on the left and one selected settings destination on the right |
+| Mobile information architecture | Labeled 44px settings selector exposes all eight destinations without a horizontal tab strip |
+| Settings destinations | Account; Workspace and members; Personal connections; Workspace connections; Expense preferences; Splitwise groups; Learned behavior; Privacy and account actions |
+| Onboarding density | Setup checklist is hidden when the backend reports onboarding complete; incomplete setup shows explicit completed-step progress |
+| Identity | Account view shows exact signed-in name/email/account ID and current workspace/role; provider rows disclose when exact connected identity is absent from the current API |
+| Connection scope | Telegram is labeled Personal; Gmail, Plaid, and Splitwise are labeled Workspace; Maps and OpenAI are labeled Application |
+| Role-aware presentation | Member view hides rename, invitation, and workspace-provider disconnect controls and labels them owner managed |
+| Workspace invitations | Owner path to Members and the seven-day invitation control is directly navigable and browser-tested |
+| Splitwise discoverability | Dedicated destination exposes group creation, friend selection, email invitation, link invitation, and participant management |
+| Learned behavior | Saved friend/group preferences and fallback memories have a dedicated destination independent of Splitwise administration |
+| Privacy and danger | Data-boundary copy and Leave workspace are separated into a dedicated danger treatment; absent self-service deletion is disclosed as an open launch blocker |
+| Frontend production build | Passed; existing bundle-size advisory remains tracked |
+| Frontend unit tests | 15 passed |
+| Frontend lint | Zero errors; 19 pre-existing cleanup warnings remain |
+| Settings visual baselines | Added full-page desktop Chromium and Pixel 5 mobile Chromium Account snapshots |
+| Settings accessibility | Splitwise group workflow and navigation have zero critical or serious axe violations; unlabeled friend selector fixed |
+| Full Playwright suite | 38 passed across desktop Chromium and Pixel 5 mobile Chromium |
+
+V6 intentionally does not claim that backend authorization is complete. API-enforced permission
+matrices, exact provider identity contracts, member removal/ownership transfer, and self-service data
+deletion remain assigned to the identity/tenancy and security phases.

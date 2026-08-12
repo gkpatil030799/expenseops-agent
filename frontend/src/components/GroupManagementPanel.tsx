@@ -375,6 +375,7 @@ export function GroupManagementPanel({ currentUserId }: { currentUserId: number 
               />
             <div className="flex flex-col gap-2 sm:flex-row">
               <select
+                aria-label="Friend to add"
                 className="h-10 min-w-0 flex-1 rounded-lg border border-slate-300 bg-white px-3 text-sm text-slate-800 outline-none transition hover:border-slate-400 focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/20"
                 value={memberToAdd}
                 onChange={(event) => setMemberToAdd(event.target.value)}

@@ -604,7 +604,11 @@ function DashboardApp() {
         ) : null}
 
         {activeWorkspace === "settings" ? (
-          <AccountSettingsPage context={accountContext} expenseTools={<div className="grid gap-5 xl:grid-cols-2"><GroupManagementPanel currentUserId={currentSplitwiseUser?.id ?? null} /><div className="space-y-5"><AgentMemoryPanel friends={memory.friends} groups={memory.groups} onSelectFriend={selectMemoryFriend} onSelectGroup={selectMemoryGroup} loading={busy !== null && allTransactions.length === 0}/><AIFallbackMemoryPanel memories={aiMemories} onDelete={deleteAIMemory} loading={busy !== null && aiMemories.length === 0}/></div></div>} />
+          <AccountSettingsPage
+            context={accountContext}
+            splitwiseTools={<GroupManagementPanel currentUserId={currentSplitwiseUser?.id ?? null} />}
+            learnedBehaviorTools={<div className="space-y-5"><AgentMemoryPanel friends={memory.friends} groups={memory.groups} onSelectFriend={selectMemoryFriend} onSelectGroup={selectMemoryGroup} loading={busy !== null && allTransactions.length === 0}/><AIFallbackMemoryPanel memories={aiMemories} onDelete={deleteAIMemory} loading={busy !== null && aiMemories.length === 0}/></div>}
+          />
         ) : activeWorkspace === "household" ? (
           <HouseholdOpsPage />
         ) : activeWorkspace === "promotions" ? (

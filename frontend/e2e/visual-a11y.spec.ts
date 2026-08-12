@@ -132,6 +132,42 @@ async function mockHouseholdOps(page: Page, options: { allClear?: boolean } = {}
   });
 }
 
+async function mockSettings(page: Page, role = "owner") {
+  await page.route("**/api/**", (route) => {
+    const pathname = new URL(route.request().url()).pathname;
+    if (pathname === "/api/workspaces") return route.fulfill({ json: [{ id: 1, name: "Patil household", role, current: true }] });
+    if (pathname === "/api/workspaces/1/members") return route.fulfill({ json: [
+      { user_id: 1, email: "gunjan@example.com", display_name: "Gunjan Patil", role },
+      { user_id: 2, email: "janhavi@example.com", display_name: "Janhavi", role: "member" },
+    ] });
+    if (pathname === "/api/integrations") return route.fulfill({ json: {
+      gmail: { connected: true },
+      plaid: { connected: true, institutions: [{ id: 8, name: "Chase" }] },
+      telegram: { connected: true },
+      splitwise: { connected: true, available: true },
+      google_maps: { connected: true, managed_by: "application" },
+      openai: { connected: true, managed_by: "application" },
+    } });
+    if (pathname === "/api/integrations/onboarding") return route.fulfill({ json: { complete: true } });
+    return route.fallback();
+  });
+  const groups = [{ id: 10, name: "Apartment", group_type: "home", simplify_by_default: true, invite_link: "https://www.splitwise.com/join/abc", members: [] }];
+  const friends = [
+    { id: 1, first_name: "Gunjan", last_name: "Patil", display_name: "Gunjan Patil", email: "gunjan@example.com", registration_status: "confirmed" },
+    { id: 2, first_name: "Janhavi", last_name: "", display_name: "Janhavi", email: "janhavi@example.com", registration_status: "confirmed" },
+  ];
+  await page.route("**/splitwise/groups", (route) => route.fulfill({ json: groups }));
+  await page.route("**/splitwise/friends", (route) => route.fulfill({ json: friends }));
+  await page.route("**/splitwise/groups/10", (route) => route.fulfill({ json: groups[0] }));
+  await page.route("**/splitwise/groups/10/members", (route) => route.fulfill({ json: friends }));
+}
+
+async function chooseSettingsSection(page: Page, value: string, desktopLabel: RegExp) {
+  const mobileSelect = page.getByLabel("Settings section");
+  if (await mobileSelect.isVisible()) await mobileSelect.selectOption(value);
+  else await page.getByRole("button", { name: desktopLabel }).click();
+}
+
 test("visual foundation keeps the expense dashboard stable", async ({ page }) => {
   await mockExpenseDashboard(page);
   await page.goto("/");
@@ -218,11 +254,61 @@ test("household tabs do not create mobile document overflow", async ({ page }) =
 
 test("account identity exposes settings without occupying primary navigation", async ({ page }) => {
   await mockExpenseDashboard(page);
+  await mockSettings(page);
   await page.goto("/");
 
   await page.getByRole("button", { name: "Open account menu for Gunjan Patil" }).click();
   await page.getByRole("menuitem", { name: "Settings" }).click();
-  await expect(page.getByRole("heading", { name: "Your ExpenseOps setup" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Settings", exact: true })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Account", exact: true })).toBeVisible();
+  await expect(page.getByText("Finish your setup")).toHaveCount(0);
+  await expect(page).toHaveScreenshot("settings-account.png", { fullPage: true, timeout: 15_000 });
+});
+
+test("settings make workspace invitations and Splitwise group tools discoverable", async ({ page }) => {
+  await mockExpenseDashboard(page);
+  await mockSettings(page);
+  await page.goto("/");
+  await page.getByRole("button", { name: "Open account menu for Gunjan Patil" }).click();
+  await page.getByRole("menuitem", { name: "Settings" }).click();
+
+  await chooseSettingsSection(page, "workspace", /Workspace & members/);
+  await expect(page.getByRole("heading", { name: "Workspace and members" })).toBeVisible();
+  await expect(page.getByPlaceholder("friend@example.com")).toBeVisible();
+
+  await chooseSettingsSection(page, "splitwise", /Splitwise groups/);
+  await expect(page.getByRole("heading", { name: "Manage groups and participants" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Create a new group" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Add an existing friend" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Invite by email" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Invite by link" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Current participants" })).toBeVisible();
+
+  const results = await new AxeBuilder({ page }).withTags(["wcag2a", "wcag2aa"]).analyze();
+  const blocking = results.violations.filter(
+    (violation) => violation.impact === "critical" || violation.impact === "serious",
+  );
+  expect(blocking).toEqual([]);
+  const dimensions = await page.evaluate(() => ({ clientWidth: document.documentElement.clientWidth, scrollWidth: document.documentElement.scrollWidth }));
+  expect(dimensions.scrollWidth).toBeLessThanOrEqual(dimensions.clientWidth);
+});
+
+test("settings label personal and workspace connections and hide owner actions from members", async ({ page }) => {
+  await mockExpenseDashboard(page);
+  await mockSettings(page, "member");
+  await page.goto("/");
+  await page.getByRole("button", { name: "Open account menu for Gunjan Patil" }).click();
+  await page.getByRole("menuitem", { name: "Settings" }).click();
+
+  await chooseSettingsSection(page, "personal", /Personal connections/);
+  await expect(page.getByText("Personal", { exact: true })).toBeVisible();
+  await expect(page.getByText(/exact Telegram identity is not returned/i)).toBeVisible();
+
+  await chooseSettingsSection(page, "workspace-connections", /Workspace connections/);
+  await expect(page.getByText("Workspace", { exact: true }).first()).toBeVisible();
+  await expect(page.getByText("Chase", { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: /Disconnect/ })).toHaveCount(0);
+  await expect(page.getByText("Owner managed").first()).toBeVisible();
 });
 
 test("expense views provide their own page identity", async ({ page }) => {
