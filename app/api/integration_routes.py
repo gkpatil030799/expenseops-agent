@@ -203,6 +203,7 @@ def telegram_link_code(
     user: CurrentUser,
     workspace: CurrentWorkspace,
 ) -> dict:
+    settings = get_settings()
     rate_limiter.check(f"telegram-link:{user.id}", limit=5, window_seconds=600)
     raw = secrets.token_urlsafe(9).replace("-", "").replace("_", "")[:10].upper()
     code = TelegramLinkCode(
@@ -219,7 +220,16 @@ def telegram_link_code(
         resource_type="telegram_identity",
     )
     db.commit()
-    return {"code": raw, "command": f"/connect {raw}", "expires_at": code.expires_at}
+    bot_username = settings.telegram_bot_username.strip().lstrip("@")
+    connect_url = (
+        f"https://t.me/{bot_username}?start=connect_{raw}" if bot_username else None
+    )
+    return {
+        "code": raw,
+        "command": f"/connect {raw}",
+        "connect_url": connect_url,
+        "expires_at": code.expires_at,
+    }
 
 
 @router.delete("/telegram", status_code=204)

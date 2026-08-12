@@ -68,6 +68,7 @@ class Settings(BaseSettings):
     splitwise_oauth_callback_url: str = ""
 
     telegram_bot_token: str = ""
+    telegram_bot_username: str = ""
     telegram_chat_id: str = ""
     telegram_webhook_secret: str = ""
     telegram_allowed_user_id: str = ""

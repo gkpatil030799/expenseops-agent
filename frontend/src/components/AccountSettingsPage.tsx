@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { CheckCircle2, Circle, Copy, Link2, LogOut, Pencil, Plus, Unplug, UserMinus, Users } from "lucide-react";
+import { CheckCircle2, Circle, Copy, ExternalLink, Link2, LogOut, MessageCircle, Pencil, Plus, Unplug, UserMinus, Users } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -30,7 +30,7 @@ export function AccountSettingsPage({ context }: { context: AccountContext }) {
   const [members, setMembers] = useState<Member[]>([]);
   const [inviteEmail, setInviteEmail] = useState("");
   const [inviteLink, setInviteLink] = useState("");
-  const [telegramCommand, setTelegramCommand] = useState("");
+  const [telegramSetup, setTelegramSetup] = useState<{ command: string; connect_url: string | null } | null>(null);
   const [message, setMessage] = useState("");
 
   async function load() {
@@ -45,6 +45,22 @@ export function AccountSettingsPage({ context }: { context: AccountContext }) {
   }
 
   useEffect(() => void load(), []);
+
+  useEffect(() => {
+    if (!telegramSetup) return;
+    const interval = window.setInterval(() => {
+      void api<Integrations>("/api/integrations")
+        .then((value) => {
+          setIntegrations(value);
+          if (value.telegram.connected) {
+            setTelegramSetup(null);
+            setMessage("Telegram connected successfully.");
+          }
+        })
+        .catch(() => undefined);
+    }, 3000);
+    return () => window.clearInterval(interval);
+  }, [telegramSetup]);
 
   async function createWorkspace() {
     await api("/api/workspaces", { method: "POST", body: JSON.stringify({ name: workspaceName }) });
@@ -88,10 +104,10 @@ export function AccountSettingsPage({ context }: { context: AccountContext }) {
   }
 
   async function connectTelegram() {
-    const value = await api<{ command: string }>("/api/integrations/telegram/link-code", {
+    const value = await api<{ command: string; connect_url: string | null }>("/api/integrations/telegram/link-code", {
       method: "POST",
     });
-    setTelegramCommand(value.command);
+    setTelegramSetup(value);
   }
 
   async function connectSplitwise() {
@@ -138,7 +154,7 @@ export function AccountSettingsPage({ context }: { context: AccountContext }) {
           <IntegrationRow name="Splitwise" connected={integrations?.splitwise.connected} onConnect={connectSplitwise} onDisconnect={() => disconnect("/api/integrations/splitwise")} />
           <IntegrationRow name="Google Maps" connected detail="Application-managed" />
           <IntegrationRow name="OpenAI" connected detail="Application-managed" />
-          {telegramCommand && <CopyValue label="Send this to the ExpenseOps Telegram bot" value={telegramCommand} />}
+          {telegramSetup && <TelegramSetup value={telegramSetup} />}
           {message && <p className="text-sm text-emerald-700">{message}</p>}
         </CardContent>
       </Card>
@@ -183,6 +199,33 @@ function ChecklistRow({ done, label, detail }: { done: boolean; label: string; d
 
 function IntegrationRow({ name, connected, detail, onConnect, onDisconnect }: { name: string; connected?: boolean; detail?: string; onConnect?: () => void; onDisconnect?: () => void }) {
   return <div className="flex items-center justify-between gap-3 rounded-lg border border-slate-200 p-3"><div><p className="font-medium text-slate-950">{name}</p><p className={`text-sm ${connected ? "text-emerald-700" : "text-slate-500"}`}>{detail || (connected ? "Connected" : "Not connected")}</p></div>{onConnect && !connected ? <Button size="sm" onClick={onConnect}><Link2 className="h-4 w-4" />Connect</Button> : onDisconnect && connected ? <Button size="sm" variant="outline" onClick={onDisconnect}><Unplug className="h-4 w-4" />Disconnect</Button> : null}</div>;
+}
+
+function TelegramSetup({ value }: { value: { command: string; connect_url: string | null } }) {
+  return (
+    <div className="grid gap-3 rounded-lg border border-indigo-200 bg-indigo-50/60 p-4">
+      <div className="flex items-start gap-3">
+        <span className="rounded-full bg-indigo-100 p-2 text-indigo-700"><MessageCircle className="h-5 w-5" /></span>
+        <div>
+          <p className="font-semibold text-slate-950">Finish connecting in Telegram</p>
+          <p className="text-sm text-slate-700">Open the bot, tap <strong>Start</strong>, and wait for the connected confirmation. This page checks automatically. The link expires in 10 minutes.</p>
+        </div>
+      </div>
+      {value.connect_url ? (
+        <Button asChild className="w-full sm:w-fit">
+          <a href={value.connect_url} target="_blank" rel="noreferrer">
+            Open Telegram and connect <ExternalLink className="h-4 w-4" />
+          </a>
+        </Button>
+      ) : (
+        <p className="text-sm text-amber-800">The direct bot link is not configured. Use the fallback command below.</p>
+      )}
+      <details className="text-sm text-slate-700">
+        <summary className="cursor-pointer rounded focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500">Having trouble? Use the command instead</summary>
+        <div className="mt-2"><CopyValue label="Send this command to the ExpenseOps bot" value={value.command} /></div>
+      </details>
+    </div>
+  );
 }
 
 function CopyValue({ label, value }: { label: string; value: string }) {

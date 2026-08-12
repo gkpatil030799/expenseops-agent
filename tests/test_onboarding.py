@@ -528,7 +528,7 @@ def test_telegram_link_code_is_hashed_and_can_only_be_consumed_once(database, mo
         db.commit()
         update = {
             "message": {
-                "text": f"/connect {raw}",
+                "text": f"/start connect_{raw.lower()}",
                 "from": {"id": 123},
                 "chat": {"id": 456},
             }
@@ -541,6 +541,51 @@ def test_telegram_link_code_is_hashed_and_can_only_be_consumed_once(database, mo
         assert len(identities) == 1
         assert "connected" in sent[0].lower()
         assert "invalid or expired" in sent[1].lower()
+
+
+def test_telegram_link_code_returns_direct_bot_link(database, monkeypatch):
+    monkeypatch.setattr(
+        integration_routes,
+        "get_settings",
+        lambda: Settings(telegram_bot_username="@ExpenseOps_bot"),
+    )
+    with database() as db:
+        user = User(email="telegram-link@example.test", display_name="Telegram link")
+        db.add(user)
+        db.flush()
+        workspace = Workspace(name="Telegram link", created_by_user_id=user.id)
+        db.add(workspace)
+        db.flush()
+        db.add(WorkspaceMembership(user_id=user.id, workspace_id=workspace.id, role="owner"))
+        db.commit()
+
+        value = integration_routes.telegram_link_code(db, user, workspace)
+
+        assert value["connect_url"] == (
+            f"https://t.me/ExpenseOps_bot?start=connect_{value['code']}"
+        )
+        assert value["command"] == f"/connect {value['code']}"
+        stored = db.scalar(select(TelegramLinkCode))
+        assert stored is not None
+        assert stored.code_hash == hash_api_token(value["code"])
+        assert value["code"] not in stored.code_hash
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("/connect abc123", "ABC123"),
+        ("/connect@ExpenseOps_bot abc123", "ABC123"),
+        ("/start connect_abc123", "ABC123"),
+        ("/start@ExpenseOps_bot CONNECT_abc123", "ABC123"),
+        ("/start", None),
+        ("hello", None),
+    ],
+)
+def test_telegram_connect_code_accepts_deep_link_and_fallback(text, expected):
+    from app.api.telegram_routes import _telegram_connect_code
+
+    assert _telegram_connect_code(text) == expected
 
 
 def test_expired_telegram_link_code_is_rejected(database, monkeypatch):

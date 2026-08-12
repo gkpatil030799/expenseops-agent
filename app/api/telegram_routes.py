@@ -189,9 +189,9 @@ def _verify_allowed_telegram_user(update: dict) -> None:
 def _handle_telegram_connect(update: dict, db: DbSession) -> bool:
     message = update.get("message") or {}
     text_value = str(message.get("text") or "").strip()
-    if not text_value.casefold().startswith("/connect "):
+    code = _telegram_connect_code(text_value)
+    if code is None:
         return False
-    code = text_value.split(maxsplit=1)[1].strip().upper()
     from_user = message.get("from") or {}
     chat = message.get("chat") or {}
     telegram_user_id = str(from_user.get("id") or "")
@@ -277,6 +277,20 @@ def _handle_telegram_connect(update: dict, db: DbSession) -> bool:
         "Telegram is connected to your ExpenseOps workspace.", chat_id=chat_id
     )
     return True
+
+
+def _telegram_connect_code(text_value: str) -> str | None:
+    """Read a manual /connect code or Telegram's deep-link /start payload."""
+    parts = text_value.strip().split(maxsplit=1)
+    if len(parts) != 2:
+        return None
+    command = parts[0].split("@", maxsplit=1)[0].casefold()
+    payload = parts[1].strip()
+    if command == "/connect":
+        return payload.upper() or None
+    if command == "/start" and payload.casefold().startswith("connect_"):
+        return payload[len("connect_") :].upper() or None
+    return None
 
 
 def _aware_datetime(value: datetime) -> datetime:

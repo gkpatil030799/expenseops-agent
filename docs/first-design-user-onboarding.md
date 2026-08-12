@@ -55,7 +55,9 @@ bot token/webhook secret, Plaid app credentials, and Splitwise consumer credenti
 1. Open the ExpenseOps URL and select **Sign in**.
 2. Approve basic Google identity access. ExpenseOps creates a private personal workspace.
 3. Open **Settings**, select **Connect Gmail**, and approve read-only Gmail access.
-4. Select **Connect Telegram**, copy the one-time command, and send it to the ExpenseOps bot.
+4. Select **Connect Telegram**, then **Open Telegram and connect**. Telegram opens the shared
+   ExpenseOps bot with the private one-time workspace code attached; tap **Start** and wait for the
+   confirmation. The copyable command is only a fallback if the deep link cannot open Telegram.
 5. Explore receipts, Promotion Intelligence, Replenishment, and Household Ops.
 6. Optionally connect Plaid or Splitwise.
 

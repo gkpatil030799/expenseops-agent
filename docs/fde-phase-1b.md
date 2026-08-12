@@ -39,7 +39,9 @@ bound to the provider subject.
 
 Gmail and Splitwise use expiring, single-use OAuth state persisted by hash in the database and
 bound to the initiating user and workspace. Plaid Link ownership comes only from authenticated
-request context. Telegram uses a hashed, one-time 10-minute `/connect CODE` generated in Settings.
+request context. Telegram uses a hashed, one-time 10-minute code generated in Settings. The normal
+flow opens a `t.me` deep link and Telegram sends its `/start connect_CODE` payload; a copyable
+`/connect CODE` command remains available as a fallback.
 Disconnecting an integration removes or disables credentials while retaining financial and
 workflow history.
 
