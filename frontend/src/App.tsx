@@ -28,9 +28,12 @@ import {
 } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
+import { AccountMenu } from "@/components/ui/account-menu";
+import { AppShell } from "@/components/ui/app-shell";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
+import { PageHeader } from "@/components/ui/page-header";
 import { GroupManagementPanel } from "@/components/GroupManagementPanel";
 import { HouseholdOpsPage } from "@/components/HouseholdOpsPage";
 import { PromotionsPage } from "@/components/PromotionsPage";
@@ -78,6 +81,7 @@ type AccountContext = {
   user: { id: number; email: string; display_name: string; avatar_url?: string | null };
   workspace: { id: number; name: string; workspace_type: string };
 };
+type WorkspaceView = "expenses" | "household" | "promotions" | "settings";
 
 function App() {
   if (
@@ -566,14 +570,26 @@ function DashboardApp() {
   if (authView === "loading") return <AuthLoading />;
   if (authView === "sign-in" || !accountContext) return <SignInPage />;
 
+  async function logout() {
+    await fetch("/auth/logout", { method: "POST", credentials: "same-origin" });
+    window.location.reload();
+  }
+
   return (
-    <main className="min-h-screen bg-[radial-gradient(circle_at_top,rgba(79,70,229,0.06),transparent_30rem)]">
-      <section className="page-frame flex flex-col gap-5 py-3 sm:py-5">
+    <AppShell
+      className="pb-24 md:pb-5"
+      navigation={
         <WorkspaceNavigation
           active={activeWorkspace}
           onChange={changeWorkspace}
           accountContext={accountContext}
+          onLogout={logout}
         />
+      }
+      mobileNavigation={
+        <MobileNavigation active={activeWorkspace} onChange={changeWorkspace} />
+      }
+    >
 
         {onboardingNotice ? (
           <div role={onboardingNotice.tone === "error" ? "alert" : "status"} className={`flex items-start justify-between gap-3 rounded-xl border px-4 py-3 text-sm ${onboardingNotice.tone === "error" ? "border-rose-200 bg-rose-50 text-rose-800" : "border-emerald-200 bg-emerald-50 text-emerald-800"}`}>
@@ -590,7 +606,7 @@ function DashboardApp() {
           <PromotionsPage />
         ) : (
           <>
-        <Header onSync={syncTransactions} busy={busy} pendingCount={transactions.length} pendingTotal={pendingTotal} lastSyncLabel={lastSyncedAt ? relativeTime(lastSyncedAt) : lastSyncLabel} syncError={syncError} />
+        <Header active={expenseTab} onSync={syncTransactions} busy={busy} pendingCount={transactions.length} pendingTotal={pendingTotal} lastSyncLabel={lastSyncedAt ? relativeTime(lastSyncedAt) : lastSyncLabel} syncError={syncError} />
         <ExpenseTabs active={expenseTab} onChange={changeExpenseTab}/>
 
         {expenseTab === "review" ? <div className="space-y-6">
@@ -704,8 +720,7 @@ function DashboardApp() {
         </div> : expenseTab === "insights" ? <InsightsDashboard/> : <div className="space-y-4"><SearchFilters filters={filters} onChange={updateFilter}/><ActivityTimeline events={timelineEvents} loading={busy !== null && allTransactions.length === 0}/></div>}
           </>
         )}
-      </section>
-    </main>
+    </AppShell>
   );
 }
 
@@ -713,60 +728,84 @@ function WorkspaceNavigation({
   active,
   onChange,
   accountContext,
+  onLogout,
 }: {
-  active: "expenses" | "household" | "promotions" | "settings";
-  onChange: (value: "expenses" | "household" | "promotions" | "settings") => void;
-  accountContext: AccountContext | null;
+  active: WorkspaceView;
+  onChange: (value: WorkspaceView) => void;
+  accountContext: AccountContext;
+  onLogout: () => void;
 }) {
   return (
-    <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-      <nav
-        className="flex w-full min-w-0 gap-1 overflow-x-auto rounded-xl border border-slate-200 bg-white p-1 shadow-sm sm:w-fit"
-        aria-label="ExpenseOps sections"
-      >
-      <button
-        type="button"
-        onClick={() => onChange("expenses")}
-        aria-current={active === "expenses" ? "page" : undefined}
-        className={`flex shrink-0 items-center justify-center gap-2 rounded-lg px-4 py-2 text-sm font-medium transition ${
-          active === "expenses"
-            ? "bg-slate-900 text-white shadow-sm"
-            : "text-slate-600 hover:bg-slate-50 hover:text-slate-950"
-        }`}
-      >
-        <WalletCards className="h-4 w-4" />
-        Expense review
-      </button>
-      <button type="button" onClick={() => onChange("settings")} aria-current={active === "settings" ? "page" : undefined} className={`flex shrink-0 items-center justify-center gap-2 rounded-lg px-4 py-2 text-sm font-medium transition ${active === "settings" ? "bg-indigo-600 text-white shadow-sm" : "text-slate-600 hover:bg-slate-50 hover:text-slate-950"}`}>
-        <Settings2 className="h-4 w-4" />Settings
-      </button>
-      <button type="button" onClick={() => onChange("promotions")} aria-current={active === "promotions" ? "page" : undefined} className={`flex shrink-0 items-center justify-center gap-2 rounded-lg px-4 py-2 text-sm font-medium transition ${active === "promotions" ? "bg-indigo-600 text-white shadow-sm" : "text-slate-600 hover:bg-slate-50 hover:text-slate-950"}`}>
-        <Tags className="h-4 w-4" />Deals
-      </button>
-      <button
-        type="button"
-        onClick={() => onChange("household")}
-        aria-current={active === "household" ? "page" : undefined}
-        className={`flex shrink-0 items-center justify-center gap-2 rounded-lg px-4 py-2 text-sm font-medium transition ${
-          active === "household"
-            ? "bg-indigo-600 text-white shadow-sm"
-            : "text-slate-600 hover:bg-slate-50 hover:text-slate-950"
-        }`}
-      >
-        <House className="h-4 w-4" />
-        Household Ops
-      </button>
-      </nav>
-      {accountContext ? (
-        <div className="flex items-center gap-2 self-end rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs text-slate-600 shadow-sm" aria-label="Current account and workspace">
-          {accountContext.user.avatar_url ? <img className="h-5 w-5 rounded-full" src={accountContext.user.avatar_url} alt="" referrerPolicy="no-referrer" /> : <UserCheck className="h-4 w-4 text-indigo-600" />}
-          <span className="font-semibold text-slate-900">{accountContext.workspace.name}</span>
-          <span aria-hidden="true">·</span>
-          <span>{accountContext.user.display_name}</span>
+    <>
+      <header className="hidden h-16 min-w-0 items-center justify-between rounded-card border border-ui-border bg-white px-3 shadow-card md:flex">
+        <div className="flex min-w-0 items-center gap-5">
+          <button
+            type="button"
+            onClick={() => onChange("expenses")}
+            className="flex shrink-0 items-center gap-2 rounded-control px-2 py-2 text-sm font-semibold text-ink"
+            aria-label="Go to Expenses"
+          >
+            <span className="flex h-8 w-8 items-center justify-center rounded-control bg-ui-primary text-white shadow-primary">
+              <Split className="h-4 w-4" aria-hidden="true" />
+            </span>
+            ExpenseOps
+          </button>
+          <nav className="flex items-center gap-1" aria-label="Primary navigation">
+            <DesktopNavItem active={active === "expenses"} label="Expenses" icon={WalletCards} onClick={() => onChange("expenses")} />
+            <DesktopNavItem active={active === "household"} label="Household" icon={House} onClick={() => onChange("household")} />
+            <DesktopNavItem active={active === "promotions"} label="Deals" icon={Tags} onClick={() => onChange("promotions")} />
+          </nav>
         </div>
-      ) : null}
-    </div>
+        <AccountMenu
+          displayName={accountContext.user.display_name}
+          email={accountContext.user.email}
+          workspaceName={accountContext.workspace.name}
+          avatarUrl={accountContext.user.avatar_url}
+          actions={[
+            { label: "Settings", icon: Settings2, onSelect: () => onChange("settings") },
+            { label: "Sign out", destructive: true, onSelect: onLogout },
+          ]}
+        />
+      </header>
+      <header className="flex h-14 min-w-0 items-center justify-between rounded-card border border-ui-border bg-white px-2 shadow-card md:hidden">
+        <button
+          type="button"
+          onClick={() => onChange("expenses")}
+          className="touch-target flex items-center gap-2 rounded-control px-2 text-sm font-semibold text-ink"
+          aria-label="Go to Expenses"
+        >
+          <span className="flex h-8 w-8 items-center justify-center rounded-control bg-ui-primary text-white">
+            <Split className="h-4 w-4" aria-hidden="true" />
+          </span>
+          ExpenseOps
+        </button>
+        <AccountMenu
+          compact
+          displayName={accountContext.user.display_name}
+          email={accountContext.user.email}
+          workspaceName={accountContext.workspace.name}
+          avatarUrl={accountContext.user.avatar_url}
+          actions={[
+            { label: "Settings", icon: Settings2, onSelect: () => onChange("settings") },
+            { label: "Sign out", destructive: true, onSelect: onLogout },
+          ]}
+        />
+      </header>
+    </>
   );
+}
+
+function DesktopNavItem({ active, label, icon: Icon, onClick }: { active: boolean; label: string; icon: ComponentType<{ className?: string }>; onClick: () => void }) {
+  return <button type="button" onClick={onClick} aria-current={active ? "page" : undefined} className={`touch-target inline-flex items-center gap-2 rounded-control px-3 text-sm font-medium transition-colors duration-hover ${active ? "bg-ui-primary-tint text-ui-primary" : "text-ui-text hover:bg-slate-50 hover:text-ink"}`}><Icon className="h-4 w-4" aria-hidden="true" />{label}</button>;
+}
+
+function MobileNavigation({ active, onChange }: { active: WorkspaceView; onChange: (value: WorkspaceView) => void }) {
+  const items = [
+    { value: "expenses" as const, label: "Expenses", icon: WalletCards },
+    { value: "household" as const, label: "Household", icon: House },
+    { value: "promotions" as const, label: "Deals", icon: Tags },
+  ];
+  return <nav className="fixed inset-x-3 bottom-3 z-40 grid grid-cols-3 rounded-card border border-ui-border bg-white/95 p-1.5 shadow-primary backdrop-blur md:hidden" aria-label="Primary mobile navigation">{items.map(({ value, label, icon: Icon }) => <button key={value} type="button" onClick={() => onChange(value)} aria-current={active === value ? "page" : undefined} className={`flex min-h-14 flex-col items-center justify-center gap-1 rounded-control text-xs font-semibold transition-colors duration-hover ${active === value ? "bg-ui-primary text-white" : "text-ui-text hover:bg-slate-50 hover:text-ink"}`}><Icon className="h-5 w-5" aria-hidden="true" />{label}</button>)}</nav>;
 }
 
 function AuthLoading() {
@@ -1296,6 +1335,7 @@ function MemoryList({
 }
 
 function Header({
+  active,
   onSync,
   busy,
   pendingCount,
@@ -1303,6 +1343,7 @@ function Header({
   lastSyncLabel,
   syncError,
 }: {
+  active: "review" | "insights" | "activity";
   onSync: () => void;
   busy: string | null;
   pendingCount: number;
@@ -1310,34 +1351,34 @@ function Header({
   lastSyncLabel: string;
   syncError: boolean;
 }) {
+  const copy = {
+    review: {
+      title: "Expense Review",
+      description: `${pendingCount} transaction${pendingCount === 1 ? "" : "s"} need review · ${formatCurrency(pendingTotal)} pending`,
+    },
+    insights: {
+      title: "Spending Insights",
+      description: "Understand where your money goes, how it changes, and what deserves attention.",
+    },
+    activity: {
+      title: "Expense Activity",
+      description: "Review recent decisions and return eligible transactions to the queue.",
+    },
+  }[active];
   return (
-    <header className="relative overflow-hidden rounded-xl border border-slate-800 bg-gradient-to-br from-slate-950 via-slate-950 to-indigo-950 px-5 py-4 shadow-sm">
-      <div className="pointer-events-none absolute -right-16 -top-24 h-48 w-48 rounded-full bg-indigo-500/10 blur-3xl" />
-      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-        <div className="relative">
-          <div className="mb-2 flex items-center gap-2 text-xs font-semibold uppercase tracking-[0.16em] text-indigo-200">
-            <span className="flex h-7 w-7 items-center justify-center rounded-full border border-indigo-300/20 bg-indigo-400/10">
-              <WalletCards className="h-4 w-4" aria-hidden="true" />
-            </span>
-            ExpenseOps Agent
-            <span className="rounded-full border border-white/10 bg-white/5 px-2 py-1 normal-case tracking-normal text-slate-300">
-              Live review workflow
-            </span>
-          </div>
-          <h1 className="text-2xl font-semibold tracking-tight text-white">Expense Review</h1>
-          <p className="mt-1 text-sm font-medium text-slate-200">{pendingCount} transaction{pendingCount === 1 ? "" : "s"} need review · {formatCurrency(pendingTotal)} pending</p>
-          <p role={syncError ? "alert" : "status"} className={`mt-1 text-xs ${syncError ? "text-rose-300" : "text-slate-400"}`}>{syncError ? "We couldn't sync transactions." : busy === "sync" ? "Syncing transactions…" : `Last synced ${lastSyncLabel}`}</p>
-        </div>
-        <Button
+    <PageHeader
+      eyebrow={<span className="inline-flex items-center gap-2"><WalletCards className="h-4 w-4" aria-hidden="true" />Expenses</span>}
+      title={copy.title}
+      description={<><span className="block text-slate-200">{copy.description}</span><span role={syncError ? "alert" : "status"} className={`mt-1 block text-xs ${syncError ? "text-rose-300" : "text-slate-400"}`}>{syncError ? "We couldn't sync transactions." : busy === "sync" ? "Syncing transactions…" : `Last synced ${lastSyncLabel}`}</span></>}
+      actions={<Button
           onClick={onSync}
           disabled={busy !== null}
           variant="outline"
           className="relative border-white/15 bg-white/10 text-white hover:border-white/25 hover:bg-white/15 hover:text-white"
         >
           <RefreshCw className={`h-4 w-4 ${busy === "sync" ? "animate-spin" : ""}`}/>{syncError ? "Try again" : "Sync"}
-        </Button>
-      </div>
-    </header>
+        </Button>}
+    />
   );
 }
 

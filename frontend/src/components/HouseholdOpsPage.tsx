@@ -29,6 +29,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
+import { PageHeader } from "@/components/ui/page-header";
 import { api } from "@/lib/api";
 import type {
   Errand,
@@ -727,19 +728,11 @@ export function HouseholdOpsPage() {
 
   return (
     <div className="space-y-5">
-      <header className="overflow-hidden rounded-xl border border-slate-800 bg-gradient-to-br from-slate-950 via-slate-900 to-indigo-950 px-5 py-6 text-white shadow-lg shadow-slate-950/10 sm:px-7">
-        <div className="flex flex-col gap-5 sm:flex-row sm:items-end sm:justify-between">
-          <div>
-            <div className="inline-flex items-center gap-2 text-xs font-semibold uppercase tracking-[0.14em] text-indigo-200">
-              <House className="h-4 w-4" />
-              Household Ops
-            </div>
-            <h1 className="mt-3 text-3xl font-semibold tracking-tight">Get more done while you're already out</h1>
-            <p className="mt-2 max-w-2xl text-sm leading-6 text-slate-300">
-              Capture errands, anticipate staples, and combine work into fewer stops.
-            </p>
-          </div>
-          <Button
+      <PageHeader
+        eyebrow={<span className="inline-flex items-center gap-2"><House className="h-4 w-4" aria-hidden="true" />Household</span>}
+        title="Household command center"
+        description="Capture errands, anticipate staples, and combine work into fewer stops."
+        actions={<Button
             variant="secondary"
             className="bg-white/10 text-white ring-1 ring-white/15 hover:bg-white/15"
             onClick={loadHouseholdOps}
@@ -747,9 +740,8 @@ export function HouseholdOpsPage() {
           >
             <RefreshCw className={`h-4 w-4 ${busy === "refresh" ? "animate-spin" : ""}`} />
             Refresh
-          </Button>
-        </div>
-      </header>
+          </Button>}
+      />
 
       {error ? (
         <div className="flex items-start gap-2 rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-800">

@@ -5,6 +5,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
+import { PageHeader } from "@/components/ui/page-header";
 import { api } from "@/lib/api";
 import type { PromotionOffer } from "@/types";
 
@@ -89,12 +90,12 @@ export function PromotionsPage() {
   const overflow = view === "all" ? visible.slice(6) : [];
 
   return <div className="space-y-5">
-    <header className="overflow-hidden rounded-xl border border-slate-800 bg-slate-950 p-6 text-white shadow-sm">
-      <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
-        <div><p className="text-xs font-semibold uppercase tracking-[0.18em] text-indigo-300">Promotion Intelligence</p><h1 className="mt-2 text-3xl font-semibold">Deals worth your attention</h1><p className="mt-2 max-w-2xl text-sm text-slate-300">Start with the strongest matches. Browse the full feed only when you want to.</p></div>
-        <Button variant="secondary" onClick={load} disabled={busy} aria-label="Refresh deals"><RefreshCw className={`h-4 w-4 ${busy ? "animate-spin" : ""}`} />Refresh</Button>
-      </div>
-    </header>
+    <PageHeader
+      eyebrow={<span className="inline-flex items-center gap-2"><Tag className="h-4 w-4" aria-hidden="true" />Deals</span>}
+      title="Deals worth your attention"
+      description="Start with the strongest matches. Browse the full feed only when you want to."
+      actions={<Button className="border-white/15 bg-white/10 text-white hover:bg-white/15 hover:text-white" variant="outline" onClick={load} disabled={busy} aria-label="Refresh deals"><RefreshCw className={`h-4 w-4 ${busy ? "animate-spin" : ""}`} />Refresh</Button>}
+    />
 
     {removed ? <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-700 shadow-sm"><span>{removed.offer.merchant} was removed from your active deals.</span><Button size="sm" variant="outline" onClick={undoRemoval}>Undo</Button></div> : null}
     {gmailConnected === false ? <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-indigo-200 bg-indigo-50 px-4 py-3 text-sm text-indigo-950"><span><strong>Gmail is not connected.</strong> Connect it to import your promotion emails automatically.</span><Button size="sm" onClick={() => window.location.assign("/?workspace=settings")}>Connect Gmail</Button></div> : null}

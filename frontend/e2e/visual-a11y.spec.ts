@@ -16,7 +16,12 @@ const context = {
 };
 
 async function mockExpenseDashboard(page: Page) {
-  await page.route("**/api/context", (route) => route.fulfill({ json: context }));
+  await page.route("**/api/**", (route) => {
+    const pathname = new URL(route.request().url()).pathname;
+    if (pathname === "/api/context") return route.fulfill({ json: context });
+    if (pathname === "/api/insights/activity") return route.fulfill({ json: [] });
+    return route.fulfill({ status: 503, json: { detail: "Provider unavailable in visual test" } });
+  });
   await page.route(/.*\/transactions.*/, (route) => route.fulfill({ json: [] }));
   await page.route("**/splitwise/me", (route) =>
     route.fulfill({
@@ -30,7 +35,7 @@ test("visual foundation keeps the expense dashboard stable", async ({ page }) =>
   await mockExpenseDashboard(page);
   await page.goto("/");
   await expect(page.getByRole("heading", { name: "Expense Review" })).toBeVisible();
-  await expect(page).toHaveScreenshot("expense-review-empty.png", { fullPage: true });
+  await expect(page).toHaveScreenshot("expense-review-empty.png", { fullPage: true, timeout: 15_000 });
 });
 
 test("@a11y expense dashboard has no serious accessibility violations", async ({ page }) => {
@@ -43,6 +48,40 @@ test("@a11y expense dashboard has no serious accessibility violations", async ({
     (violation) => violation.impact === "critical" || violation.impact === "serious",
   );
   expect(blocking).toEqual([]);
+});
+
+test("primary destinations remain reachable from the responsive shell", async ({ page }) => {
+  await mockExpenseDashboard(page);
+  await page.goto("/");
+
+  await page.getByRole("button", { name: "Household" }).click();
+  await expect(page.getByRole("heading", { name: "Household command center" })).toBeVisible();
+
+  await page.getByRole("button", { name: "Deals" }).click();
+  await expect(page.getByRole("heading", { name: "Deals worth your attention" })).toBeVisible();
+
+  await page.getByRole("button", { name: "Expenses", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "Expense Review" })).toBeVisible();
+});
+
+test("account identity exposes settings without occupying primary navigation", async ({ page }) => {
+  await mockExpenseDashboard(page);
+  await page.goto("/");
+
+  await page.getByRole("button", { name: "Open account menu for Gunjan Patil" }).click();
+  await page.getByRole("menuitem", { name: "Settings" }).click();
+  await expect(page.getByRole("heading", { name: "Your ExpenseOps setup" })).toBeVisible();
+});
+
+test("expense views provide their own page identity", async ({ page }) => {
+  await mockExpenseDashboard(page);
+  await page.goto("/");
+
+  await page.getByRole("button", { name: /insights/i, exact: true }).click();
+  await expect(page.getByRole("heading", { name: "Spending Insights" })).toBeVisible();
+
+  await page.getByRole("button", { name: /activity/i, exact: true }).click();
+  await expect(page.getByRole("heading", { name: "Expense Activity" })).toBeVisible();
 });
 
 for (const width of [320, 375, 390, 768, 1024, 1440]) {

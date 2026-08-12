@@ -1,9 +1,10 @@
 import { useEffect, useState, type ReactNode } from "react";
-import { CheckCircle2, Circle, Copy, ExternalLink, Link2, LogOut, MessageCircle, Pencil, Plus, Unplug, UserMinus, Users } from "lucide-react";
+import { CheckCircle2, Circle, Copy, ExternalLink, Link2, MessageCircle, Pencil, Plus, Settings2, Unplug, UserMinus, Users } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
+import { PageHeader } from "@/components/ui/page-header";
 import { api } from "@/lib/api";
 import { onboardingChecklist } from "@/onboardingLogic";
 
@@ -137,15 +138,15 @@ export function AccountSettingsPage({ context, expenseTools }: { context: Accoun
     await load();
   }
 
-  async function logout() {
-    await fetch("/auth/logout", { method: "POST", credentials: "same-origin" });
-    window.location.reload();
-  }
-
   const checklist = integrations ? onboardingChecklist(integrations) : [];
 
   return (
     <div className="space-y-5">
+      <PageHeader
+        eyebrow={<span className="inline-flex items-center gap-2"><Settings2 className="h-4 w-4" aria-hidden="true" />Settings</span>}
+        title="Your ExpenseOps setup"
+        description="Manage your account, workspace, connections, and expense preferences in one place."
+      />
       <div className="grid gap-5 xl:grid-cols-2">
       <Card>
         <CardHeader>
@@ -203,7 +204,6 @@ export function AccountSettingsPage({ context, expenseTools }: { context: Accoun
           </div>
           <div className="flex gap-2"><Input value={inviteEmail} onChange={(event) => setInviteEmail(event.target.value)} placeholder="friend@example.com" /><Button disabled={!inviteEmail.includes("@")} onClick={invite}><Users className="h-4 w-4" />Invite</Button></div>
           {inviteLink && <CopyValue label="Share this invitation privately" value={inviteLink} />}
-          <Button variant="outline" onClick={logout}><LogOut className="h-4 w-4" />Sign out</Button>
         </CardContent>
       </Card>
       </div>

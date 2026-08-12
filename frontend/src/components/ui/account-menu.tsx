@@ -17,6 +17,7 @@ type AccountMenuProps = {
   avatarUrl?: string | null;
   actions?: AccountMenuAction[];
   workspaces?: Array<{ id: number; name: string; active?: boolean; onSelect: () => void }>;
+  compact?: boolean;
 };
 
 function AccountMenu({
@@ -26,13 +27,17 @@ function AccountMenu({
   avatarUrl,
   actions = [],
   workspaces = [],
+  compact = false,
 }: AccountMenuProps) {
   return (
     <DropdownMenu.Root>
       <DropdownMenu.Trigger asChild>
         <button
           type="button"
-          className="touch-target inline-flex max-w-full items-center gap-2 rounded-control border border-ui-border bg-white px-3 text-left text-sm text-ui-text shadow-card transition-colors duration-hover hover:border-indigo-200 hover:bg-ui-primary-tint"
+          className={cn(
+            "touch-target inline-flex max-w-full items-center gap-2 rounded-control border border-ui-border bg-white text-left text-sm text-ui-text shadow-card transition-colors duration-hover hover:border-indigo-200 hover:bg-ui-primary-tint",
+            compact ? "px-2" : "px-3",
+          )}
           aria-label={`Open account menu for ${displayName}`}
         >
           {avatarUrl ? (
@@ -42,11 +47,11 @@ function AccountMenu({
               <UserRound className="h-4 w-4" aria-hidden="true" />
             </span>
           )}
-          <span className="min-w-0">
+          <span className={cn("min-w-0", compact && "sr-only")}>
             <span className="block truncate font-semibold text-ink">{workspaceName}</span>
             <span className="block truncate text-xs text-ui-muted">{displayName}</span>
           </span>
-          <ChevronDown className="h-4 w-4 shrink-0" aria-hidden="true" />
+          <ChevronDown className={cn("h-4 w-4 shrink-0", compact && "hidden")} aria-hidden="true" />
         </button>
       </DropdownMenu.Trigger>
       <DropdownMenu.Portal>

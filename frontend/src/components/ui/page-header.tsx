@@ -5,7 +5,7 @@ import { Surface } from "@/components/ui/surface";
 
 type PageHeaderProps = {
   title: string;
-  description: string;
+  description: ReactNode;
   eyebrow?: ReactNode;
   actions?: ReactNode;
   compact?: boolean;
@@ -22,7 +22,6 @@ export function PageHeader({
 }: PageHeaderProps) {
   return (
     <Surface
-      role="banner"
       variant="command"
       className={cn(
         "flex min-h-36 flex-col justify-between gap-5 px-5 py-5 sm:min-h-28 sm:flex-row sm:items-end sm:px-6",

@@ -28,7 +28,7 @@ visual-foundation changes began.
 | --- | --- | --- |
 | Phase 0 — baseline protection | Complete | Baseline commit `f11f960`; backend and frontend baselines recorded above |
 | V1 — visual foundation and regression harness | Complete | Shared tokens/primitives; TypeScript-aware lint; Playwright visual, overflow, and axe gates; implementation checkpoint on `agent/launch-readiness` |
-| V2 — navigation, mobile shell, page headers | Not started | — |
+| V2 — navigation, mobile shell, page headers | Complete | Responsive app shell, three-destination primary nav, account menu, mobile bottom nav, and shared contextual headers; implementation checkpoint on `agent/launch-readiness` |
 | V3 — Expense Review hierarchy | Not started | — |
 | V4 — Insights narrative and charts | Not started | — |
 | V5 — Household command center | Not started | — |
@@ -65,6 +65,23 @@ passing phase exit gate.
 | Complete npm dependency audit | Zero vulnerabilities after explicit Vitest, Vite, PostCSS, and transitive security updates |
 
 The V1 browser gate detected a pre-existing 476px minimum-width navigation failure on phone-sized
-viewports. The primary navigation now contains its own horizontal overflow, so it no longer expands
-the document beyond the viewport. V2 will replace this interim containment with the planned mobile
-navigation shell.
+viewports. Its first containment prevented the document from expanding beyond the viewport; V2 then
+replaced that interim treatment with the dedicated mobile navigation shell recorded below.
+
+## V2 validation evidence
+
+| Check | Result |
+| --- | --- |
+| Desktop application shell | Expenses → Household → Deals; Settings and Sign out moved into the identity menu |
+| Mobile application shell | Compact top identity bar and fixed three-destination bottom navigation |
+| Contextual page identity | Expense Review, Spending Insights, Expense Activity, Household, Deals, and Settings use the shared page-header system |
+| Navigation E2E | Desktop and mobile primary destinations, account menu, and Expense view identity passed |
+| Responsive overflow gate | Passed at 320, 375, 390, 768, 1024, and 1440 CSS pixels |
+| Automated accessibility gate | Zero critical or serious axe violations in the updated Expense shell |
+| Playwright suite | 22 passed across desktop Chromium and Pixel 5 mobile Chromium |
+| Frontend unit tests | 15 passed |
+| Frontend production build | Passed |
+| Frontend dependency audit | Zero vulnerabilities |
+
+Playwright now starts a fresh, dedicated server on port 4173 for every run. This prevents a stale
+developer server from producing misleading screenshots or accessibility results.
