@@ -14,6 +14,7 @@ from app.api import (
     auth_routes,
     context_routes,
     household_routes,
+    insights_routes,
     integration_routes,
     plaid_routes,
     promotion_routes,
@@ -79,6 +80,7 @@ app.include_router(telegram_routes.router)
 app.include_router(transaction_routes.router)
 app.include_router(ai_memory_routes.router)
 app.include_router(household_routes.router)
+app.include_router(insights_routes.router)
 app.include_router(replenishment_routes.router)
 app.include_router(promotion_routes.router)
 app.include_router(sandbox_router)

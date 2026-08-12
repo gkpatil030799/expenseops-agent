@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { CheckCircle2, Circle, Copy, ExternalLink, Link2, LogOut, MessageCircle, Pencil, Plus, Unplug, UserMinus, Users } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
@@ -22,7 +22,7 @@ type Integrations = {
   openai: { connected: boolean; managed_by: string };
 };
 
-export function AccountSettingsPage({ context }: { context: AccountContext }) {
+export function AccountSettingsPage({ context, expenseTools }: { context: AccountContext; expenseTools?: ReactNode }) {
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
   const [integrations, setIntegrations] = useState<Integrations | null>(null);
   const [workspaceName, setWorkspaceName] = useState("");
@@ -145,7 +145,8 @@ export function AccountSettingsPage({ context }: { context: AccountContext }) {
   const checklist = integrations ? onboardingChecklist(integrations) : [];
 
   return (
-    <div className="grid gap-5 xl:grid-cols-2">
+    <div className="space-y-5">
+      <div className="grid gap-5 xl:grid-cols-2">
       <Card>
         <CardHeader>
           <CardTitle>Welcome to ExpenseOps</CardTitle>
@@ -205,6 +206,8 @@ export function AccountSettingsPage({ context }: { context: AccountContext }) {
           <Button variant="outline" onClick={logout}><LogOut className="h-4 w-4" />Sign out</Button>
         </CardContent>
       </Card>
+      </div>
+      {expenseTools ? <section className="space-y-4" aria-labelledby="agent-preferences-title"><div><h2 id="agent-preferences-title" className="text-xl font-semibold text-slate-950">Expense tools and preferences</h2><p className="text-sm text-slate-600">Splitwise administration and learned behavior live here, away from daily review.</p></div>{expenseTools}</section> : null}
     </div>
   );
 }

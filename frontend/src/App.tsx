@@ -35,6 +35,7 @@ import { GroupManagementPanel } from "@/components/GroupManagementPanel";
 import { HouseholdOpsPage } from "@/components/HouseholdOpsPage";
 import { PromotionsPage } from "@/components/PromotionsPage";
 import { AccountSettingsPage } from "@/components/AccountSettingsPage";
+import { InsightsDashboard } from "@/components/InsightsDashboard";
 import {
   analyticsForTransactions,
   buildDashboardEvents,
@@ -99,6 +100,12 @@ function App() {
     dateTo: "",
   });
   const [analyticsDays, setAnalyticsDays] = useState(30);
+  const [expenseTab, setExpenseTab] = useState<"review" | "insights" | "activity">(() => {
+    const value = new URLSearchParams(window.location.search).get("tab");
+    return value === "insights" || value === "activity" ? value : "review";
+  });
+  const [syncError, setSyncError] = useState(false);
+  const [lastSyncedAt, setLastSyncedAt] = useState<Date | null>(null);
   const [selectedFriendsByTx, setSelectedFriendsByTx] = useState<Record<number, Friend[]>>({});
   const [friendResultsByTx, setFriendResultsByTx] = useState<Record<number, Friend[]>>({});
   const [friendQueriesByTx, setFriendQueriesByTx] = useState<Record<number, string>>({});
@@ -167,6 +174,25 @@ function App() {
     }, 15000);
     return () => window.clearInterval(timer);
   }, [accountContext]);
+
+  useEffect(() => {
+    if (!accountContext || activeWorkspace !== "expenses" || expenseTab !== "activity") return;
+    void api<Transaction[]>("/api/insights/activity?limit=200")
+      .then((items) => setAllTransactions((current) => mergeTransactions(current, items)))
+      .catch(() => undefined);
+  }, [accountContext, activeWorkspace, expenseTab]);
+
+  useEffect(() => {
+    const onPopState = () => {
+      const params = new URLSearchParams(window.location.search);
+      const workspace = params.get("workspace");
+      setActiveWorkspace(workspace === "household" || workspace === "promotions" || workspace === "settings" ? workspace : "expenses");
+      const tab = params.get("tab");
+      setExpenseTab(tab === "insights" || tab === "activity" ? tab : "review");
+    };
+    window.addEventListener("popstate", onPopState);
+    return () => window.removeEventListener("popstate", onPopState);
+  }, []);
 
   useEffect(() => {
     if (!accountContext) return;
@@ -336,11 +362,23 @@ function App() {
   }
 
   async function syncTransactions() {
-    await run(
-      "sync",
-      () => api<Record<string, unknown>>("/plaid/sync", { method: "POST", body: "{}" }),
-      true,
-    );
+    setBusy("sync"); setSyncError(false);
+    try {
+      const value = await api<Record<string, unknown>>("/plaid/sync", { method: "POST", body: "{}" });
+      setLog(value); setLastSyncedAt(new Date()); await refreshReviewData();
+    } catch (error) { setLog(error); setSyncError(true); }
+    finally { setBusy(null); }
+  }
+
+  function changeExpenseTab(tab: "review" | "insights" | "activity") {
+    const params = new URLSearchParams(window.location.search); params.set("workspace", "expenses"); params.set("tab", tab);
+    window.history.pushState({}, "", `/?${params}`); setExpenseTab(tab);
+  }
+
+  function changeWorkspace(workspace: "expenses" | "household" | "promotions" | "settings") {
+    const params = new URLSearchParams(window.location.search); params.set("workspace", workspace);
+    if (workspace !== "expenses") params.delete("tab");
+    window.history.pushState({}, "", `/?${params}`); setActiveWorkspace(workspace);
   }
 
   async function markPersonal(id: number) {
@@ -529,7 +567,7 @@ function App() {
       <section className="mx-auto flex w-full max-w-[1500px] flex-col gap-5 px-3 py-3 sm:px-6 sm:py-5 lg:px-8">
         <WorkspaceNavigation
           active={activeWorkspace}
-          onChange={setActiveWorkspace}
+          onChange={changeWorkspace}
           accountContext={accountContext}
         />
 
@@ -541,52 +579,19 @@ function App() {
         ) : null}
 
         {activeWorkspace === "settings" ? (
-          <AccountSettingsPage context={accountContext} />
+          <AccountSettingsPage context={accountContext} expenseTools={<div className="grid gap-5 xl:grid-cols-2"><GroupManagementPanel currentUserId={currentSplitwiseUser?.id ?? null} /><div className="space-y-5"><AgentMemoryPanel friends={memory.friends} groups={memory.groups} onSelectFriend={selectMemoryFriend} onSelectGroup={selectMemoryGroup} loading={busy !== null && allTransactions.length === 0}/><AIFallbackMemoryPanel memories={aiMemories} onDelete={deleteAIMemory} loading={busy !== null && aiMemories.length === 0}/></div></div>} />
         ) : activeWorkspace === "household" ? (
           <HouseholdOpsPage />
         ) : activeWorkspace === "promotions" ? (
           <PromotionsPage />
         ) : (
           <>
-        <Header onPlaid={openPlaidLink} onSync={syncTransactions} busy={busy} />
+        <Header onSync={syncTransactions} busy={busy} pendingCount={transactions.length} pendingTotal={pendingTotal} lastSyncLabel={lastSyncedAt ? relativeTime(lastSyncedAt) : lastSyncLabel} syncError={syncError} />
+        <ExpenseTabs active={expenseTab} onChange={changeExpenseTab}/>
 
-        <div className="grid gap-4 sm:grid-cols-2">
-          <MetricCard
-            icon={Clock3}
-            label="Pending approvals"
-            value={String(transactions.length)}
-            detail="Awaiting classification"
-            tone={transactions.length ? "amber" : "teal"}
-            empty={transactions.length === 0}
-          />
-          <MetricCard
-            icon={BadgeDollarSign}
-            label="Pending amount"
-            value={formatCurrency(pendingTotal)}
-            detail="Open card spend"
-            tone="indigo"
-            empty={transactions.length === 0}
-          />
-        </div>
-
-        <OperationalState
-          pendingCount={transactions.length}
-          busy={busy}
-          lastSyncLabel={lastSyncLabel}
-        />
-
-        <SearchFilters filters={filters} onChange={updateFilter} />
-
-        <AnalyticsDashboard
-          analytics={analytics}
-          days={analyticsDays}
-          onDaysChange={setAnalyticsDays}
-          loading={busy !== null && allTransactions.length === 0}
-        />
-
-        <GroupManagementPanel currentUserId={currentSplitwiseUser?.id ?? null} />
-
-        <div className="grid gap-5 xl:grid-cols-[minmax(0,1fr)_360px]">
+        {expenseTab === "review" ? <div className="space-y-6">
+        <SearchFilters filters={{...filters, group:"", status:"ask_user"}} onChange={updateFilter} compact />
+        <div>
           <section className="space-y-4">
             <div className="flex flex-wrap items-center justify-between gap-3">
               <div>
@@ -594,10 +599,7 @@ function App() {
                   <WalletCards className="h-3.5 w-3.5 text-slate-500" />
                   Review queue
                 </div>
-                <h2 className="mt-1 text-xl font-semibold text-slate-950">Pending transactions</h2>
-                <p className="mt-1 text-sm text-slate-500">
-                  Search Splitwise friends by name, select them, then approve the split.
-                </p>
+                <h2 className="mt-1 text-xl font-semibold text-slate-950">Needs your attention</h2>
               </div>
               <Button
                 variant="ghost"
@@ -682,37 +684,20 @@ function App() {
             ) : (
               <EmptyState
                 icon={CheckCircle2}
-                title="Review queue is clear"
-                description="New card activity will appear here after sync when ExpenseOps needs a decision."
+                title="You're all caught up"
+                description={`No transactions need review. Last synced ${lastSyncedAt ? relativeTime(lastSyncedAt) : lastSyncLabel}.`}
               />
             )}
           </section>
-
-          <aside className="space-y-4">
+          </div>
+          <section aria-labelledby="recently-handled-title"><div className="mb-3 flex items-center justify-between"><h2 id="recently-handled-title" className="text-lg font-semibold text-slate-950">Recently handled</h2><Button variant="ghost" size="sm" onClick={()=>changeExpenseTab("activity")}>View all activity</Button></div>
             <RecentActivity
-              transactions={recentTransactions}
+              transactions={recentTransactions.slice(0, 8)}
               busy={busy}
               onUndo={undoTransaction}
             />
-            <AgentMemoryPanel
-              friends={memory.friends}
-              groups={memory.groups}
-              onSelectFriend={selectMemoryFriend}
-              onSelectGroup={selectMemoryGroup}
-              loading={busy !== null && allTransactions.length === 0}
-            />
-            <AIFallbackMemoryPanel
-              memories={aiMemories}
-              onDelete={deleteAIMemory}
-              loading={busy !== null && aiMemories.length === 0}
-            />
-            <ActivityTimeline
-              events={timelineEvents}
-              loading={busy !== null && allTransactions.length === 0}
-            />
-            <ActivityLog log={log} />
-          </aside>
-        </div>
+          </section>
+        </div> : expenseTab === "insights" ? <InsightsDashboard/> : <div className="space-y-4"><SearchFilters filters={filters} onChange={updateFilter}/><ActivityTimeline events={timelineEvents} loading={busy !== null && allTransactions.length === 0}/></div>}
           </>
         )}
       </section>
@@ -848,9 +833,11 @@ function formatDashboardAmount(amount: string) {
 function SearchFilters({
   filters,
   onChange,
+  compact = false,
 }: {
   filters: DashboardFilters;
   onChange: <K extends keyof DashboardFilters>(key: K, value: DashboardFilters[K]) => void;
+  compact?: boolean;
 }) {
   const controlClass =
     "h-10 rounded-lg border-slate-300 bg-white text-slate-800 hover:border-slate-400 focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/20";
@@ -861,8 +848,8 @@ function SearchFilters({
         <Search className="h-3.5 w-3.5 text-slate-500" />
         Transaction controls
       </div>
-      <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-[1.15fr_1fr_160px_155px_155px]">
-        <label className="grid gap-1.5 text-xs font-medium text-slate-700">
+      <div className={`grid gap-3 md:grid-cols-2 ${compact ? "xl:grid-cols-[1fr_180px_180px]" : "xl:grid-cols-[1.15fr_1fr_160px_155px_155px]"}`}>
+        {!compact ? <label className="grid gap-1.5 text-xs font-medium text-slate-700">
           Merchant
           <div className="relative">
           <Search className="pointer-events-none absolute left-3 top-3 h-4 w-4 text-slate-500" />
@@ -873,8 +860,8 @@ function SearchFilters({
             placeholder="Search merchant"
           />
           </div>
-        </label>
-        <label className="grid gap-1.5 text-xs font-medium text-slate-700">
+        </label> : null}
+        {!compact ? <label className="grid gap-1.5 text-xs font-medium text-slate-700">
           Group
           <Input
             className={controlClass}
@@ -882,7 +869,7 @@ function SearchFilters({
             onChange={(event) => onChange("group", event.target.value)}
             placeholder="Filter by group"
           />
-        </label>
+        </label> : null}
         <label className="grid gap-1.5 text-xs font-medium text-slate-700">
           Status
           <select
@@ -1067,7 +1054,6 @@ function ActivityTimeline({
   events: DashboardEvent[];
   loading: boolean;
 }) {
-  const [expanded, setExpanded] = useState<string | null>(null);
   const eventStyles: Record<
     DashboardEvent["type"],
     { badge: string; dot: string; icon: ComponentType<{ className?: string }> }
@@ -1113,15 +1099,13 @@ function ActivityTimeline({
         {loading ? (
           <SkeletonRows rows={5} />
         ) : events.length ? (
-          events.slice(0, 20).map((event) => {
+          events.filter((event) => event.type !== "recommendation_generated" && event.type !== "transaction_detected").slice(0, 50).map((event) => {
             const style = eventStyles[event.type];
             const Icon = style.icon;
             return (
-              <button
+              <div
                 key={event.id}
-                type="button"
                 className="group flex w-full gap-3 rounded-lg border border-transparent px-2 py-2 text-left transition hover:border-slate-200 hover:bg-slate-50 focus-visible:border-indigo-300 focus-visible:bg-indigo-50/40"
-                onClick={() => setExpanded((current) => (current === event.id ? null : event.id))}
               >
                 <span className="relative mt-1 flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-white shadow-sm ring-1 ring-slate-200">
                   <span className={`absolute -left-1 top-3 h-2 w-2 rounded-full ${style.dot}`} />
@@ -1142,13 +1126,8 @@ function ActivityTimeline({
                     <CalendarDays className="h-3 w-3" />
                     {new Date(event.timestamp).toLocaleString()}
                   </span>
-                  {expanded === event.id ? (
-                    <pre className="mt-2 max-h-48 overflow-auto rounded-md bg-slate-950 p-2 text-xs text-slate-100">
-                      {JSON.stringify(event.details, null, 2)}
-                    </pre>
-                  ) : null}
                 </span>
-              </button>
+              </div>
             );
           })
         ) : (
@@ -1313,58 +1292,59 @@ function MemoryList({
 }
 
 function Header({
-  onPlaid,
   onSync,
   busy,
+  pendingCount,
+  pendingTotal,
+  lastSyncLabel,
+  syncError,
 }: {
-  onPlaid: () => void;
   onSync: () => void;
   busy: string | null;
+  pendingCount: number;
+  pendingTotal: number;
+  lastSyncLabel: string;
+  syncError: boolean;
 }) {
   return (
-    <header className="relative overflow-hidden rounded-xl border border-slate-800/90 bg-slate-950 px-5 py-6 text-white shadow-sm shadow-slate-950/10 lg:px-7">
-      <div className="absolute inset-0 bg-[linear-gradient(120deg,rgba(79,70,229,0.22),transparent_48%,rgba(255,255,255,0.025))]" />
-      <div className="absolute inset-x-10 -bottom-10 h-20 rounded-full bg-indigo-500/10 blur-3xl" />
-      <div className="relative flex flex-col gap-5 lg:flex-row lg:items-center lg:justify-between">
-        <div>
-          <div className="inline-flex items-center gap-2 rounded-full bg-white/[0.06] px-3 py-1 text-xs font-semibold text-slate-200 ring-1 ring-white/10">
-            <span className="flex h-5 w-5 items-center justify-center rounded-md bg-indigo-500/25 text-indigo-100">
-              <Split className="h-3.5 w-3.5" />
+    <header className="relative overflow-hidden rounded-xl border border-slate-800 bg-gradient-to-br from-slate-950 via-slate-950 to-indigo-950 px-5 py-4 shadow-sm">
+      <div className="pointer-events-none absolute -right-16 -top-24 h-48 w-48 rounded-full bg-indigo-500/10 blur-3xl" />
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+        <div className="relative">
+          <div className="mb-2 flex items-center gap-2 text-xs font-semibold uppercase tracking-[0.16em] text-indigo-200">
+            <span className="flex h-7 w-7 items-center justify-center rounded-full border border-indigo-300/20 bg-indigo-400/10">
+              <WalletCards className="h-4 w-4" aria-hidden="true" />
             </span>
             ExpenseOps Agent
-            <span className="rounded-full bg-white/[0.06] px-2 py-0.5 text-slate-300 ring-1 ring-white/10">
+            <span className="rounded-full border border-white/10 bg-white/5 px-2 py-1 normal-case tracking-normal text-slate-300">
               Live review workflow
             </span>
           </div>
-          <h1 className="mt-3 text-3xl font-semibold tracking-normal text-white sm:text-[2rem]">
-            Shared expense command center
-          </h1>
-          <p className="mt-2 max-w-2xl text-sm leading-6 text-slate-300">
-            Review card transactions, classify personal spend, and prepare shared splits.
-          </p>
+          <h1 className="text-2xl font-semibold tracking-tight text-white">Expense Review</h1>
+          <p className="mt-1 text-sm font-medium text-slate-200">{pendingCount} transaction{pendingCount === 1 ? "" : "s"} need review · {formatCurrency(pendingTotal)} pending</p>
+          <p role={syncError ? "alert" : "status"} className={`mt-1 text-xs ${syncError ? "text-rose-300" : "text-slate-400"}`}>{syncError ? "We couldn't sync transactions." : busy === "sync" ? "Syncing transactions…" : `Last synced ${lastSyncLabel}`}</p>
         </div>
-        <div className="flex flex-wrap gap-3">
-          <Button
-            onClick={onPlaid}
-            disabled={busy !== null}
-            className="bg-indigo-600 text-white shadow-sm shadow-black/10 hover:bg-indigo-500"
-          >
-            <Link2 className="h-4 w-4" />
-            Connect Plaid
-          </Button>
-          <Button
-            variant="secondary"
-            onClick={onSync}
-            disabled={busy !== null}
-            className="bg-white/[0.06] text-white ring-1 ring-white/15 hover:bg-white/10"
-          >
-            <RefreshCw className="h-4 w-4" />
-            Manual sync
-          </Button>
-        </div>
+        <Button
+          onClick={onSync}
+          disabled={busy !== null}
+          variant="outline"
+          className="relative border-white/15 bg-white/10 text-white hover:border-white/25 hover:bg-white/15 hover:text-white"
+        >
+          <RefreshCw className={`h-4 w-4 ${busy === "sync" ? "animate-spin" : ""}`}/>{syncError ? "Try again" : "Sync"}
+        </Button>
       </div>
     </header>
   );
+}
+
+function ExpenseTabs({active,onChange}:{active:"review"|"insights"|"activity";onChange:(value:"review"|"insights"|"activity")=>void}) {
+  return <nav className="flex gap-1 rounded-xl border border-slate-200 bg-white p-1 shadow-sm" aria-label="Expense Review views">{(["review","insights","activity"] as const).map(value=><button key={value} type="button" aria-current={active===value?"page":undefined} onClick={()=>onChange(value)} className={`flex-1 rounded-lg px-4 py-2.5 text-sm font-semibold capitalize transition focus-visible:ring-2 focus-visible:ring-indigo-500 ${active===value?"bg-indigo-600 text-white":"text-slate-600 hover:bg-slate-50 hover:text-slate-950"}`}>{value}</button>)}</nav>
+}
+
+function relativeTime(value: Date) {
+  const seconds = Math.max(0, Math.round((Date.now() - value.getTime()) / 1000));
+  if (seconds < 60) return "just now";
+  const minutes = Math.round(seconds / 60); return minutes < 60 ? `${minutes} minute${minutes===1?"":"s"} ago` : value.toLocaleString();
 }
 
 function EmptyState({
