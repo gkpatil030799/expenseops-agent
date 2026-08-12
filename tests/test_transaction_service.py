@@ -1,9 +1,11 @@
 import logging
+from datetime import UTC, datetime
 
 import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
+from app.api.transaction_routes import _tx_out
 from app.config import Settings
 from app.db import Base
 from app.models import ExpenseTransaction, PlaidItem, TransactionStatus
@@ -109,6 +111,32 @@ def make_tx(status: str, splitwise_expense_id: str | None = None) -> ExpenseTran
     tx.status = status
     tx.splitwise_expense_id = splitwise_expense_id
     return tx
+
+
+def test_transaction_output_exposes_verified_review_metadata():
+    item = PlaidItem(id=1, item_id="item-1", institution_name="Chase")
+    tx = ExpenseTransaction(
+        id=1,
+        plaid_transaction_id="tx-1",
+        plaid_item_id=1,
+        merchant_name="Aldi",
+        name="ALDI 12",
+        amount_cents=4250,
+        iso_currency_code="USD",
+        category="Food and Drink / Groceries",
+        payment_channel="in store",
+        pending=False,
+        status=TransactionStatus.ASK_USER.value,
+        created_at=datetime.now(UTC),
+        updated_at=datetime.now(UTC),
+    )
+    tx.plaid_item = item
+
+    output = _tx_out(tx)
+
+    assert output.institution_name == "Chase"
+    assert output.category == "Food and Drink / Groceries"
+    assert output.payment_channel == "in store"
 
 
 class FakeDb:

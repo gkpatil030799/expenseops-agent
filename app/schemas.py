@@ -32,6 +32,9 @@ class TransactionOut(BaseModel):
     amount_cents: int
     amount: str = ""
     iso_currency_code: str
+    institution_name: str | None = None
+    category: str | None = None
+    payment_channel: str | None = None
     date: date | None
     authorized_date: date | None
     pending: bool

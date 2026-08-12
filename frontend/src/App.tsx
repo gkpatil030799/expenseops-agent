@@ -18,6 +18,7 @@ import {
   RotateCcw,
   Search,
   Settings2,
+  SlidersHorizontal,
   Split,
   Sparkles,
   UserCheck,
@@ -32,8 +33,12 @@ import { AccountMenu } from "@/components/ui/account-menu";
 import { AppShell } from "@/components/ui/app-shell";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { FilterToolbar } from "@/components/ui/filter-toolbar";
 import { Input } from "@/components/ui/input";
+import { MerchantAvatar } from "@/components/ui/merchant-avatar";
+import { OverflowMenu } from "@/components/ui/overflow-menu";
 import { PageHeader } from "@/components/ui/page-header";
+import { ResponsiveSheet } from "@/components/ui/responsive-sheet";
 import { GroupManagementPanel } from "@/components/GroupManagementPanel";
 import { HouseholdOpsPage } from "@/components/HouseholdOpsPage";
 import { PromotionsPage } from "@/components/PromotionsPage";
@@ -150,7 +155,7 @@ function DashboardApp() {
     return latest ? new Date(latest).toLocaleString() : "Not synced yet";
   }, [allTransactions]);
   const pendingReviewTransactions = useMemo(
-    () => filterTransactions(transactions, filters),
+    () => filterTransactions(transactions, { ...filters, group: "", status: "" }),
     [transactions, filters],
   );
   const timelineEvents = useMemo(
@@ -610,7 +615,7 @@ function DashboardApp() {
         <ExpenseTabs active={expenseTab} onChange={changeExpenseTab}/>
 
         {expenseTab === "review" ? <div className="space-y-6">
-        <SearchFilters filters={{...filters, group:"", status:"ask_user"}} onChange={updateFilter} compact />
+        <ReviewFilters filters={filters} onChange={updateFilter} />
         <div>
           <section className="space-y-4">
             <div className="flex flex-wrap items-center justify-between gap-3">
@@ -621,17 +626,6 @@ function DashboardApp() {
                 </div>
                 <h2 className="mt-1 text-xl font-semibold text-slate-950">Needs your attention</h2>
               </div>
-              <Button
-                variant="ghost"
-                size="icon"
-                className="h-9 w-9 rounded-lg border border-slate-200 bg-white text-slate-600 shadow-sm hover:bg-slate-50"
-                onClick={loadTransactions}
-                disabled={busy !== null}
-                aria-label="Refresh pending transactions"
-                title="Refresh pending transactions"
-              >
-                <RefreshCw className={`h-4 w-4 ${busy === "transactions" ? "animate-spin" : ""}`} />
-              </Button>
             </div>
 
             {pendingReviewTransactions.length ? (
@@ -712,7 +706,7 @@ function DashboardApp() {
           </div>
           <section aria-labelledby="recently-handled-title"><div className="mb-3 flex items-center justify-between"><h2 id="recently-handled-title" className="text-lg font-semibold text-slate-950">Recently handled</h2><Button variant="ghost" size="sm" onClick={()=>changeExpenseTab("activity")}>View all activity</Button></div>
             <RecentActivity
-              transactions={recentTransactions.slice(0, 8)}
+              transactions={recentTransactions.slice(0, 5)}
               busy={busy}
               onUndo={undoTransaction}
             />
@@ -838,39 +832,73 @@ function statusDisplay(status: string) {
   return labels[status] || status.replace(/_/g, " ");
 }
 
-function statusBadgeClass(status: string) {
-  const classes: Record<string, string> = {
-    ask_user: "border-amber-200 bg-amber-50 text-amber-700",
-    personal: "border-slate-200 bg-slate-100 text-slate-700",
-    posted: "border-emerald-200 bg-emerald-50 text-emerald-700",
-    shared_draft: "border-indigo-200 bg-indigo-50 text-indigo-700",
-  };
-  return classes[status] || "border-slate-200 bg-slate-100 text-slate-700";
+function formatCurrency(value: number, currency = "USD") {
+  try {
+    return new Intl.NumberFormat("en-US", { style: "currency", currency }).format(value);
+  } catch {
+    return `${currency} ${value.toFixed(2)}`;
+  }
 }
 
-function amountTone(transaction: Transaction) {
-  const amount = Math.abs(transaction.amount_cents) / 100;
-  if (amount >= 100) return "text-rose-700";
-  if (amount >= 50) return "text-amber-700";
-  return "text-slate-950";
-}
-
-function formatCurrency(value: number) {
-  return new Intl.NumberFormat("en-US", {
-    style: "currency",
-    currency: "USD",
-  }).format(value);
-}
-
-function formatTransactionAmount(transaction: Pick<Transaction, "amount_cents" | "amount">) {
+function formatTransactionAmount(transaction: Pick<Transaction, "amount_cents" | "amount"> & Partial<Pick<Transaction, "iso_currency_code">>) {
   const amount = Number(transaction.amount);
-  if (Number.isFinite(amount)) return formatCurrency(amount);
-  return formatCurrency(Math.abs(transaction.amount_cents) / 100);
+  const currency = transaction.iso_currency_code || "USD";
+  if (Number.isFinite(amount)) return formatCurrency(amount, currency);
+  return formatCurrency(Math.abs(transaction.amount_cents) / 100, currency);
 }
 
 function formatDashboardAmount(amount: string) {
   const parsed = Number(amount);
   return Number.isFinite(parsed) ? formatCurrency(parsed) : amount;
+}
+
+function ReviewFilters({
+  filters,
+  onChange,
+}: {
+  filters: DashboardFilters;
+  onChange: <K extends keyof DashboardFilters>(key: K, value: DashboardFilters[K]) => void;
+}) {
+  const active = [
+    filters.merchant ? { key: "merchant" as const, label: `Merchant: ${filters.merchant}` } : null,
+    filters.dateFrom ? { key: "dateFrom" as const, label: `From: ${filters.dateFrom}` } : null,
+    filters.dateTo ? { key: "dateTo" as const, label: `To: ${filters.dateTo}` } : null,
+  ].filter((value): value is { key: "merchant" | "dateFrom" | "dateTo"; label: string } => Boolean(value));
+
+  const fields = (
+    <div className="grid gap-4">
+      <label className="grid gap-1.5 text-sm font-medium text-ui-text">
+        Merchant
+        <div className="relative">
+          <Search className="pointer-events-none absolute left-3 top-3.5 h-4 w-4 text-ui-muted" aria-hidden="true" />
+          <Input className="pl-9" value={filters.merchant} onChange={(event) => onChange("merchant", event.target.value)} placeholder="Search merchant" />
+        </div>
+      </label>
+      <div className="grid gap-3 sm:grid-cols-2">
+        <label className="grid gap-1.5 text-sm font-medium text-ui-text">From<Input className="date-control" type="date" value={filters.dateFrom} onChange={(event) => onChange("dateFrom", event.target.value)} /></label>
+        <label className="grid gap-1.5 text-sm font-medium text-ui-text">To<Input className="date-control" type="date" value={filters.dateTo} onChange={(event) => onChange("dateTo", event.target.value)} /></label>
+      </div>
+    </div>
+  );
+
+  return (
+    <FilterToolbar
+      activeFilters={active.length ? active.map((filter) => <button key={filter.key} type="button" onClick={() => onChange(filter.key, "")} className="inline-flex min-h-9 items-center gap-1.5 rounded-full border border-indigo-200 bg-ui-primary-tint px-3 text-xs font-medium text-indigo-800 hover:bg-indigo-100" aria-label={`Remove ${filter.label} filter`}>{filter.label}<X className="h-3.5 w-3.5" aria-hidden="true" /></button>) : undefined}
+    >
+      <div className="min-w-0 flex-1 px-2">
+        <p className="text-sm font-semibold text-ink">Review queue</p>
+        <p className="text-xs text-ui-muted">Only transactions that need a decision appear here.</p>
+      </div>
+      <ResponsiveSheet
+        title="Filter review queue"
+        description="Narrow this queue without changing what needs review."
+        trigger={<Button variant="outline"><SlidersHorizontal className="h-4 w-4" aria-hidden="true" />Filters{active.length ? <Badge variant="secondary">{active.length}</Badge> : null}</Button>}
+        footer={active.length ? <Button variant="outline" className="w-full" onClick={() => { onChange("merchant", ""); onChange("dateFrom", ""); onChange("dateTo", ""); }}>Clear filters</Button> : undefined}
+      >
+        {fields}
+      </ResponsiveSheet>
+    </FilterToolbar>
+  );
 }
 
 function SearchFilters({
@@ -1618,9 +1646,6 @@ function TransactionCard({
 }) {
   const title = transaction.merchant_name || transaction.name;
   const disabled = busy !== null;
-  const absoluteAmount = Math.abs(transaction.amount_cents) / 100;
-  const accentClass =
-    absoluteAmount >= 100 ? "border-l-rose-500" : absoluteAmount >= 50 ? "border-l-amber-500" : "border-l-slate-300";
   const selectedParticipantCount = selectedGroup
     ? selectedGroupMembers.length
     : selectedFriends.length;
@@ -1650,40 +1675,32 @@ function TransactionCard({
 
   return (
     <Card
-      className={`overflow-hidden border border-l-4 border-slate-200 bg-white shadow-sm shadow-slate-950/[0.025] transition hover:border-slate-300 hover:shadow-md hover:shadow-slate-950/[0.04] ${accentClass} ${
+      data-testid={`transaction-card-${transaction.id}`}
+      className={`overflow-hidden border border-ui-border bg-white transition hover:border-slate-300 hover:shadow-primary ${
         isExpanded ? "ring-1 ring-indigo-100" : ""
       }`}
     >
       <CardHeader className="gap-3 p-4 pb-3">
         <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-          <div className="min-w-0">
+          <div className="flex min-w-0 items-start gap-3">
+            <MerchantAvatar name={title} />
             <div className="min-w-0">
               <CardTitle className="truncate text-lg">{title}</CardTitle>
-              <CardDescription className="mt-1 flex flex-wrap items-center gap-2 text-xs">
-                <span>{transaction.date || "No transaction date"}</span>
-                {absoluteAmount >= 50 ? (
-                  <span className="rounded-full bg-amber-50 px-2 py-0.5 font-semibold text-amber-700">
-                    High amount
-                  </span>
-                ) : null}
+              <CardDescription className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs">
+                <span>{transaction.date || "Date unavailable"}</span>
+                {transaction.institution_name ? <><span aria-hidden="true">·</span><span>{transaction.institution_name}</span></> : null}
+                {transaction.category ? <><span aria-hidden="true">·</span><span>{transaction.category}</span></> : null}
+                {transaction.payment_channel ? <><span aria-hidden="true">·</span><span className="capitalize">{transaction.payment_channel}</span></> : null}
+                <><span aria-hidden="true">·</span><span>Plaid · {transaction.iso_currency_code}</span></>
               </CardDescription>
             </div>
           </div>
           <div className="flex shrink-0 flex-col items-start gap-2 sm:items-end">
-            <p className={`text-2xl font-semibold tracking-normal ${amountTone(transaction)}`}>
+            <p className={`financial-figure text-2xl font-semibold tracking-normal ${transaction.amount_cents < 0 ? "text-ui-success" : "text-ink"}`}>
               {formatTransactionAmount(transaction)}
             </p>
             <div className="flex flex-wrap justify-start gap-1.5 sm:justify-end">
-              {transaction.pending ? (
-                <Badge className="border border-amber-200 bg-amber-50 text-amber-700">Pending</Badge>
-              ) : (
-                <Badge className="border border-emerald-200 bg-emerald-50 text-emerald-700">
-                  Settled
-                </Badge>
-              )}
-              <Badge className={`border ${statusBadgeClass(transaction.status)}`}>
-                {statusDisplay(transaction.status)}
-              </Badge>
+              <Badge variant={transaction.pending ? "warning" : "secondary"}>{transaction.pending ? "Pending" : statusDisplay(transaction.status)}</Badge>
               <ClassificationBadge transaction={transaction} />
             </div>
           </div>
@@ -1695,8 +1712,8 @@ function TransactionCard({
           </p>
           <div className="flex shrink-0 flex-wrap items-center gap-2">
             <Button
-              variant="ghost"
-              className="text-slate-600 hover:bg-slate-100 hover:text-slate-950"
+              variant="outline"
+              className="border-slate-300 text-slate-800 hover:bg-slate-100 hover:text-ink"
               onClick={onPersonal}
               disabled={disabled}
             >
@@ -1709,30 +1726,21 @@ function TransactionCard({
               className="bg-indigo-600 shadow-sm shadow-indigo-950/10 hover:bg-indigo-700"
             >
               <Split className="h-4 w-4" />
-              Split / Review
+              Split
             </Button>
-            <Button variant="outline" onClick={onDraft} disabled={disabled}>
-              <Clock3 className="h-4 w-4" />
-              Draft
-            </Button>
-            <Button
-              variant="ghost"
-              size="icon"
-              className="h-8 w-8"
-              onClick={() => onExpandedChange(!isExpanded)}
-              aria-label={isExpanded ? "Collapse transaction" : "Expand transaction"}
-            >
-              <ChevronDown
-                className={`h-4 w-4 transition-transform ${isExpanded ? "rotate-180" : ""}`}
-              />
-            </Button>
+            <OverflowMenu label={`More actions for ${title}`} items={[
+              { label: "Save as draft", icon: Clock3, disabled, onSelect: onDraft },
+              { label: isExpanded ? "Collapse split details" : "Open split details", icon: ChevronDown, onSelect: () => onExpandedChange(!isExpanded) },
+            ]} />
           </div>
         </div>
       </CardHeader>
 
       {isExpanded ? (
         <CardContent className="space-y-3 overflow-hidden p-4 pt-0 transition-all duration-200">
-        <div className="rounded-md border border-slate-200 bg-slate-50 p-2.5">
+        <section aria-labelledby={`transaction-${transaction.id}-people`}>
+        <div className="mb-2"><p className="text-xs font-semibold uppercase tracking-wide text-ui-primary">Step 1</p><h3 id={`transaction-${transaction.id}-people`} className="text-sm font-semibold text-ink">Choose people</h3></div>
+        <div className="rounded-control border border-slate-200 bg-slate-50 p-2.5">
           <div className="mb-2 grid grid-cols-2 rounded-full bg-slate-100/90 p-1 ring-1 ring-slate-200/70">
             <button
               type="button"
@@ -1791,7 +1799,10 @@ function TransactionCard({
             )}
           </div>
         </div>
+        </section>
 
+        <section aria-labelledby={`transaction-${transaction.id}-split`}>
+        <div className="mb-2"><p className="text-xs font-semibold uppercase tracking-wide text-ui-primary">Step 2</p><h3 id={`transaction-${transaction.id}-split`} className="text-sm font-semibold text-ink">Choose split</h3></div>
         <CustomSplitPanel
           mode={customMode}
           payerIncluded={payerIncluded}
@@ -1806,6 +1817,7 @@ function TransactionCard({
           onPreview={onPreviewCustom}
           onPost={onPostSplit}
         />
+        </section>
         </CardContent>
       ) : null}
     </Card>
@@ -1932,8 +1944,9 @@ function CustomSplitPanel({
         )}
       </div>
 
-      <div className="mt-2 flex flex-wrap items-center justify-between gap-2 border-t border-slate-100 pt-2">
-        <div className="text-xs text-slate-500">
+      <div className="sticky bottom-20 z-10 -mx-2.5 -mb-2.5 mt-3 flex flex-wrap items-center justify-between gap-3 border-t border-slate-200 bg-white/95 px-2.5 py-3 shadow-[0_-8px_18px_rgba(15,23,42,0.04)] backdrop-blur sm:static sm:m-0 sm:mt-3 sm:bg-white sm:p-0 sm:pt-3 sm:shadow-none">
+        <div className="min-w-0 text-xs text-slate-500">
+          <p className="mb-1 font-semibold uppercase tracking-wide text-ui-primary">Step 3 · Review and post</p>
           <span
             className={
               selectedParticipantCount > 0 && validation.valid
@@ -2097,12 +2110,14 @@ function FriendPicker({
 }
 
 function ParticipantChip({ label, onRemove }: { label: string; onRemove: () => void }) {
+  const initials = label.trim().split(/\s+/).slice(0, 2).map((part) => part[0]?.toUpperCase()).join("") || "?";
   return (
     <button
       className="inline-flex max-w-full items-center gap-1.5 rounded-full bg-indigo-50 px-2.5 py-1 text-sm font-medium text-indigo-800 ring-1 ring-indigo-100 transition hover:bg-indigo-100"
       onClick={onRemove}
       type="button"
     >
+      <span aria-hidden="true" className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-indigo-200 text-xs font-semibold text-indigo-900">{initials}</span>
       <span className="truncate">{label}</span>
       <X className="h-3.5 w-3.5 shrink-0" />
     </button>

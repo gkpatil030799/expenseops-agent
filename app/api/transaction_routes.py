@@ -43,6 +43,7 @@ def _tx_out(tx: ExpenseTransaction) -> TransactionOut:
     return TransactionOut.model_validate(tx).model_copy(
         update={
             "amount": cents_to_decimal_string(abs(tx.amount_cents)),
+            "institution_name": tx.plaid_item.institution_name if tx.plaid_item else None,
             "classification_suggestion": classification.suggestion,
             "classification_reason": classification.reason,
             "can_undo_transaction": can_undo_transaction(tx),

@@ -29,7 +29,7 @@ visual-foundation changes began.
 | Phase 0 — baseline protection | Complete | Baseline commit `f11f960`; backend and frontend baselines recorded above |
 | V1 — visual foundation and regression harness | Complete | Shared tokens/primitives; TypeScript-aware lint; Playwright visual, overflow, and axe gates; implementation checkpoint on `agent/launch-readiness` |
 | V2 — navigation, mobile shell, page headers | Complete | Responsive app shell, three-destination primary nav, account menu, mobile bottom nav, and shared contextual headers; implementation checkpoint on `agent/launch-readiness` |
-| V3 — Expense Review hierarchy | Not started | — |
+| V3 — Expense Review hierarchy | Complete | Compact filter sheet/chips, trustworthy transaction metadata, neutral amount hierarchy, two dominant decisions, overflow actions, guided split steps, and five-row recent activity; implementation checkpoint on `agent/launch-readiness` |
 | V4 — Insights narrative and charts | Not started | — |
 | V5 — Household command center | Not started | — |
 | V6 — Settings information architecture | Not started | — |
@@ -85,3 +85,19 @@ replaced that interim treatment with the dedicated mobile navigation shell recor
 
 Playwright now starts a fresh, dedicated server on port 4173 for every run. This prevents a stale
 developer server from producing misleading screenshots or accessibility results.
+
+## V3 validation evidence
+
+| Check | Result |
+| --- | --- |
+| Review controls | Large filter card replaced with a compact toolbar, responsive filter sheet, active-filter count, removable chips, and clear-all action |
+| Transaction hierarchy | Merchant initials, merchant, amount, date, verified institution/category/channel, source, currency, one settlement state, and one recommendation |
+| Decision hierarchy | Personal and Split are the two visible choices; Draft and disclosure moved to a labeled overflow menu |
+| Split flow | Visible Choose people → Choose split → Review and post sequence; participant initials; allocation validation retained; final action sticky on mobile |
+| Amount semantics | Spending uses neutral slate; credits/refunds use emerald; amount size no longer implies warning or error |
+| Recent activity | Review page limited to five compact recent rows; full history remains available in Activity |
+| Backend response contract | Transaction output now exposes Plaid institution, category, and payment channel; account/card values remain absent rather than fabricated |
+| Backend regression tests | 523 passed; 5 pre-existing deprecation warnings |
+| Frontend unit tests | 15 passed |
+| Playwright review workflow | Desktop and mobile card flow passed, with focused transaction-card visual baselines |
+| Full Playwright suite | 24 passed across desktop Chromium and Pixel 5 mobile Chromium |

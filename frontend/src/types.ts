@@ -6,6 +6,9 @@ export type Transaction = {
   amount_cents: number;
   amount: string;
   iso_currency_code: string;
+  institution_name?: string | null;
+  category?: string | null;
+  payment_channel?: string | null;
   date: string | null;
   authorized_date: string | null;
   pending: boolean;
