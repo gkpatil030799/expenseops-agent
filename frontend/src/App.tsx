@@ -17,6 +17,7 @@ import {
   RefreshCw,
   RotateCcw,
   Search,
+  Settings2,
   Split,
   Sparkles,
   UserCheck,
@@ -33,6 +34,7 @@ import { Input } from "@/components/ui/input";
 import { GroupManagementPanel } from "@/components/GroupManagementPanel";
 import { HouseholdOpsPage } from "@/components/HouseholdOpsPage";
 import { PromotionsPage } from "@/components/PromotionsPage";
+import { AccountSettingsPage } from "@/components/AccountSettingsPage";
 import {
   analyticsForTransactions,
   buildDashboardEvents,
@@ -41,6 +43,7 @@ import {
   memoryForTransactions,
 } from "@/dashboardLogic";
 import { api } from "@/lib/api";
+import { authenticationView } from "@/onboardingLogic";
 import { SandboxLabPage } from "$sandbox/SandboxLabPage";
 import type {
   DashboardEvent,
@@ -70,6 +73,10 @@ type PlaidWindow = Window & {
 type LinkTokenResponse = { link_token: string };
 type ExchangeResponse = { item_id: string; plaid_item_db_id: number };
 type SplitResponse = { splitwise_expense_id: string | null; splitwise_response: unknown };
+type AccountContext = {
+  user: { id: number; email: string; display_name: string; avatar_url?: string | null };
+  workspace: { id: number; name: string; workspace_type: string };
+};
 
 function App() {
   if (
@@ -111,9 +118,11 @@ function App() {
   const [currentSplitwiseUser, setCurrentSplitwiseUser] = useState<SplitwiseUser | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [log, setLog] = useState<unknown>({ status: "Ready" });
-  const [activeWorkspace, setActiveWorkspace] = useState<"expenses" | "household" | "promotions">(() => {
+  const [accountContext, setAccountContext] = useState<AccountContext | null>(null);
+  const [authResolved, setAuthResolved] = useState(false);
+  const [activeWorkspace, setActiveWorkspace] = useState<"expenses" | "household" | "promotions" | "settings">(() => {
     const value = new URLSearchParams(window.location.search).get("workspace");
-    return value === "household" || value === "promotions" ? value : "expenses";
+    return value === "household" || value === "promotions" || value === "settings" ? value : "expenses";
   });
 
   const pendingTotal = useMemo(
@@ -139,18 +148,47 @@ function App() {
   const memory = useMemo(() => memoryForTransactions(allTransactions), [allTransactions]);
 
   useEffect(() => {
-    void loadTransactions();
-    void loadRecentActivity();
-    void loadCurrentSplitwiseUser();
-    void loadAIMemories();
+    void api<AccountContext>("/api/context")
+      .then((context) => {
+        setAccountContext(context);
+        void loadTransactions();
+        void loadRecentActivity();
+        void loadCurrentSplitwiseUser();
+        void loadAIMemories();
+      })
+      .finally(() => setAuthResolved(true));
   }, []);
 
   useEffect(() => {
+    if (!accountContext) return;
     const timer = window.setInterval(() => {
       void refreshDashboardQuietly();
     }, 15000);
     return () => window.clearInterval(timer);
-  }, []);
+  }, [accountContext]);
+
+  useEffect(() => {
+    if (!accountContext) return;
+    const params = new URLSearchParams(window.location.search);
+    const invitation = params.get("invite");
+    if (invitation) {
+      void api("/api/workspaces/invitations/accept", {
+        method: "POST",
+        body: JSON.stringify({ token: invitation }),
+      }).then(() => {
+        params.delete("invite");
+        params.set("workspace", "settings");
+        window.history.replaceState({}, "", `/?${params.toString()}`);
+        setActiveWorkspace("settings");
+      });
+      return;
+    }
+    if (params.get("connect") === "plaid") {
+      params.delete("connect");
+      window.history.replaceState({}, "", `/?${params.toString()}`);
+      void openPlaidLink();
+    }
+  }, [accountContext]);
 
   async function run<T>(label: string, action: () => Promise<T>, reload = false) {
     setBusy(label);
@@ -472,12 +510,22 @@ function App() {
     setGroupQueriesByTx((current) => ({ ...current, [firstPending.id]: name }));
   }
 
+  const authView = authenticationView(authResolved, Boolean(accountContext));
+  if (authView === "loading") return <AuthLoading />;
+  if (authView === "sign-in" || !accountContext) return <SignInPage />;
+
   return (
     <main className="min-h-screen bg-[radial-gradient(circle_at_top,rgba(79,70,229,0.06),transparent_30rem)]">
       <section className="mx-auto flex w-full max-w-[1500px] flex-col gap-5 px-3 py-3 sm:px-6 sm:py-5 lg:px-8">
-        <WorkspaceNavigation active={activeWorkspace} onChange={setActiveWorkspace} />
+        <WorkspaceNavigation
+          active={activeWorkspace}
+          onChange={setActiveWorkspace}
+          accountContext={accountContext}
+        />
 
-        {activeWorkspace === "household" ? (
+        {activeWorkspace === "settings" ? (
+          <AccountSettingsPage context={accountContext} />
+        ) : activeWorkspace === "household" ? (
           <HouseholdOpsPage />
         ) : activeWorkspace === "promotions" ? (
           <PromotionsPage />
@@ -658,15 +706,18 @@ function App() {
 function WorkspaceNavigation({
   active,
   onChange,
+  accountContext,
 }: {
-  active: "expenses" | "household" | "promotions";
-  onChange: (value: "expenses" | "household" | "promotions") => void;
+  active: "expenses" | "household" | "promotions" | "settings";
+  onChange: (value: "expenses" | "household" | "promotions" | "settings") => void;
+  accountContext: AccountContext | null;
 }) {
   return (
-    <nav
-      className="flex w-full gap-1 rounded-xl border border-slate-200 bg-white p-1 shadow-sm sm:w-fit"
-      aria-label="ExpenseOps sections"
-    >
+    <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+      <nav
+        className="flex w-full gap-1 rounded-xl border border-slate-200 bg-white p-1 shadow-sm sm:w-fit"
+        aria-label="ExpenseOps sections"
+      >
       <button
         type="button"
         onClick={() => onChange("expenses")}
@@ -679,6 +730,9 @@ function WorkspaceNavigation({
       >
         <WalletCards className="h-4 w-4" />
         Expense review
+      </button>
+      <button type="button" onClick={() => onChange("settings")} aria-current={active === "settings" ? "page" : undefined} className={`flex flex-1 items-center justify-center gap-2 rounded-lg px-4 py-2 text-sm font-medium transition sm:flex-none ${active === "settings" ? "bg-indigo-600 text-white shadow-sm" : "text-slate-600 hover:bg-slate-50 hover:text-slate-950"}`}>
+        <Settings2 className="h-4 w-4" />Settings
       </button>
       <button type="button" onClick={() => onChange("promotions")} aria-current={active === "promotions" ? "page" : undefined} className={`flex flex-1 items-center justify-center gap-2 rounded-lg px-4 py-2 text-sm font-medium transition sm:flex-none ${active === "promotions" ? "bg-indigo-600 text-white shadow-sm" : "text-slate-600 hover:bg-slate-50 hover:text-slate-950"}`}>
         <Tags className="h-4 w-4" />Deals
@@ -696,8 +750,25 @@ function WorkspaceNavigation({
         <House className="h-4 w-4" />
         Household Ops
       </button>
-    </nav>
+      </nav>
+      {accountContext ? (
+        <div className="flex items-center gap-2 self-end rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs text-slate-600 shadow-sm" aria-label="Current account and workspace">
+          {accountContext.user.avatar_url ? <img className="h-5 w-5 rounded-full" src={accountContext.user.avatar_url} alt="" referrerPolicy="no-referrer" /> : <UserCheck className="h-4 w-4 text-indigo-600" />}
+          <span className="font-semibold text-slate-900">{accountContext.workspace.name}</span>
+          <span aria-hidden="true">·</span>
+          <span>{accountContext.user.display_name}</span>
+        </div>
+      ) : null}
+    </div>
   );
+}
+
+function AuthLoading() {
+  return <main className="grid min-h-screen place-items-center bg-slate-50"><div className="ui-skeleton h-12 w-48" aria-label="Loading ExpenseOps" /></main>;
+}
+
+function SignInPage() {
+  return <main className="grid min-h-screen place-items-center bg-[radial-gradient(circle_at_top,rgba(79,70,229,0.12),transparent_32rem)] p-5"><Card className="w-full max-w-md text-center"><CardHeader><div className="mx-auto flex h-12 w-12 items-center justify-center rounded-xl bg-indigo-600 text-white"><Split className="h-6 w-6" /></div><CardTitle className="mt-3 text-2xl">ExpenseOps</CardTitle><CardDescription>Sign in to your private expense and household workspace.</CardDescription></CardHeader><CardContent><Button className="w-full" onClick={() => window.location.assign("/auth/login")}><UserCheck className="h-4 w-4" />Sign in</Button></CardContent></Card></main>;
 }
 
 function mergeTransactions(current: Transaction[], incoming: Transaction[]) {

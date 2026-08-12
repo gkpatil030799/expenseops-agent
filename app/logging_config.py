@@ -11,6 +11,8 @@ from typing import Any
 from app.config import Settings, get_settings
 
 _trace_id: ContextVar[str | None] = ContextVar("expenseops_trace_id", default=None)
+_user_id: ContextVar[int | None] = ContextVar("expenseops_user_id", default=None)
+_workspace_id: ContextVar[int | None] = ContextVar("expenseops_workspace_id", default=None)
 
 _SENSITIVE_KEY_PATTERN = re.compile(
     r"(token|secret|password|api[_-]?key|authorization|auth[_-]?header|"
@@ -35,6 +37,16 @@ def reset_trace_id(token: Token[str | None]) -> None:
 
 def get_trace_id() -> str | None:
     return _trace_id.get()
+
+
+def set_tenant_log_context(user_id: int | None, workspace_id: int | None):
+    return _user_id.set(user_id), _workspace_id.set(workspace_id)
+
+
+def reset_tenant_log_context(tokens) -> None:
+    user_token, workspace_token = tokens
+    _user_id.reset(user_token)
+    _workspace_id.reset(workspace_token)
 
 
 def safe_preview(value: Any, *, max_length: int = _MAX_VALUE_LENGTH) -> str:
@@ -73,6 +85,8 @@ def log_event(
         extra={
             "event": event,
             "trace_id": get_trace_id(),
+            "user_id": _user_id.get(),
+            "workspace_id": _workspace_id.get(),
             "log_metadata": redact_metadata(metadata),
         },
         stacklevel=2,
@@ -114,6 +128,8 @@ class JsonStructuredFormatter(logging.Formatter):
             "module": record.module,
             "function": record.funcName,
             "trace_id": getattr(record, "trace_id", None),
+            "user_id": getattr(record, "user_id", None),
+            "workspace_id": getattr(record, "workspace_id", None),
         }
         if event:
             payload.update(getattr(record, "log_metadata", None) or {})

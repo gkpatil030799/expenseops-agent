@@ -36,11 +36,11 @@ def test_custom_split_endpoint_preview(monkeypatch):
         123,
         CustomSplitRequest.model_validate(
             {
-            "payer_user_id": 1,
-            "payer_included": False,
-            "split_mode": "exact_amounts",
-            "participant_splits": [{"user_id": 2, "amount": "55.00"}],
-            "confirm": False,
+                "payer_user_id": 1,
+                "payer_included": False,
+                "split_mode": "exact_amounts",
+                "participant_splits": [{"user_id": 2, "amount": "55.00"}],
+                "confirm": False,
             }
         ),
         db=object(),
@@ -72,14 +72,14 @@ def test_custom_split_endpoint_post(monkeypatch):
         123,
         CustomSplitRequest.model_validate(
             {
-            "payer_user_id": 1,
-            "payer_included": True,
-            "split_mode": "percentages",
-            "participant_splits": [
-                {"user_id": 1, "percentage": "50"},
-                {"user_id": 2, "percentage": "50"},
-            ],
-            "confirm": True,
+                "payer_user_id": 1,
+                "payer_included": True,
+                "split_mode": "percentages",
+                "participant_splits": [
+                    {"user_id": 1, "percentage": "50"},
+                    {"user_id": 2, "percentage": "50"},
+                ],
+                "confirm": True,
             }
         ),
         db=object(),

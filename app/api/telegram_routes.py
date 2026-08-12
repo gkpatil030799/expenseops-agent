@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+from datetime import UTC, datetime
 from decimal import Decimal
 from urllib.parse import quote
 
@@ -13,7 +14,13 @@ from sqlalchemy.exc import SQLAlchemyError
 from app.api.deps import DbSession
 from app.config import get_settings
 from app.logging_config import log_event
-from app.models import ExpenseTransaction, TransactionStatus
+from app.models import (
+    ExpenseTransaction,
+    TelegramIdentity,
+    TelegramLinkCode,
+    TransactionStatus,
+    utc_now,
+)
 from app.services.agent_service import friend_display_name
 from app.services.ai_chat_context_service import AIChatContext, AIChatContextService
 from app.services.ai_intent_extraction_service import AIIntentExtractionService, ExtractedAIIntent
@@ -28,6 +35,7 @@ from app.services.entity_resolution_service import (
 from app.services.llm_ai_chat_parser import AIChatIntent, AICustomValue, LLMAIChatParser
 from app.services.llm_conversation_parser import LLMConversationIntent, LLMConversationParser
 from app.services.llm_split_parser import LLMSplitParser
+from app.services.managed_auth_service import record_audit
 from app.services.receipt_ingestion_service import ReceiptIngestionService
 from app.services.share_calculator import (
     CustomSplitInput,
@@ -94,6 +102,12 @@ from app.services.telegram_state_service import (
     telegram_split_state_store,
 )
 from app.services.transaction_service import TransactionError, TransactionService
+from app.tenancy import (
+    ensure_default_tenancy,
+    hash_api_token,
+    set_active_workspace,
+    set_trusted_workspace,
+)
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/telegram", tags=["telegram"])
@@ -107,7 +121,9 @@ async def telegram_webhook(
 ) -> dict[str, bool]:
     _verify_webhook_secret(secret)
     update = await request.json()
-    _verify_allowed_telegram_user(update)
+    if _handle_telegram_connect(update, db):
+        return {"ok": True}
+    _resolve_telegram_tenant(update, db)
     with telegram_split_state_store.use_db(db):
         log_event(
             logger,
@@ -163,6 +179,119 @@ def _verify_allowed_telegram_user(update: dict) -> None:
         chat_id_present=bool(chat_id),
     )
     raise HTTPException(status_code=403, detail="Unauthorized Telegram user")
+
+
+def _handle_telegram_connect(update: dict, db: DbSession) -> bool:
+    message = update.get("message") or {}
+    text_value = str(message.get("text") or "").strip()
+    if not text_value.casefold().startswith("/connect "):
+        return False
+    code = text_value.split(maxsplit=1)[1].strip().upper()
+    from_user = message.get("from") or {}
+    chat = message.get("chat") or {}
+    telegram_user_id = str(from_user.get("id") or "")
+    chat_id = str(chat.get("id") or "")
+    if not telegram_user_id or not chat_id:
+        raise HTTPException(status_code=400, detail="Telegram identity is missing")
+    link = db.scalar(
+        select(TelegramLinkCode)
+        .execution_options(skip_tenant_scope=True)
+        .where(TelegramLinkCode.code_hash == hash_api_token(code))
+    )
+    if link is None or link.used_at is not None or _aware_datetime(link.expires_at) <= utc_now():
+        TelegramService().send_message(
+            "That ExpenseOps link code is invalid or expired. Generate a new one in Settings.",
+            chat_id=chat_id,
+        )
+        return True
+    existing = db.scalar(
+        select(TelegramIdentity)
+        .execution_options(skip_tenant_scope=True)
+        .where(
+            TelegramIdentity.telegram_user_id == telegram_user_id,
+            TelegramIdentity.chat_id == chat_id,
+        )
+    )
+    if existing is not None and (
+        existing.user_id != link.user_id or existing.workspace_id != link.workspace_id
+    ):
+        TelegramService().send_message(
+            "This Telegram account is already linked. Disconnect it before linking elsewhere.",
+            chat_id=chat_id,
+        )
+        return True
+    set_trusted_workspace(db, link.workspace_id)
+    if existing is None:
+        db.add(
+            TelegramIdentity(
+                workspace_id=link.workspace_id,
+                user_id=link.user_id,
+                telegram_user_id=telegram_user_id,
+                chat_id=chat_id,
+            )
+        )
+    else:
+        existing.enabled = True
+    link.used_at = utc_now()
+    record_audit(
+        db,
+        workspace_id=link.workspace_id,
+        user_id=link.user_id,
+        event_type="telegram_connected",
+        resource_type="telegram_identity",
+    )
+    db.commit()
+    TelegramService().send_message(
+        "Telegram is connected to your ExpenseOps workspace.", chat_id=chat_id
+    )
+    return True
+
+
+def _aware_datetime(value: datetime) -> datetime:
+    return value if value.tzinfo else value.replace(tzinfo=UTC)
+
+
+def _resolve_telegram_tenant(update: dict, db: DbSession) -> TelegramIdentity | None:
+    callback_query = update.get("callback_query")
+    message = update.get("message")
+    if callback_query:
+        from_user = callback_query.get("from") or {}
+        chat = (callback_query.get("message") or {}).get("chat") or {}
+    else:
+        from_user = (message or {}).get("from") or {}
+        chat = (message or {}).get("chat") or {}
+    user_id = str(from_user.get("id") or "")
+    chat_id = str(chat.get("id") or "")
+    identity = db.scalar(
+        select(TelegramIdentity).where(
+            TelegramIdentity.telegram_user_id == user_id,
+            TelegramIdentity.chat_id == chat_id,
+            TelegramIdentity.enabled.is_(True),
+        )
+    )
+    if identity is not None:
+        set_trusted_workspace(db, identity.workspace_id)
+        set_active_workspace(identity.workspace_id)
+        return identity
+
+    # Backward-compatible bootstrap for the one configured legacy Telegram account.
+    _verify_allowed_telegram_user(update)
+    settings = get_settings()
+    allowed_user_id = settings.telegram_allowed_user_id.strip()
+    if not allowed_user_id and settings.environment == "production":
+        raise HTTPException(status_code=403, detail="Unauthorized Telegram user")
+    context = ensure_default_tenancy(db)
+    set_trusted_workspace(db, context.workspace_id)
+    set_active_workspace(context.workspace_id)
+    identity = TelegramIdentity(
+        workspace_id=context.workspace_id,
+        user_id=context.user_id,
+        telegram_user_id=user_id,
+        chat_id=chat_id,
+    )
+    db.add(identity)
+    db.commit()
+    return identity
 
 
 def _handle_callback_query(callback_query: dict, db: DbSession) -> dict[str, bool]:

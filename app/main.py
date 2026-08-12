@@ -10,13 +10,17 @@ from starlette.responses import Response
 
 from app.api import (
     ai_memory_routes,
+    auth_routes,
+    context_routes,
     household_routes,
+    integration_routes,
     plaid_routes,
     promotion_routes,
     replenishment_routes,
     splitwise_routes,
     telegram_routes,
     transaction_routes,
+    workspace_routes,
 )
 from app.auth import install_dashboard_auth
 from app.config import get_settings
@@ -63,6 +67,10 @@ def startup() -> None:
 
 
 app.include_router(plaid_routes.router)
+app.include_router(auth_routes.router)
+app.include_router(context_routes.router)
+app.include_router(integration_routes.router)
+app.include_router(workspace_routes.router)
 app.include_router(splitwise_routes.router)
 app.include_router(telegram_routes.router)
 app.include_router(transaction_routes.router)

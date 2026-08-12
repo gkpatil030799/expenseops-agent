@@ -1,13 +1,19 @@
 from __future__ import annotations
 
+import json
 from typing import Any
 from urllib.parse import parse_qs, urlencode
 
 import requests
 from requests_oauthlib import OAuth1
+from sqlalchemy.exc import OperationalError
 
 from app.config import Settings, get_settings
+from app.db import SessionLocal
+from app.models import SplitwiseIntegration, User, WorkspaceMembership
+from app.security import decrypt_secret
 from app.services.agent_service import friend_display_name
+from app.tenancy import DEFAULT_USER_EMAIL, get_active_workspace_id
 
 
 class SplitwiseAPIError(RuntimeError):
@@ -22,7 +28,7 @@ class SplitwiseService:
     oauth_access_token_url = "https://secure.splitwise.com/oauth/access_token"
 
     def __init__(self, settings: Settings | None = None):
-        self.settings = settings or get_settings()
+        self.settings = _workspace_settings(settings or get_settings())
         self.base_url = self.settings.splitwise_base_url.rstrip("/")
 
     def _headers(self) -> dict[str, str]:
@@ -270,6 +276,48 @@ class SplitwiseService:
         if data.get("success") is not True:
             raise SplitwiseAPIError("Splitwise delete_expense was not successful", data)
         return data
+
+
+def _workspace_settings(settings: Settings) -> Settings:
+    workspace_id = get_active_workspace_id()
+    if workspace_id is None:
+        return settings
+    try:
+        with SessionLocal() as db:
+            integration = (
+                db.query(SplitwiseIntegration)
+                .filter(
+                    SplitwiseIntegration.workspace_id == workspace_id,
+                    SplitwiseIntegration.enabled.is_(True),
+                )
+                .one_or_none()
+            )
+            if integration is not None:
+                credentials = json.loads(decrypt_secret(integration.credentials_encrypted))
+                return settings.model_copy(update=credentials)
+            is_legacy_default = (
+                db.query(WorkspaceMembership.id)
+                .join(User, User.id == WorkspaceMembership.user_id)
+                .filter(
+                    WorkspaceMembership.workspace_id == workspace_id,
+                    User.email == DEFAULT_USER_EMAIL,
+                )
+                .first()
+                is not None
+            )
+    except OperationalError:
+        # Unit tests and pre-migration local startup retain the legacy default behavior.
+        is_legacy_default = workspace_id == 1
+    if is_legacy_default:
+        return settings
+    return settings.model_copy(
+        update={
+            "splitwise_api_key": "",
+            "splitwise_access_token": "",
+            "splitwise_oauth_token": "",
+            "splitwise_oauth_token_secret": "",
+        }
+    )
 
 
 def _safe_json(response: requests.Response) -> dict[str, Any]:

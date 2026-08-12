@@ -123,12 +123,12 @@ class SplitwiseUserOut(BaseModel):
 class SplitwiseOAuthAuthorizeResponse(BaseModel):
     authorize_url: str
     oauth_token: str
-    oauth_token_secret: str
+    oauth_token_secret: str = ""
 
 
 class SplitwiseOAuthAccessTokenResponse(BaseModel):
-    oauth_token: str
-    oauth_token_secret: str
+    oauth_token: str = ""
+    oauth_token_secret: str = ""
     message: str
 
 

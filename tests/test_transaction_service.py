@@ -472,9 +472,11 @@ def test_pending_to_settled_personal_transaction_does_not_notify(tmp_path):
         db.get(PlaidItem, 1),
         _plaid_tx("tx-personal-pending-settled", pending=True),
     )
-    tx = db.query(ExpenseTransaction).filter_by(
-        plaid_transaction_id="tx-personal-pending-settled"
-    ).one()
+    tx = (
+        db.query(ExpenseTransaction)
+        .filter_by(plaid_transaction_id="tx-personal-pending-settled")
+        .one()
+    )
     tx.status = TransactionStatus.PERSONAL.value
     db.commit()
 

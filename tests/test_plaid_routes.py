@@ -700,8 +700,7 @@ def test_plaid_webhook_local_only_bypass_allows_sync_when_app_env_local(
     assert response.status_code == 200
     assert synced == [123]
     assert any(
-        getattr(record, "event", None)
-        == "plaid_webhook_verification_bypassed_for_local_test"
+        getattr(record, "event", None) == "plaid_webhook_verification_bypassed_for_local_test"
         for record in caplog.records
     )
     assert [event["event_type"] for event in sandbox_events] == [
@@ -881,8 +880,7 @@ def test_plaid_webhook_background_sync_reuses_transaction_service(monkeypatch, c
 
     assert calls == [123]
     assert any(
-        getattr(record, "event", None) == "plaid_webhook_sync_started"
-        for record in caplog.records
+        getattr(record, "event", None) == "plaid_webhook_sync_started" for record in caplog.records
     )
     completed = [
         record

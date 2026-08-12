@@ -13,6 +13,11 @@ def _safe_production_settings(**overrides):
         "dashboard_api_token": "configured-dashboard-token",
         "plaid_env": "production",
         "allow_unverified_plaid_webhooks_for_local_test": False,
+        "auth_mode": "oidc",
+        "oidc_issuer": "https://identity.example",
+        "oidc_audience": "expenseops",
+        "oidc_client_id": "client-id",
+        "oidc_redirect_uri": "https://expenseops.example/auth/callback",
         "_env_file": None,
     }
     values.update(overrides)
@@ -61,10 +66,8 @@ def test_production_config_rejects_enabled_sandbox_lab(monkeypatch):
         _safe_production_settings()
 
 
-def test_production_config_rejects_missing_dashboard_auth():
-    with pytest.raises(ValidationError, match="DASHBOARD_API_TOKEN"):
+def test_production_config_rejects_local_auth_mode():
+    with pytest.raises(ValidationError, match="AUTH_MODE"):
         _safe_production_settings(
-            dashboard_api_token="",
-            dashboard_username="",
-            dashboard_password="",
+            auth_mode="local",
         )

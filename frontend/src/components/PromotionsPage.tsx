@@ -21,6 +21,7 @@ export function PromotionsPage() {
   const [busyOfferId, setBusyOfferId] = useState<number | null>(null);
   const [copied, setCopied] = useState<number | null>(null);
   const [removed, setRemoved] = useState<RemovedDeal | null>(null);
+  const [gmailConnected, setGmailConnected] = useState<boolean | null>(null);
 
   async function load() {
     setBusy(true);
@@ -37,6 +38,11 @@ export function PromotionsPage() {
   }
 
   useEffect(() => { void load(); }, []);
+  useEffect(() => {
+    void api<{ gmail: { connected: boolean } }>("/api/integrations")
+      .then((value) => setGmailConnected(value.gmail.connected))
+      .catch(() => setGmailConnected(null));
+  }, []);
 
   const expiringIds = useMemo(() => {
     const cutoff = Date.now() + 7 * 86_400_000;
@@ -91,6 +97,7 @@ export function PromotionsPage() {
     </header>
 
     {removed ? <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-700 shadow-sm"><span>{removed.offer.merchant} was removed from your active deals.</span><Button size="sm" variant="outline" onClick={undoRemoval}>Undo</Button></div> : null}
+    {gmailConnected === false ? <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-indigo-200 bg-indigo-50 px-4 py-3 text-sm text-indigo-950"><span><strong>Gmail is not connected.</strong> Connect it to import your promotion emails automatically.</span><Button size="sm" onClick={() => window.location.assign("/?workspace=settings")}>Connect Gmail</Button></div> : null}
 
     <Card><CardContent className="space-y-4 p-4">
       <nav className="flex gap-1 overflow-x-auto" aria-label="Deal views">
@@ -111,7 +118,7 @@ export function PromotionsPage() {
 
     {overflow.length ? <section className="space-y-3"><div><h2 className="text-lg font-semibold text-slate-950">More active deals</h2><p className="mt-1 text-xs text-slate-600">Compact rows keep lower-ranked offers available without dominating the page.</p></div><div className="divide-y divide-slate-200 overflow-hidden rounded-xl border border-slate-200 bg-white">{overflow.map((offer) => <CompactDealRow key={offer.id} offer={offer} busy={busyOfferId === offer.id} onOpen={() => offer.destination_url && window.open(offer.destination_url, "_blank", "noopener,noreferrer")} onAction={(kind) => action(offer, kind)} />)}</div></section> : null}
 
-    <details className="rounded-xl border bg-white p-4"><summary className="cursor-pointer text-sm font-semibold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500">Advanced sync</summary><p className="mt-2 text-sm text-slate-600">Deals import automatically on the Railway schedule. Manual sync remains available for troubleshooting or immediate refresh.</p><Button className="mt-3" variant="outline" onClick={async () => { setBusy(true); try { await api("/api/promotions/sync", { method: "POST", body: JSON.stringify({}) }); await load(); } finally { setBusy(false); } }}>Sync Gmail Promotions now</Button></details>
+    <details className="rounded-xl border bg-white p-4"><summary className="cursor-pointer text-sm font-semibold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500">Advanced sync</summary><p className="mt-2 text-sm text-slate-600">Deals import automatically on the Railway schedule. Manual sync remains available for troubleshooting or immediate refresh.</p><Button className="mt-3" variant="outline" disabled={gmailConnected === false} onClick={async () => { setBusy(true); try { await api("/api/promotions/sync", { method: "POST", body: JSON.stringify({}) }); await load(); } finally { setBusy(false); } }}>Sync Gmail Promotions now</Button></details>
   </div>;
 }
 

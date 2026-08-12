@@ -93,6 +93,11 @@ def test_configure_logging_uses_json_in_production():
             telegram_webhook_secret="configured-telegram-secret",
             telegram_allowed_user_id="12345",
             dashboard_api_token="configured-dashboard-token",
+            auth_mode="oidc",
+            oidc_issuer="https://identity.example",
+            oidc_audience="expenseops",
+            oidc_client_id="client-id",
+            oidc_redirect_uri="https://expenseops.example/auth/callback",
             plaid_env="production",
             _env_file=None,
         )

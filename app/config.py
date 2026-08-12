@@ -29,6 +29,19 @@ class Settings(BaseSettings):
     dashboard_password: str = ""
     dashboard_api_token: str = ""
     app_public_url: str = ""
+    auth_mode: Literal["local", "oidc"] = "local"
+    oidc_issuer: str = ""
+    oidc_audience: str = ""
+    oidc_client_id: str = ""
+    oidc_client_secret: str = ""
+    oidc_redirect_uri: str = ""
+    oidc_scopes: str = "openid profile email"
+    oidc_algorithms: Annotated[list[str], NoDecode] = Field(default_factory=lambda: ["RS256"])
+    oidc_bootstrap_email: str = ""
+    auth_session_cookie_name: str = "expenseops_session"
+    auth_session_hours: int = Field(default=168, ge=1, le=720)
+    rate_limit_backend: Literal["memory"] = "memory"
+    enable_postgres_rls: bool = False
 
     allow_posting_pending_transactions: bool = False
 
@@ -109,7 +122,9 @@ class Settings(BaseSettings):
     household_preferred_place_bias_minutes: int = Field(default=3, ge=0, le=30)
     household_provider_cache_ttl_seconds: int = Field(default=900, ge=0, le=86400)
 
-    @field_validator("frontend_origin", "plaid_country_codes", "plaid_products", mode="before")
+    @field_validator(
+        "frontend_origin", "plaid_country_codes", "plaid_products", "oidc_algorithms", mode="before"
+    )
     @classmethod
     def parse_csv(cls, value: str | list[str]) -> list[str]:
         return _csv(value)
@@ -133,14 +148,19 @@ class Settings(BaseSettings):
             errors.append("APP_SECRET_KEY must be configured for production.")
         if not self.telegram_webhook_secret:
             errors.append("TELEGRAM_WEBHOOK_SECRET must be configured for production.")
-        if not self.telegram_allowed_user_id:
-            errors.append("TELEGRAM_ALLOWED_USER_ID must be configured for production.")
-        if not self.dashboard_api_token and not (
-            self.dashboard_username and self.dashboard_password
+        if self.auth_mode != "oidc":
+            errors.append("AUTH_MODE must be oidc in production.")
+        if not all(
+            [
+                self.oidc_issuer,
+                self.oidc_audience,
+                self.oidc_client_id,
+                self.oidc_redirect_uri,
+            ]
         ):
             errors.append(
-                "DASHBOARD_API_TOKEN or both DASHBOARD_USERNAME and "
-                "DASHBOARD_PASSWORD must be configured for production."
+                "OIDC_ISSUER, OIDC_AUDIENCE, OIDC_CLIENT_ID, and OIDC_REDIRECT_URI "
+                "must be configured for production."
             )
         if self.allow_unverified_plaid_webhooks_for_local_test:
             errors.append(
@@ -150,6 +170,11 @@ class Settings(BaseSettings):
             errors.append("ENABLE_EXPENSEOPS_SANDBOX_LAB must be false for production deploys.")
         if not self.plaid_webhook_verification_required:
             errors.append("Plaid webhook verification must be enabled for production.")
+        if self.enable_postgres_rls:
+            errors.append(
+                "ENABLE_POSTGRES_RLS is reserved for Phase 1C until jobs/webhooks use "
+                "separate PostgreSQL roles and transaction-local workspace settings."
+            )
         if errors:
             raise ValueError("Unsafe production configuration: " + " ".join(errors))
         return self

@@ -159,6 +159,5 @@ def test_ai_chat_context_includes_relevant_memories_without_raw_ids():
     serialized = json.dumps(context.prompt_context)
     assert "222" not in serialized
     assert (
-        context.prompt_context["relevant_memories"][0]["original_phrase"]
-        == "split like last time"
+        context.prompt_context["relevant_memories"][0]["original_phrase"] == "split like last time"
     )

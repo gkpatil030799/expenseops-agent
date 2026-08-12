@@ -43,6 +43,7 @@ def test_dashboard_api_allows_basic_auth():
     import app.auth as auth
 
     settings = _safe_production_settings(
+        environment="local",
         dashboard_username="beta",
         dashboard_password="secret",
     )
@@ -58,10 +59,30 @@ def test_dashboard_api_allows_basic_auth():
 def test_dashboard_api_allows_bearer_auth():
     import app.auth as auth
 
-    settings = _safe_production_settings(dashboard_api_token="token-123")
+    settings = _safe_production_settings(
+        environment="local", dashboard_api_token="token-123"
+    )
 
     assert auth._is_authorized(
         type("Request", (), {"headers": {"Authorization": "Bearer token-123"}})(),
+        settings,
+    )
+
+
+def test_production_oidc_mode_rejects_static_dev_token():
+    import app.auth as auth
+
+    settings = _safe_production_settings(
+        auth_mode="oidc",
+        oidc_issuer="https://identity.example",
+        oidc_audience="expenseops",
+        oidc_client_id="client-id",
+        oidc_redirect_uri="https://expenseops.example/auth/callback",
+        dashboard_api_token="dev-token",
+    )
+
+    assert not auth._is_authorized(
+        type("Request", (), {"headers": {"Authorization": "Bearer dev-token"}})(),
         settings,
     )
 

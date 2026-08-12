@@ -138,9 +138,7 @@ def summary(db: DbSession) -> dict:
             ),
             "latest_model_status": latest_model.status if latest_model else None,
             "decision_reason": (
-                (latest_model.metrics_json or {}).get("decision_reason")
-                if latest_model
-                else None
+                (latest_model.metrics_json or {}).get("decision_reason") if latest_model else None
             ),
         },
     }

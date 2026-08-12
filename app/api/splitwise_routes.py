@@ -1,22 +1,32 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, HTTPException, Query
+import json
 
+from fastapi import APIRouter, HTTPException, Query
+from fastapi.responses import RedirectResponse
+
+from app.api.deps import CurrentUser, CurrentWorkspace, DbSession
+from app.models import SplitwiseIntegration, utc_now
 from app.schemas import (
     CreateGroupRequest,
     FriendOut,
     GroupMemberRequest,
     GroupOut,
     InviteGroupMemberRequest,
-    SplitwiseOAuthAccessTokenResponse,
     SplitwiseOAuthAuthorizeResponse,
     SplitwiseUserOut,
 )
+from app.security import encrypt_secret
 from app.services.agent_service import friend_display_name
+from app.services.managed_auth_service import record_audit
+from app.services.oauth_state_service import (
+    OAuthStateError,
+    consume_oauth_state,
+    create_oauth_state,
+)
 from app.services.splitwise_service import SplitwiseAPIError, SplitwiseService
 
 router = APIRouter(prefix="/splitwise", tags=["splitwise"])
-_oauth_request_token_secrets: dict[str, str] = {}
 
 
 def _friend_out(friend: dict) -> FriendOut:
@@ -48,45 +58,80 @@ def get_me() -> SplitwiseUserOut:
 
 
 @router.get("/oauth/authorize", response_model=SplitwiseOAuthAuthorizeResponse)
-def get_oauth_authorize_url() -> SplitwiseOAuthAuthorizeResponse:
+def get_oauth_authorize_url(
+    db: DbSession, user: CurrentUser, workspace: CurrentWorkspace
+) -> SplitwiseOAuthAuthorizeResponse:
     try:
         data = SplitwiseService().get_oauth_authorize_url()
-        _oauth_request_token_secrets[data["oauth_token"]] = data["oauth_token_secret"]
-        return SplitwiseOAuthAuthorizeResponse(**data)
+        create_oauth_state(
+            db,
+            provider="splitwise",
+            workspace_id=workspace.id,
+            user_id=user.id,
+            payload=data["oauth_token_secret"],
+            raw_state=data["oauth_token"],
+        )
+        return SplitwiseOAuthAuthorizeResponse(
+            authorize_url=data["authorize_url"], oauth_token=data["oauth_token"]
+        )
     except SplitwiseAPIError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
-@router.get("/oauth/callback", response_model=SplitwiseOAuthAccessTokenResponse)
+@router.get("/oauth/callback")
 def oauth_callback(
     oauth_token: str,
     oauth_verifier: str,
-    oauth_token_secret: str | None = Query(default=None),
-) -> SplitwiseOAuthAccessTokenResponse:
-    request_token_secret = oauth_token_secret or _oauth_request_token_secrets.get(oauth_token)
-    if not request_token_secret:
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                "Missing OAuth request-token secret. Restart at /splitwise/oauth/authorize "
-                "or pass oauth_token_secret explicitly."
-            ),
-        )
-
+    db: DbSession,
+    user: CurrentUser,
+    workspace: CurrentWorkspace,
+) -> RedirectResponse:
     try:
+        _state, request_token_secret = consume_oauth_state(
+            db,
+            oauth_token,
+            provider="splitwise",
+            user_id=user.id,
+            workspace_id=workspace.id,
+        )
+        if not request_token_secret:
+            raise OAuthStateError("Splitwise request secret is missing")
         data = SplitwiseService().exchange_oauth_verifier(
             oauth_token=oauth_token,
             oauth_token_secret=request_token_secret,
             oauth_verifier=oauth_verifier,
         )
-        _oauth_request_token_secrets.pop(oauth_token, None)
-        return SplitwiseOAuthAccessTokenResponse(
-            **data,
-            message=(
-                "Set SPLITWISE_OAUTH_TOKEN and SPLITWISE_OAUTH_TOKEN_SECRET in .env, "
-                "then restart the app."
-            ),
+        integration = (
+            db.query(SplitwiseIntegration)
+            .filter(SplitwiseIntegration.workspace_id == workspace.id)
+            .one_or_none()
         )
+        credentials = encrypt_secret(
+            json.dumps(
+                {
+                    "splitwise_oauth_token": data["oauth_token"],
+                    "splitwise_oauth_token_secret": data["oauth_token_secret"],
+                }
+            )
+        )
+        if integration is None:
+            integration = SplitwiseIntegration(credentials_encrypted=credentials)
+            db.add(integration)
+        else:
+            integration.credentials_encrypted = credentials
+            integration.enabled = True
+            integration.updated_at = utc_now()
+        record_audit(
+            db,
+            workspace_id=workspace.id,
+            user_id=user.id,
+            event_type="splitwise_connected",
+            resource_type="splitwise_integration",
+        )
+        db.commit()
+        return RedirectResponse(url="/?workspace=settings", status_code=303)
+    except OAuthStateError as exc:
+        raise HTTPException(status_code=400, detail="Splitwise OAuth state is invalid") from exc
     except SplitwiseAPIError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 

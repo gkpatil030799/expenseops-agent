@@ -18,6 +18,7 @@ from app.schemas import (
     WebhookAck,
 )
 from app.security import encrypt_secret
+from app.services.managed_auth_service import record_audit
 from app.services.plaid_service import (
     PlaidConfigurationError,
     PlaidRequestError,
@@ -38,9 +39,10 @@ logger = logging.getLogger(__name__)
 
 
 @router.post("/link-token", response_model=LinkTokenResponse)
-def create_link_token() -> LinkTokenResponse:
+def create_link_token(request: Request) -> LinkTokenResponse:
     try:
-        data = PlaidService().create_link_token(client_user_id="gunjan")
+        user_id = getattr(request.state, "user_id", "legacy")
+        data = PlaidService().create_link_token(client_user_id=f"expenseops-user-{user_id}")
     except PlaidConfigurationError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except PlaidRequestError as exc:
@@ -50,7 +52,7 @@ def create_link_token() -> LinkTokenResponse:
 
 @router.post("/exchange-public-token", response_model=PublicTokenExchangeResponse)
 def exchange_public_token(
-    payload: PublicTokenExchangeRequest, db: DbSession
+    payload: PublicTokenExchangeRequest, request: Request, db: DbSession
 ) -> PublicTokenExchangeResponse:
     try:
         plaid_data = PlaidService().exchange_public_token(payload.public_token)
@@ -71,7 +73,19 @@ def exchange_public_token(
         db.add(item)
     else:
         item.access_token_encrypted = access_token_encrypted
+        item.enabled = True
         item.institution_name = payload.institution_name or item.institution_name
+    db.flush()
+    workspace_id = db.info.get("workspace_id") or getattr(request.state, "workspace_id", 1)
+    user_id = db.info.get("user_id") or getattr(request.state, "user_id", None)
+    record_audit(
+        db,
+        workspace_id=workspace_id,
+        user_id=user_id,
+        event_type="plaid_connected",
+        resource_type="plaid_item",
+        resource_id=str(item.id) if item.id else None,
+    )
     db.commit()
     db.refresh(item)
     try:
@@ -146,7 +160,9 @@ async def plaid_webhook(
         )
         return WebhookAck(ok=True, message="Webhook accepted, but item_id is missing.")
 
-    item = db.execute(select(PlaidItem).where(PlaidItem.item_id == item_id)).scalar_one_or_none()
+    item = db.execute(
+        select(PlaidItem).where(PlaidItem.item_id == item_id, PlaidItem.enabled.is_(True))
+    ).scalar_one_or_none()
     if item is None:
         _mark_webhook_event_failed(db, event, "unknown_item_id")
         log_event(
@@ -167,11 +183,14 @@ async def plaid_webhook(
 
 def _sync_item_by_db_id(item_db_id: int, webhook_event_id: int | None = None) -> None:
     from app.db import SessionLocal
+    from app.tenancy import set_trusted_workspace
 
     db = SessionLocal()
     try:
-        event = db.get(PlaidWebhookEvent, webhook_event_id) if webhook_event_id else None
         item = db.get(PlaidItem, item_db_id)
+        if item:
+            set_trusted_workspace(db, item.workspace_id)
+        event = db.get(PlaidWebhookEvent, webhook_event_id) if webhook_event_id else None
         if item:
             if event:
                 event.processing_status = "syncing"
@@ -284,11 +303,17 @@ def _create_plaid_webhook_event(
     plaid_item_id: str | None,
     payload_hash: str,
 ) -> PlaidWebhookEvent:
+    linked_item = None
+    if plaid_item_id and hasattr(db, "execute"):
+        linked_item = db.execute(
+            select(PlaidItem).where(PlaidItem.item_id == plaid_item_id)
+        ).scalar_one_or_none()
     event = PlaidWebhookEvent(
         webhook_type=webhook_type,
         webhook_code=webhook_code,
         plaid_item_id=plaid_item_id,
         payload_hash=payload_hash,
+        workspace_id=linked_item.workspace_id if linked_item else None,
     )
     if not all(hasattr(db, attr) for attr in ("add", "commit", "refresh")):
         return event

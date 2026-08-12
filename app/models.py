@@ -24,6 +24,179 @@ def utc_now() -> datetime:
     return datetime.now(UTC)
 
 
+class TenantScoped:
+    """Marker used by the database session to enforce workspace isolation."""
+
+    workspace_id: Mapped[int] = mapped_column(
+        ForeignKey("workspaces.id"), nullable=False, default=1, index=True
+    )
+
+
+class User(Base):
+    __tablename__ = "users"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    email: Mapped[str] = mapped_column(String(320), unique=True, index=True)
+    display_name: Mapped[str] = mapped_column(String(255))
+    status: Mapped[str] = mapped_column(String(32), default="active", index=True)
+    api_token_hash: Mapped[str | None] = mapped_column(String(64), unique=True, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class Workspace(Base):
+    __tablename__ = "workspaces"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[str] = mapped_column(String(255))
+    workspace_type: Mapped[str] = mapped_column(String(32), default="personal")
+    created_by_user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class WorkspaceMembership(Base):
+    __tablename__ = "workspace_memberships"
+    __table_args__ = (UniqueConstraint("workspace_id", "user_id", name="uq_workspace_membership"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    workspace_id: Mapped[int] = mapped_column(ForeignKey("workspaces.id"), index=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    role: Mapped[str] = mapped_column(String(32), default="member")
+    is_default: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class GmailAccount(TenantScoped, Base):
+    __tablename__ = "gmail_accounts"
+    __table_args__ = (
+        UniqueConstraint("workspace_id", "google_user_id", name="uq_gmail_account_workspace_user"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    google_user_id: Mapped[str] = mapped_column(String(320), default="me")
+    refresh_token_encrypted: Mapped[str] = mapped_column(Text)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class TelegramIdentity(TenantScoped, Base):
+    __tablename__ = "telegram_identities"
+    __table_args__ = (
+        UniqueConstraint("telegram_user_id", "chat_id", name="uq_telegram_identity_external"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    telegram_user_id: Mapped[str] = mapped_column(String(128), index=True)
+    chat_id: Mapped[str] = mapped_column(String(128), index=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class SplitwiseIntegration(TenantScoped, Base):
+    __tablename__ = "splitwise_integrations"
+    __table_args__ = (UniqueConstraint("workspace_id", name="uq_splitwise_workspace"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    credentials_encrypted: Mapped[str] = mapped_column(Text)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class AuthIdentity(Base):
+    __tablename__ = "auth_identities"
+    __table_args__ = (
+        UniqueConstraint("provider", "provider_subject", name="uq_auth_identity_provider_subject"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    provider: Mapped[str] = mapped_column(String(100), index=True)
+    provider_subject: Mapped[str] = mapped_column(String(255))
+    email: Mapped[str] = mapped_column(String(320), index=True)
+    display_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    avatar_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    last_login_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class AuthSession(Base):
+    __tablename__ = "auth_sessions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    selected_workspace_id: Mapped[int] = mapped_column(ForeignKey("workspaces.id"), index=True)
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class WorkspaceInvitation(TenantScoped, Base):
+    __tablename__ = "workspace_invitations"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    email: Mapped[str] = mapped_column(String(320), index=True)
+    role: Mapped[str] = mapped_column(String(32), default="member")
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    status: Mapped[str] = mapped_column(String(32), default="pending", index=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    invited_by_user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    accepted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class OAuthState(Base):
+    __tablename__ = "oauth_states"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    provider: Mapped[str] = mapped_column(String(64), index=True)
+    workspace_id: Mapped[int | None] = mapped_column(
+        ForeignKey("workspaces.id", ondelete="CASCADE"), nullable=True, index=True
+    )
+    user_id: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), nullable=True, index=True
+    )
+    state_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    payload_encrypted: Mapped[str | None] = mapped_column(Text, nullable=True)
+    redirect_after: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class TelegramLinkCode(TenantScoped, Base):
+    __tablename__ = "telegram_link_codes"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    code_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class AuditEvent(Base):
+    __tablename__ = "audit_events"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    workspace_id: Mapped[int] = mapped_column(
+        ForeignKey("workspaces.id", ondelete="CASCADE"), index=True
+    )
+    user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True, index=True)
+    event_type: Mapped[str] = mapped_column(String(100), index=True)
+    resource_type: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    resource_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    request_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    metadata_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
 class TransactionStatus(StrEnum):
     ASK_USER = "ask_user"
     PERSONAL = "personal"
@@ -108,12 +281,13 @@ class PlaceResolutionStatus(StrEnum):
     FAILED = "failed"
 
 
-class PlaidItem(Base):
+class PlaidItem(TenantScoped, Base):
     __tablename__ = "plaid_items"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     item_id: Mapped[str] = mapped_column(String(128), unique=True, index=True)
-    access_token_encrypted: Mapped[str] = mapped_column(Text)
+    access_token_encrypted: Mapped[str | None] = mapped_column(Text, nullable=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
     cursor: Mapped[str | None] = mapped_column(Text, nullable=True)
     institution_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
@@ -128,6 +302,9 @@ class PlaidWebhookEvent(Base):
     __tablename__ = "plaid_webhook_events"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    workspace_id: Mapped[int | None] = mapped_column(
+        ForeignKey("workspaces.id"), nullable=True, index=True
+    )
     webhook_type: Mapped[str] = mapped_column(String(64), index=True)
     webhook_code: Mapped[str] = mapped_column(String(128), index=True)
     plaid_item_id: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
@@ -155,7 +332,7 @@ class PlaidWebhookEvent(Base):
     plaid_item: Mapped[PlaidItem | None] = relationship()
 
 
-class ExpenseTransaction(Base):
+class ExpenseTransaction(TenantScoped, Base):
     __tablename__ = "expense_transactions"
     __table_args__ = (UniqueConstraint("plaid_transaction_id", name="uq_plaid_transaction_id"),)
 
@@ -191,7 +368,7 @@ class ExpenseTransaction(Base):
     plaid_item: Mapped[PlaidItem] = relationship(back_populates="transactions")
 
 
-class AIInterpretationMemory(Base):
+class AIInterpretationMemory(TenantScoped, Base):
     __tablename__ = "ai_interpretation_memories"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
@@ -216,9 +393,13 @@ class AIInterpretationMemory(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
 
-class TelegramSession(Base):
+class TelegramSession(TenantScoped, Base):
     __tablename__ = "telegram_sessions"
-    __table_args__ = (UniqueConstraint("chat_id", "user_id", name="uq_telegram_session_chat_user"),)
+    __table_args__ = (
+        UniqueConstraint(
+            "workspace_id", "chat_id", "user_id", name="uq_telegram_session_workspace_chat_user"
+        ),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     chat_id: Mapped[str] = mapped_column(String(128), index=True)
@@ -228,7 +409,7 @@ class TelegramSession(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
 
-class HouseholdItem(Base):
+class HouseholdItem(TenantScoped, Base):
     __tablename__ = "household_items"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
@@ -255,10 +436,15 @@ class HouseholdItem(Base):
     )
 
 
-class PurchaseReceipt(Base):
+class PurchaseReceipt(TenantScoped, Base):
     __tablename__ = "purchase_receipts"
     __table_args__ = (
-        UniqueConstraint("source", "source_external_id", name="uq_receipt_source_external"),
+        UniqueConstraint(
+            "workspace_id",
+            "source",
+            "source_external_id",
+            name="uq_receipt_workspace_source_external",
+        ),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
@@ -352,9 +538,14 @@ class HouseholdItemAlias(Base):
     household_item: Mapped[HouseholdItem] = relationship()
 
 
-class HouseholdItemAcquisition(Base):
+class HouseholdItemAcquisition(TenantScoped, Base):
     __tablename__ = "household_item_acquisitions"
-    __table_args__ = (UniqueConstraint("receipt_item_id", name="uq_acquisition_receipt_item"),)
+    __table_args__ = (
+        UniqueConstraint("receipt_item_id", name="uq_acquisition_receipt_item"),
+        UniqueConstraint(
+            "workspace_id", "logical_purchase_key", name="uq_acquisition_workspace_purchase_key"
+        ),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     household_item_id: Mapped[int] = mapped_column(
@@ -369,9 +560,7 @@ class HouseholdItemAcquisition(Base):
     quantity_confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
     configured_cadence_days: Mapped[int | None] = mapped_column(Integer, nullable=True)
     merchant_normalized: Mapped[str | None] = mapped_column(String(255), nullable=True)
-    logical_purchase_key: Mapped[str | None] = mapped_column(
-        String(64), nullable=True, unique=True, index=True
-    )
+    logical_purchase_key: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     receipt_item_id: Mapped[int | None] = mapped_column(
         ForeignKey("purchase_receipt_items.id", ondelete="SET NULL"), nullable=True, index=True
     )
@@ -392,11 +581,14 @@ class HouseholdItemAcquisition(Base):
     receipt_item: Mapped[PurchaseReceiptItem | None] = relationship(back_populates="acquisition")
 
 
-class ReplenishmentModelVersion(Base):
+class ReplenishmentModelVersion(TenantScoped, Base):
     __tablename__ = "replenishment_model_versions"
+    __table_args__ = (
+        UniqueConstraint("workspace_id", "version", name="uq_model_version_workspace_version"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    version: Mapped[str] = mapped_column(String(100), unique=True, index=True)
+    version: Mapped[str] = mapped_column(String(100), index=True)
     algorithm: Mapped[str] = mapped_column(String(100))
     status: Mapped[str] = mapped_column(String(32), index=True)
     trained_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
@@ -410,7 +602,7 @@ class ReplenishmentModelVersion(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
 
-class ReplenishmentPrediction(Base):
+class ReplenishmentPrediction(TenantScoped, Base):
     __tablename__ = "replenishment_predictions"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
@@ -438,7 +630,7 @@ class ReplenishmentPrediction(Base):
     model_version: Mapped[ReplenishmentModelVersion | None] = relationship()
 
 
-class ReplenishmentFeedback(Base):
+class ReplenishmentFeedback(TenantScoped, Base):
     __tablename__ = "replenishment_feedback"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
@@ -454,11 +646,12 @@ class ReplenishmentFeedback(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
 
-class ReplenishmentJobRun(Base):
+class ReplenishmentJobRun(TenantScoped, Base):
     __tablename__ = "replenishment_job_runs"
+    __table_args__ = (UniqueConstraint("workspace_id", "run_key", name="uq_job_run_workspace_key"),)
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    run_key: Mapped[str] = mapped_column(String(100), unique=True, index=True)
+    run_key: Mapped[str] = mapped_column(String(100), index=True)
     trigger: Mapped[str] = mapped_column(String(32))
     status: Mapped[str] = mapped_column(String(32), index=True)
     started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
@@ -472,11 +665,16 @@ class ReplenishmentJobRun(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
 
-class PromotionMessage(Base):
+class PromotionMessage(TenantScoped, Base):
     __tablename__ = "promotion_messages"
+    __table_args__ = (
+        UniqueConstraint(
+            "workspace_id", "gmail_message_id", name="uq_promotion_message_workspace_gmail"
+        ),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    gmail_message_id: Mapped[str] = mapped_column(String(255), unique=True, index=True)
+    gmail_message_id: Mapped[str] = mapped_column(String(255), index=True)
     gmail_thread_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     gmail_history_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     sender_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
@@ -498,8 +696,13 @@ class PromotionMessage(Base):
     )
 
 
-class PromotionOffer(Base):
+class PromotionOffer(TenantScoped, Base):
     __tablename__ = "promotion_offers"
+    __table_args__ = (
+        UniqueConstraint(
+            "workspace_id", "campaign_fingerprint", name="uq_offer_workspace_campaign"
+        ),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     promotion_message_id: Mapped[int] = mapped_column(
@@ -532,7 +735,7 @@ class PromotionOffer(Base):
     confidence: Mapped[float] = mapped_column(Float, default=0.0)
     trust_status: Mapped[str] = mapped_column(String(32), default="review", index=True)
     status: Mapped[str] = mapped_column(String(32), default="active", index=True)
-    campaign_fingerprint: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    campaign_fingerprint: Mapped[str] = mapped_column(String(64), index=True)
     score: Mapped[float] = mapped_column(Float, default=0.0, index=True)
     score_breakdown_json: Mapped[dict] = mapped_column(JSON, default=dict)
     saved: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
@@ -555,7 +758,7 @@ class PromotionFeedback(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
 
-class PromotionDigestRun(Base):
+class PromotionDigestRun(TenantScoped, Base):
     __tablename__ = "promotion_digest_runs"
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     scheduled_for: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -568,8 +771,9 @@ class PromotionDigestRun(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
 
-class PromotionSettings(Base):
+class PromotionSettings(TenantScoped, Base):
     __tablename__ = "promotion_settings"
+    __table_args__ = (UniqueConstraint("workspace_id", name="uq_promotion_settings_workspace"),)
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     preferred_categories: Mapped[list] = mapped_column(JSON, default=list)
     muted_categories: Mapped[list] = mapped_column(JSON, default=list)
@@ -585,10 +789,13 @@ class PromotionSettings(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
 
-class GmailSyncCheckpoint(Base):
+class GmailSyncCheckpoint(TenantScoped, Base):
     __tablename__ = "gmail_sync_checkpoints"
+    __table_args__ = (
+        UniqueConstraint("workspace_id", "account_key", name="uq_gmail_checkpoint_workspace_key"),
+    )
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    account_key: Mapped[str] = mapped_column(String(255), unique=True, index=True)
+    account_key: Mapped[str] = mapped_column(String(255), index=True)
     history_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     backfill_page_token: Mapped[str | None] = mapped_column(Text, nullable=True)
     initial_backfill_complete: Mapped[bool] = mapped_column(Boolean, default=False)
@@ -598,7 +805,7 @@ class GmailSyncCheckpoint(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
 
-class Errand(Base):
+class Errand(TenantScoped, Base):
     __tablename__ = "errands"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
@@ -654,7 +861,7 @@ class ErrandHouseholdItem(Base):
     household_item: Mapped[HouseholdItem] = relationship(back_populates="errand_links")
 
 
-class ErrandPlan(Base):
+class ErrandPlan(TenantScoped, Base):
     __tablename__ = "errand_plans"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
@@ -743,8 +950,16 @@ class ErrandPlanStopHouseholdItem(Base):
     household_item: Mapped[HouseholdItem] = relationship()
 
 
-class SavedLocation(Base):
+class SavedLocation(TenantScoped, Base):
     __tablename__ = "saved_locations"
+    __table_args__ = (
+        UniqueConstraint(
+            "workspace_id",
+            "location_type",
+            "label",
+            name="uq_saved_location_workspace_type_label",
+        ),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     label: Mapped[str] = mapped_column(String(100))
@@ -758,11 +973,14 @@ class SavedLocation(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
 
-class PreferredPlace(Base):
+class PreferredPlace(TenantScoped, Base):
     __tablename__ = "preferred_places"
+    __table_args__ = (
+        UniqueConstraint("workspace_id", "preference_key", name="uq_preferred_place_workspace_key"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    preference_key: Mapped[str] = mapped_column(String(255), unique=True, index=True)
+    preference_key: Mapped[str] = mapped_column(String(255), index=True)
     canonical_name: Mapped[str] = mapped_column(String(255))
     full_address: Mapped[str] = mapped_column(Text)
     latitude: Mapped[float | None] = mapped_column(Float, nullable=True)

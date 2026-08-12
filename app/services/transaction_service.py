@@ -95,6 +95,8 @@ class TransactionService:
     def sync_item(self, item: PlaidItem) -> dict[str, int]:
         log_event(logger, "plaid_sync_started", plaid_item_db_id=item.id)
         plaid = self.plaid_service or PlaidService(self.settings)
+        if item.enabled is False or not item.access_token_encrypted:
+            raise TransactionError("Plaid connection is disconnected")
         access_token = decrypt_secret(item.access_token_encrypted)
         self._ensure_item_matches_plaid_environment(item, access_token)
         original_cursor = item.cursor
@@ -162,7 +164,7 @@ class TransactionService:
 
     def sync_all_items(self) -> dict[str, dict[str, int | str]]:
         results: dict[str, dict[str, int | str]] = {}
-        for item in self.db.execute(select(PlaidItem)).scalars():
+        for item in self.db.execute(select(PlaidItem).where(PlaidItem.enabled.is_(True))).scalars():
             try:
                 results[item.item_id] = self.sync_item(item)
             except TransactionError as exc:

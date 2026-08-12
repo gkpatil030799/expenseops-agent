@@ -523,9 +523,7 @@ def test_gmail_sync_is_narrow_and_message_id_idempotent(db):
     assert second.skipped == 1
     assert db.scalar(select(func.count(PurchaseReceipt.id))) == 1
     checkpoint = db.scalar(
-        select(GmailSyncCheckpoint).where(
-            GmailSyncCheckpoint.account_key == "me:receipts"
-        )
+        select(GmailSyncCheckpoint).where(GmailSyncCheckpoint.account_key == "me:receipts")
     )
     assert checkpoint is not None
     status = service.status()

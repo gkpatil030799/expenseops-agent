@@ -13,6 +13,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.config import Settings, get_settings
+from app.job_tenancy import gmail_settings_for_session
 from app.models import GmailSyncCheckpoint, PromotionMessage, PromotionOffer, utc_now
 from app.services.gmail_client_service import GmailClient
 from app.services.promotion_extraction_service import PromotionExtractionService
@@ -34,7 +35,7 @@ class GmailPromotionIngestionService:
         self, db: Session, settings: Settings | None = None, gmail: GmailClient | None = None
     ):
         self.db = db
-        self.settings = settings or get_settings()
+        self.settings = gmail_settings_for_session(db, settings or get_settings())
         self.gmail = gmail or GmailClient(self.settings)
 
     @property
@@ -135,9 +136,7 @@ class GmailPromotionIngestionService:
             offer = offers_by_fingerprint.get(fingerprint)
             if offer is None:
                 offer = self.db.execute(
-                    select(PromotionOffer).where(
-                        PromotionOffer.campaign_fingerprint == fingerprint
-                    )
+                    select(PromotionOffer).where(PromotionOffer.campaign_fingerprint == fingerprint)
                 ).scalar_one_or_none()
             if offer:
                 sources = list(dict.fromkeys([*offer.source_message_ids, message_id]))
