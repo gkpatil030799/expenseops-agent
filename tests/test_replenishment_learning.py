@@ -532,6 +532,62 @@ def test_gmail_sync_is_narrow_and_message_id_idempotent(db):
     assert status["latest_receipt_at"] is not None
 
 
+def test_gmail_receipt_sync_resumes_capped_message_pages(db):
+    encoded = base64.urlsafe_b64encode(
+        b"Order number 12. Subtotal $10. Total $11. Receipt"
+    ).decode("ascii")
+    list_requests = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.host == "oauth2.googleapis.com":
+            return httpx.Response(200, json={"access_token": "token"})
+        if request.url.path.endswith("/messages"):
+            list_requests.append(dict(request.url.params))
+            if request.url.params.get("pageToken") == "page-2":
+                return httpx.Response(200, json={"messages": [{"id": "receipt-b"}]})
+            return httpx.Response(
+                200,
+                json={
+                    "messages": [{"id": "receipt-a"}],
+                    "nextPageToken": "page-2",
+                },
+            )
+        return httpx.Response(
+            200,
+            json={
+                "payload": {
+                    "headers": [
+                        {"name": "Subject", "value": "Your receipt"},
+                        {"name": "From", "value": "orders@example.com"},
+                    ],
+                    "mimeType": "text/plain",
+                    "body": {"data": encoded},
+                }
+            },
+        )
+
+    service = GmailReceiptService(
+        db,
+        settings(
+            gmail_receipt_sync_enabled=True,
+            gmail_client_id="id",
+            gmail_client_secret="secret",
+            gmail_refresh_token="refresh",
+        ),
+        httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+    assert service.sync(max_results=1).ingested == 1
+    checkpoint = db.scalar(
+        select(GmailSyncCheckpoint).where(GmailSyncCheckpoint.account_key == "me:receipts")
+    )
+    assert checkpoint.backfill_page_token == "page-2"
+    assert checkpoint.initial_backfill_complete is False
+    assert service.sync(max_results=1).ingested == 1
+    assert list_requests[-1]["pageToken"] == "page-2"
+    assert checkpoint.backfill_page_token is None
+    assert checkpoint.initial_backfill_complete is True
+
+
 def test_gmail_receipt_job_reports_bounded_sync_counts(db, monkeypatch):
     class SessionContext:
         def __enter__(self):

@@ -35,6 +35,7 @@ from app.services.agent_service import (
 )
 from app.services.managed_auth_service import record_audit
 from app.services.notification_service import NotificationService
+from app.services.outbox_service import enqueue_outbox_event
 from app.services.plaid_service import PlaidService
 from app.services.share_calculator import (
     CustomSplitInput,
@@ -471,6 +472,8 @@ class TransactionService:
             return False
         if tx.review_notification_sent_at is not None:
             return False
+        if tx.review_notification_queued_at is not None:
+            return False
         if tx.splitwise_expense_id:
             return False
         if _scenario_id_for_no_notify(tx):
@@ -492,6 +495,8 @@ class TransactionService:
             return "not_actionable"
         if tx.review_notification_sent_at is not None:
             return "review_notification_already_sent"
+        if tx.review_notification_queued_at is not None:
+            return "review_notification_already_queued"
         return "not_new_or_pending_transition"
 
     def _log_notification_skip(self, tx: ExpenseTransaction, skip_reason: str) -> None:
@@ -529,6 +534,7 @@ class TransactionService:
                 .where(ExpenseTransaction.pending.is_(False))
                 .where(ExpenseTransaction.splitwise_expense_id.is_(None))
                 .where(ExpenseTransaction.review_notification_sent_at.is_(None))
+                .where(ExpenseTransaction.review_notification_queued_at.is_(None))
                 .order_by(ExpenseTransaction.created_at.asc())
             )
             .scalars()
@@ -577,6 +583,8 @@ class TransactionService:
         )
 
     def _attempt_review_notification(self, tx: ExpenseTransaction) -> bool:
+        if self.settings.environment == "production" and not self._notification_service_injected:
+            return self._enqueue_review_notification(tx)
         log_event(
             logger,
             "telegram_notification_claim_started",
@@ -647,6 +655,36 @@ class TransactionService:
             )
             self._release_notification_claim(tx)
         return notification_sent
+
+    def _enqueue_review_notification(self, tx: ExpenseTransaction) -> bool:
+        self.db.refresh(tx)
+        if not self.should_notify_for_review(tx):
+            return False
+        duplicate_tx = self._already_notified_duplicate(tx)
+        if duplicate_tx is not None:
+            self._mark_notification_claimed_without_send(tx, utc_now())
+            return False
+        queued_at = utc_now()
+        enqueue_outbox_event(
+            self.db,
+            workspace_id=tx.workspace_id,
+            event_type="telegram.review_transaction",
+            aggregate_type="expense_transaction",
+            aggregate_id=tx.id,
+            dedupe_key=f"telegram-review:{tx.id}",
+            payload={"transaction_id": tx.id},
+        )
+        tx.review_notification_queued_at = queued_at
+        tx.updated_at = queued_at
+        self.db.commit()
+        self.db.refresh(tx)
+        log_event(
+            logger,
+            "telegram_notification_queued",
+            transaction_id=tx.id,
+            plaid_transaction_id=tx.plaid_transaction_id,
+        )
+        return True
 
     def _release_notification_claim(self, tx: ExpenseTransaction) -> None:
         self.db.execute(
@@ -806,7 +844,12 @@ class TransactionService:
                 select(ExpenseTransaction)
                 .join(PlaidItem, PlaidItem.id == ExpenseTransaction.plaid_item_id)
                 .where(ExpenseTransaction.id != tx.id)
-                .where(ExpenseTransaction.review_notification_sent_at.is_not(None))
+                .where(
+                    or_(
+                        ExpenseTransaction.review_notification_sent_at.is_not(None),
+                        ExpenseTransaction.review_notification_queued_at.is_not(None),
+                    )
+                )
                 .where(ExpenseTransaction.amount_cents == tx.amount_cents)
                 .where(ExpenseTransaction.iso_currency_code == tx.iso_currency_code)
                 .where(ExpenseTransaction.date == tx.date)
@@ -821,7 +864,12 @@ class TransactionService:
                     )
                     == display_name
                 )
-                .order_by(ExpenseTransaction.review_notification_sent_at.asc())
+                .order_by(
+                    func.coalesce(
+                        ExpenseTransaction.review_notification_sent_at,
+                        ExpenseTransaction.review_notification_queued_at,
+                    ).asc()
+                )
                 .limit(1)
             )
             .scalars()

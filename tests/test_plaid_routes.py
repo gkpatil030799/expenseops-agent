@@ -14,7 +14,7 @@ from app.api import plaid_routes
 from app.config import Settings
 from app.db import Base, get_db
 from app.main import app
-from app.models import PlaidItem, PlaidWebhookEvent
+from app.models import OutboxEvent, PlaidItem, PlaidWebhookEvent
 from app.services.plaid_service import (
     PlaidRequestError,
     PlaidService,
@@ -1004,6 +1004,58 @@ def test_plaid_webhook_event_queued_then_processed(monkeypatch, tmp_path):
     assert event.sync_completed_at is not None
     assert event.processed_at is not None
     assert event.error_message is None
+
+
+def test_production_plaid_webhook_is_durable_before_ack(monkeypatch, tmp_path):
+    db, SessionLocal = _plaid_route_test_db(tmp_path)
+    item = PlaidItem(
+        item_id="item-1",
+        access_token_encrypted="encrypted",
+        institution_name="Test Bank",
+    )
+    db.add(item)
+    db.commit()
+    item_id = item.id
+    db.close()
+    in_process_calls = []
+    monkeypatch.setattr(
+        plaid_routes,
+        "get_settings",
+        lambda: Settings(
+            environment="production",
+            app_secret_key="configured-fernet-key",
+            _env_file=None,
+        ),
+    )
+    monkeypatch.setattr(
+        plaid_routes,
+        "_sync_item_by_db_id",
+        lambda item_id, event_id=None: in_process_calls.append((item_id, event_id)),
+    )
+    app.dependency_overrides[get_db] = _override_db(SessionLocal)
+
+    try:
+        response = TestClient(app).post(
+            "/plaid/webhook",
+            json={
+                "webhook_type": "TRANSACTIONS",
+                "webhook_code": "SYNC_UPDATES_AVAILABLE",
+                "item_id": "item-1",
+            },
+        )
+        db = SessionLocal()
+        webhook = db.query(PlaidWebhookEvent).one()
+        outbox = db.query(OutboxEvent).one()
+    finally:
+        app.dependency_overrides.clear()
+        db.close()
+
+    assert response.status_code == 200
+    assert in_process_calls == []
+    assert webhook.processing_status == "queued"
+    assert outbox.event_type == "plaid.sync_item"
+    assert outbox.state == "pending"
+    assert outbox.payload_json == {"item_id": item_id, "webhook_event_id": webhook.id}
 
 
 def test_plaid_webhook_event_failed_sync(monkeypatch, tmp_path):

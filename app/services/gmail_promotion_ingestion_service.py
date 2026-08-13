@@ -55,13 +55,16 @@ class GmailPromotionIngestionService:
         recovery = False
         backfill = not (checkpoint.initial_backfill_complete and checkpoint.history_id)
         next_page: str | None = None
+        next_incremental_page: str | None = None
         try:
             if backfill:
                 ids, newest_history, next_page = self._backfill_ids(
                     token, limit, checkpoint.backfill_page_token
                 )
             else:
-                ids, newest_history = self._incremental_ids(token, checkpoint, limit)
+                ids, newest_history, next_incremental_page = self._incremental_ids(
+                    token, checkpoint, limit
+                )
         except Exception as exc:
             if "404" not in str(exc):
                 raise
@@ -80,10 +83,15 @@ class GmailPromotionIngestionService:
             created += count
             skipped += int(not did_process)
             newest_history = _newer_history(newest_history, message.get("historyId"))
-        checkpoint.history_id = _newer_history(checkpoint.history_id, newest_history)
         if backfill:
+            checkpoint.history_id = _newer_history(checkpoint.history_id, newest_history)
             checkpoint.backfill_page_token = next_page
             checkpoint.initial_backfill_complete = next_page is None
+            checkpoint.incremental_page_token = None
+        else:
+            checkpoint.incremental_page_token = next_incremental_page
+            if next_incremental_page is None:
+                checkpoint.history_id = _newer_history(checkpoint.history_id, newest_history)
         checkpoint.updated_at = utc_now()
         self.db.commit()
         PromotionRankingService(self.db).rescore_all()
@@ -232,17 +240,20 @@ class GmailPromotionIngestionService:
 
     def _incremental_ids(
         self, token: str, checkpoint: GmailSyncCheckpoint, limit: int
-    ) -> tuple[list[str], str | None]:
+    ) -> tuple[list[str], str | None, str | None]:
+        params = {
+            "startHistoryId": checkpoint.history_id,
+            "labelId": "CATEGORY_PROMOTIONS",
+            "historyTypes": "messageAdded",
+            "maxResults": limit,
+        }
+        if checkpoint.incremental_page_token:
+            params["pageToken"] = checkpoint.incremental_page_token
         data = self.gmail.request(
             "GET",
             f"https://gmail.googleapis.com/gmail/v1/users/{self.settings.gmail_user_id}/history",
             headers={"Authorization": f"Bearer {token}"},
-            params={
-                "startHistoryId": checkpoint.history_id,
-                "labelId": "CATEGORY_PROMOTIONS",
-                "historyTypes": "messageAdded",
-                "maxResults": limit,
-            },
+            params=params,
         ).json()
         ids = [
             str(entry["message"]["id"])
@@ -250,7 +261,11 @@ class GmailPromotionIngestionService:
             for entry in event.get("messagesAdded", [])
             if entry.get("message", {}).get("id")
         ]
-        return list(dict.fromkeys(ids))[:limit], str(data.get("historyId") or checkpoint.history_id)
+        return (
+            list(dict.fromkeys(ids))[:limit],
+            str(data.get("historyId") or checkpoint.history_id),
+            str(data.get("nextPageToken") or "") or None,
+        )
 
 
 def _message_content(message: dict) -> tuple[str, str, str, str, datetime]:

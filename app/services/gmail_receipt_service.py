@@ -50,16 +50,25 @@ class GmailReceiptService:
             raise ValueError("gmail_receipt_sync_not_configured")
         token = self.gmail.access_token()
         headers = {"Authorization": f"Bearer {token}"}
-        messages = (
-            self._request(
-                "GET",
-                f"https://gmail.googleapis.com/gmail/v1/users/{self.settings.gmail_user_id}/messages",
-                headers=headers,
-                params={"q": self.settings.gmail_receipt_query, "maxResults": max_results},
+        checkpoint = self.db.scalar(
+            select(GmailSyncCheckpoint).where(
+                GmailSyncCheckpoint.account_key == self._checkpoint_key
             )
-            .json()
-            .get("messages", [])
         )
+        if checkpoint is None:
+            checkpoint = GmailSyncCheckpoint(account_key=self._checkpoint_key)
+            self.db.add(checkpoint)
+            self.db.flush()
+        params = {"q": self.settings.gmail_receipt_query, "maxResults": max_results}
+        if not checkpoint.initial_backfill_complete and checkpoint.backfill_page_token:
+            params["pageToken"] = checkpoint.backfill_page_token
+        response = self._request(
+            "GET",
+            f"https://gmail.googleapis.com/gmail/v1/users/{self.settings.gmail_user_id}/messages",
+            headers=headers,
+            params=params,
+        ).json()
+        messages = response.get("messages", [])
         ingested: list[PurchaseReceipt] = []
         skipped = 0
         for summary in messages:
@@ -87,14 +96,8 @@ class GmailReceiptService:
                 auto_confirm_high_confidence=True,
             )
             ingested.append(receipt)
-        checkpoint = self.db.scalar(
-            select(GmailSyncCheckpoint).where(
-                GmailSyncCheckpoint.account_key == self._checkpoint_key
-            )
-        )
-        if checkpoint is None:
-            checkpoint = GmailSyncCheckpoint(account_key=self._checkpoint_key)
-            self.db.add(checkpoint)
+        checkpoint.backfill_page_token = response.get("nextPageToken")
+        checkpoint.initial_backfill_complete = checkpoint.backfill_page_token is None
         checkpoint.updated_at = utc_now()
         self.db.commit()
         return GmailSyncResult(

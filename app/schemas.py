@@ -40,6 +40,7 @@ class TransactionOut(BaseModel):
     pending: bool
     status: str
     agent_question: str | None
+    review_notification_queued_at: datetime | None = None
     splitwise_expense_id: str | None
     splitwise_payload_json: str | None
     splitwise_amount_cents: int | None = None

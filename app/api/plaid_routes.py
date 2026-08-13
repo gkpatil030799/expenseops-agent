@@ -19,6 +19,7 @@ from app.schemas import (
 )
 from app.security import encrypt_secret
 from app.services.managed_auth_service import record_audit
+from app.services.outbox_service import enqueue_outbox_event
 from app.services.plaid_service import (
     PlaidConfigurationError,
     PlaidRequestError,
@@ -194,9 +195,20 @@ async def plaid_webhook(
 
     event.item_id = item.id
     event.processing_status = "queued"
-    _safe_commit(db)
-
-    background_tasks.add_task(_sync_item_by_db_id, item.id, event.id)
+    if get_settings().environment == "production" and event.id is not None:
+        enqueue_outbox_event(
+            db,
+            workspace_id=item.workspace_id,
+            event_type="plaid.sync_item",
+            aggregate_type="plaid_item",
+            aggregate_id=item.id,
+            dedupe_key=f"plaid-webhook:{event.id}",
+            payload={"item_id": item.id, "webhook_event_id": event.id},
+        )
+        _safe_commit(db)
+    else:
+        _safe_commit(db)
+        background_tasks.add_task(_sync_item_by_db_id, item.id, event.id)
     return WebhookAck(ok=True, message="Queued transactions sync")
 
 
@@ -334,11 +346,10 @@ def _create_plaid_webhook_event(
         payload_hash=payload_hash,
         workspace_id=linked_item.workspace_id if linked_item else None,
     )
-    if not all(hasattr(db, attr) for attr in ("add", "commit", "refresh")):
+    if not all(hasattr(db, attr) for attr in ("add", "flush")):
         return event
     db.add(event)
-    db.commit()
-    db.refresh(event)
+    db.flush()
     return event
 
 

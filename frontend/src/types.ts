@@ -14,6 +14,7 @@ export type Transaction = {
   pending: boolean;
   status: string;
   agent_question: string | null;
+  review_notification_queued_at?: string | null;
   splitwise_expense_id: string | null;
   splitwise_payload_json: string | null;
   splitwise_amount_cents?: number | null;

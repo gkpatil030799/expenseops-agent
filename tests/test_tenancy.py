@@ -503,6 +503,7 @@ def test_background_job_failure_in_one_workspace_does_not_block_another(tenant_d
 
     monkeypatch.setattr(weekly_replenishment, "SessionLocal", factory)
     monkeypatch.setattr(weekly_replenishment, "WeeklyReplenishmentService", FakeWeeklyService)
-    weekly_replenishment.main()
+    with pytest.raises(RuntimeError, match="failed_for_1_workspace"):
+        weekly_replenishment.main()
 
     assert visited == [contexts["a"].workspace_id, contexts["b"].workspace_id]

@@ -278,6 +278,52 @@ def test_capped_backfill_resumes_next_page_before_history_sync(db):
     assert gmail.requests[-1][1]["pageToken"] == "page-2"
 
 
+def test_incremental_history_page_does_not_advance_checkpoint_early(db):
+    class PagedHistoryGmail(FakeGmail):
+        def request(self, method, url, **kwargs):
+            params = kwargs.get("params", {})
+            self.requests.append((url, params))
+            if url.endswith("/messages"):
+                return FakeResponse({"messages": [], "historyId": "22"})
+            if params.get("pageToken") == "history-page-2":
+                return FakeResponse(
+                    {
+                        "history": [{"messagesAdded": [{"message": {"id": "b"}}]}],
+                        "historyId": "30",
+                    }
+                )
+            return FakeResponse(
+                {
+                    "history": [{"messagesAdded": [{"message": {"id": "a"}}]}],
+                    "historyId": "30",
+                    "nextPageToken": "history-page-2",
+                }
+            )
+
+    gmail = PagedHistoryGmail(
+        {
+            "a": message("a", "10% off laundry", ""),
+            "b": message("b", "20% off groceries", "", sender="Aldi <deals@aldi.com>"),
+        }
+    )
+    checkpoint = GmailSyncCheckpoint(
+        account_key="me:promotions",
+        history_id="22",
+        initial_backfill_complete=True,
+    )
+    db.add(checkpoint)
+    db.commit()
+    service = GmailPromotionIngestionService(db, config(), gmail)
+
+    assert service.sync(max_results=1).scanned == 1
+    assert checkpoint.history_id == "22"
+    assert checkpoint.incremental_page_token == "history-page-2"
+    assert service.sync(max_results=1).scanned == 1
+    assert gmail.requests[-1][1]["pageToken"] == "history-page-2"
+    assert checkpoint.incremental_page_token is None
+    assert checkpoint.history_id == "30"
+
+
 def test_deterministic_extraction_does_not_call_llm():
     class NeverClient:
         def post(self, *args, **kwargs):

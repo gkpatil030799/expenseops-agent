@@ -17,6 +17,7 @@ def run(max_results: int = 25) -> dict[str, int]:
     settings.validate_worker_runtime()
     with SessionLocal() as db:
         totals = {"scanned": 0, "ingested": 0, "skipped": 0}
+        failures: list[int] = []
         for context in gmail_job_contexts(db, settings):
             try:
                 enter_job_workspace(db, context.workspace_id)
@@ -26,6 +27,7 @@ def run(max_results: int = 25) -> dict[str, int]:
                 totals["skipped"] += result.skipped
             except Exception as exc:
                 db.rollback()
+                failures.append(context.workspace_id)
                 log_event(
                     logger,
                     "gmail_receipt_workspace_sync_failed",
@@ -34,6 +36,10 @@ def run(max_results: int = 25) -> dict[str, int]:
                     error_type=type(exc).__name__,
                 )
         leave_job_workspace()
+        if failures:
+            raise RuntimeError(
+                f"gmail_receipt_sync_failed_for_{len(failures)}_workspace(s)"
+            )
         return totals
 
 

@@ -16,6 +16,7 @@ logger = logging.getLogger(__name__)
 def main() -> None:
     get_settings().validate_worker_runtime()
     with SessionLocal() as db:
+        failures: list[int] = []
         for context in all_workspace_job_contexts(db, get_settings()):
             try:
                 enter_job_workspace(db, context.workspace_id)
@@ -26,6 +27,7 @@ def main() -> None:
                 )
             except Exception as exc:
                 db.rollback()
+                failures.append(context.workspace_id)
                 log_event(
                     logger,
                     "weekly_replenishment_workspace_failed",
@@ -34,6 +36,10 @@ def main() -> None:
                     error_type=type(exc).__name__,
                 )
         leave_job_workspace()
+        if failures:
+            raise RuntimeError(
+                f"weekly_replenishment_failed_for_{len(failures)}_workspace(s)"
+            )
 
 
 if __name__ == "__main__":

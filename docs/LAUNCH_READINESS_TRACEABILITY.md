@@ -38,7 +38,7 @@ visual-foundation changes began.
 | Phase 2 — UX action integrity | Complete | Structured API client; global resilience surfaces; scoped Expense, Deals, Settings, and Splitwise actions; cross-browser failure-isolation gate; checkpoint on `agent/launch-readiness` |
 | Phase 3 — identity and tenancy | In progress | Tenant-safe uniqueness and schema parity; verified OIDC email; atomic OAuth state claims; invite return/switch/wrong-account recovery; owner/member API matrix; removal/transfer; per-user Telegram and Splitwise; explicit Plaid ownership; exact connected identities. PostgreSQL RLS/request-worker role rollout remains an open exit-gate item. |
 | Phase 4 — financial correctness | In progress | Durable Splitwise create/update/delete journal, deterministic idempotency marker, atomic leases, pending-to-posted relationships, finalized-amount and removal reconciliation, valid-draft database invariant, append-only audit events, and visible Recovery UI implemented; transactional outbox moves into Phase 5 |
-| Phase 5 — durable workers | Not started | — |
+| Phase 5 — durable workers | In progress | Transactional outbox schema/service, leased retry/dead-letter worker, durable production Plaid webhook acknowledgement, post-delivery Telegram sent markers, resumable Gmail receipt/history pagination, and truthful cron failures implemented; Splitwise worker, inbound Telegram queue/dedupe, job overlap leases, provider Retry-After, and Railway worker rollout remain open |
 | Phase 6 — product-domain correctness | Not started | — |
 | Phase 7 — security and operations | Not started | — |
 | Phase 8 — GA validation and re-audit | Not started | — |
@@ -86,6 +86,23 @@ intentionally not represented as complete by the ORM isolation tests.
 Phase 4 remains in progress only because post-commit provider notifications/events must move to the
 transactional outbox introduced in Phase 5. The direct financial mutation paths, Plaid replacement,
 amount modification, reversal/removal handling, and valid-draft invariant are implemented and covered.
+
+## Phase 5 interim evidence
+
+| Check | Result |
+| --- | --- |
+| Transactional outbox | Tenant-scoped events persist payload, dedupe key, correlation, state, attempts, availability, lease, error, and completion metadata |
+| Worker recovery | PostgreSQL claims use `FOR UPDATE SKIP LOCKED`; expired leases are reclaimable; failures receive bounded exponential retry and terminal dead-letter state |
+| Plaid acknowledgement | Production webhooks commit both their webhook record and `plaid.sync_item` outbox event before returning success; local/test mode retains the immediate developer path |
+| Telegram delivery truth | Production review notifications persist a unique outbox event and queued marker; `review_notification_sent_at` is written only after Telegram reports success |
+| Gmail pagination | Receipt-list and incremental promotion-history page tokens persist between runs; history checkpoints do not advance until the final page succeeds |
+| Scheduler truth | Gmail receipt, promotion, and weekly replenishment jobs now fail the process when any tenant fails instead of logging an error and exiting successfully |
+| Worker command | `python -m app.jobs.outbox` runs continuously; `--once` supports bounded operational checks |
+| Regression gate | Backend 543 passed; Ruff passed; migration/model parity passed; frontend unit 20 passed; production build passed; lint had zero errors |
+
+Phase 5 is not complete until Splitwise mutations and inbound Telegram processing use durable workers,
+Telegram `update_id` deduplication is enforced, scheduler overlap leases are proven, provider
+`Retry-After` is honored, and the dedicated Railway worker service is configured and observed.
 
 ## V1 validation evidence
 

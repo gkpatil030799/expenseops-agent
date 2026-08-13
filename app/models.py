@@ -417,6 +417,10 @@ class ExpenseTransaction(TenantScoped, Base):
         DateTime(timezone=True),
         nullable=True,
     )
+    review_notification_queued_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
     splitwise_expense_id: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
     splitwise_payload_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     splitwise_amount_cents: Mapped[int | None] = mapped_column(Integer, nullable=True)
@@ -473,6 +477,39 @@ class FinancialOperation(TenantScoped, Base):
     request_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     error_code: Mapped[str | None] = mapped_column(String(100), nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    correlation_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class OutboxEvent(TenantScoped, Base):
+    __tablename__ = "outbox_events"
+    __table_args__ = (
+        UniqueConstraint(
+            "workspace_id", "dedupe_key", name="uq_outbox_events_workspace_dedupe"
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    workspace_id: Mapped[int] = mapped_column(
+        ForeignKey("workspaces.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    event_type: Mapped[str] = mapped_column(String(100), index=True)
+    aggregate_type: Mapped[str] = mapped_column(String(100))
+    aggregate_id: Mapped[str] = mapped_column(String(128), index=True)
+    dedupe_key: Mapped[str] = mapped_column(String(255))
+    payload_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    state: Mapped[str] = mapped_column(String(32), default="pending", index=True)
+    attempt_count: Mapped[int] = mapped_column(Integer, default=0)
+    available_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, index=True
+    )
+    lease_token: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, index=True
+    )
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
     correlation_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
@@ -917,6 +954,7 @@ class GmailSyncCheckpoint(TenantScoped, Base):
     account_key: Mapped[str] = mapped_column(String(255), index=True)
     history_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     backfill_page_token: Mapped[str | None] = mapped_column(Text, nullable=True)
+    incremental_page_token: Mapped[str | None] = mapped_column(Text, nullable=True)
     initial_backfill_complete: Mapped[bool] = mapped_column(Boolean, default=False)
     watch_expiration_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True

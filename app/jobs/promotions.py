@@ -24,6 +24,7 @@ def run(command: str) -> dict:
     settings.validate_worker_runtime()
     with SessionLocal() as db:
         results = []
+        failures: list[int] = []
         contexts = (
             gmail_job_contexts(db, settings)
             if command == "sync"
@@ -44,6 +45,7 @@ def run(command: str) -> dict:
                 results.append({"workspace_id": context.workspace_id, **value})
             except Exception as exc:
                 db.rollback()
+                failures.append(context.workspace_id)
                 log_event(
                     logger,
                     "promotion_workspace_job_failed",
@@ -53,6 +55,10 @@ def run(command: str) -> dict:
                     error_type=type(exc).__name__,
                 )
         leave_job_workspace()
+        if failures:
+            raise RuntimeError(
+                f"promotion_{command}_failed_for_{len(failures)}_workspace(s)"
+            )
         return {"workspaces": results}
 
 
