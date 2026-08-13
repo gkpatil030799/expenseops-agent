@@ -10,7 +10,7 @@ from typing import Literal
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.models import ExpenseTransaction, TransactionStatus
+from app.models import ExpenseTransaction, SplitwiseIntegration, TransactionStatus
 
 SpendBasis = Literal["card", "actual_share"]
 ReviewType = Literal["all", "personal", "shared"]
@@ -44,6 +44,7 @@ class SpendRow:
     review_type: str
     people: tuple[str, ...]
     group: str | None
+    currency_code: str
 
 
 class SpendingInsightsService:
@@ -61,6 +62,7 @@ class SpendingInsightsService:
         review_type: ReviewType = "all",
         spend_basis: SpendBasis = "card",
         granularity: Granularity = "day",
+        currency_code: str | None = None,
     ) -> dict:
         period_days = (end_date - start_date).days + 1
         previous_end = start_date - timedelta(days=1)
@@ -75,13 +77,24 @@ class SpendingInsightsService:
                 )
             )
         )
-        rows = [row for tx in transactions if (row := _to_spend_row(tx, spend_basis))]
-        current = self._filter(
+        viewer_splitwise_user_id = self._viewer_splitwise_user_id()
+        rows = [
+            row
+            for tx in transactions
+            if (row := _to_spend_row(tx, spend_basis, viewer_splitwise_user_id))
+        ]
+        scoped_current = self._filter(
             rows, start_date, end_date, account_id, category, merchant, review_type
         )
-        previous = self._filter(
+        scoped_previous = self._filter(
             rows, previous_start, previous_end, account_id, category, merchant, review_type
         )
+        available_currencies = sorted(
+            {row.currency_code for row in [*scoped_current, *scoped_previous]}
+        )
+        selected_currency = _select_currency(currency_code, available_currencies)
+        current = [row for row in scoped_current if row.currency_code == selected_currency]
+        previous = [row for row in scoped_previous if row.currency_code == selected_currency]
         current_summary = _summary(current)
         previous_summary = _summary(previous)
         categories = _breakdown(current, lambda row: row.parent_category)
@@ -97,7 +110,7 @@ class SpendingInsightsService:
             for name in ("personal", "shared")
         }
         unknown_share = sum(1 for row in current if row.selected_cents is None)
-        pending_review_cents = sum(
+        unreviewed_cents = sum(
             row.card_cents for row in current if row.tx.status == TransactionStatus.ASK_USER.value
         )
 
@@ -108,6 +121,16 @@ class SpendingInsightsService:
                 "previous_start_date": previous_start.isoformat(),
                 "previous_end_date": previous_end.isoformat(),
                 "granularity": granularity,
+            },
+            "scope": {
+                "currency": selected_currency,
+                "available_currencies": available_currencies,
+                "excluded_other_currency_transactions": sum(
+                    1 for row in scoped_current if row.currency_code != selected_currency
+                ),
+                "spend_basis": spend_basis,
+                "viewer_share_identity_connected": viewer_splitwise_user_id is not None,
+                "pending_transactions_excluded": True,
             },
             "summary": current_summary,
             "comparison": previous_summary,
@@ -126,19 +149,40 @@ class SpendingInsightsService:
                 merchants,
                 personal_shared,
                 previous,
+                selected_currency,
             ),
-            "accounts": sorted({row.tx.account_id for row in rows if row.tx.account_id}),
-            "categories": sorted({row.parent_category for row in rows}),
-            "merchants": sorted({row.merchant for row in rows}),
+            "accounts": sorted({row.tx.account_id for row in current if row.tx.account_id}),
+            "categories": sorted({row.parent_category for row in current}),
+            "merchants": sorted({row.merchant for row in current}),
             "data_quality": {
                 "unknown_share_transactions": unknown_share,
-                "pending_review_cents": pending_review_cents,
+                "unreviewed_cents": unreviewed_cents,
+                # Kept during the response-contract transition for older clients.
+                "pending_review_cents": unreviewed_cents,
                 "uncategorized_cents": _sum(
                     row for row in current if row.parent_category == "Uncategorized"
                 ),
                 "pending_transactions_excluded": True,
             },
         }
+
+    def _viewer_splitwise_user_id(self) -> int | None:
+        actor_user_id = self.db.info.get("user_id")
+        if actor_user_id is None:
+            return None
+        integration = self.db.scalar(
+            select(SplitwiseIntegration).where(
+                SplitwiseIntegration.user_id == int(actor_user_id),
+                SplitwiseIntegration.enabled.is_(True),
+                SplitwiseIntegration.verified_at.is_not(None),
+            )
+        )
+        if not integration or not integration.splitwise_user_id:
+            return None
+        try:
+            return int(integration.splitwise_user_id)
+        except (TypeError, ValueError):
+            return None
 
     @staticmethod
     def _filter(
@@ -163,7 +207,11 @@ class SpendingInsightsService:
         ]
 
 
-def _to_spend_row(tx: ExpenseTransaction, basis: SpendBasis) -> SpendRow | None:
+def _to_spend_row(
+    tx: ExpenseTransaction,
+    basis: SpendBasis,
+    viewer_splitwise_user_id: int | None,
+) -> SpendRow | None:
     category = (tx.category or "").strip()
     if any(term in category.casefold() for term in EXCLUDED_CATEGORY_TERMS):
         return None
@@ -179,7 +227,9 @@ def _to_spend_row(tx: ExpenseTransaction, basis: SpendBasis) -> SpendRow | None:
     people: tuple[str, ...] = ()
     group = None
     if review_type == "shared":
-        share, people, group = _split_details(tx.splitwise_payload_json)
+        share, people, group = _split_details(
+            tx.splitwise_payload_json, viewer_splitwise_user_id
+        )
         if basis == "actual_share":
             selected = share
     return SpendRow(
@@ -192,6 +242,7 @@ def _to_spend_row(tx: ExpenseTransaction, basis: SpendBasis) -> SpendRow | None:
         review_type=review_type,
         people=people,
         group=group,
+        currency_code=(tx.iso_currency_code or "USD").upper(),
     )
 
 
@@ -205,7 +256,10 @@ def _parent_category(category: str) -> str:
     return "Other"
 
 
-def _split_details(payload_json: str | None) -> tuple[int | None, tuple[str, ...], str | None]:
+def _split_details(
+    payload_json: str | None,
+    viewer_splitwise_user_id: int | None,
+) -> tuple[int | None, tuple[str, ...], str | None]:
     if not payload_json:
         return None, (), None
     try:
@@ -226,11 +280,21 @@ def _split_details(payload_json: str | None) -> tuple[int | None, tuple[str, ...
         except (ValueError, TypeError, InvalidOperation):
             return None, (), None
         index += 1
-    payer = next((owed for _, paid, owed in shares if paid > 0), None)
+    viewer_share = next(
+        (owed for user_id, _, owed in shares if user_id == viewer_splitwise_user_id), None
+    )
     people = ("Unknown Splitwise contact",) if any(paid == 0 for _, paid, _ in shares) else ()
     group_id = payload.get("group_id")
     group = f"Group {group_id}" if group_id not in (None, 0, "0") else None
-    return (int(payer * 100) if payer is not None else None), people, group
+    return (int(viewer_share * 100) if viewer_share is not None else None), people, group
+
+
+def _select_currency(requested: str | None, available: list[str]) -> str:
+    if requested and requested.strip():
+        return requested.strip().upper()
+    if "USD" in available:
+        return "USD"
+    return available[0] if available else "USD"
 
 
 def _value(row: SpendRow) -> int:
@@ -244,10 +308,16 @@ def _sum(rows) -> int:
 def _summary(rows: list[SpendRow]) -> dict[str, int]:
     known = [row for row in rows if row.selected_cents is not None]
     total = _sum(known)
+    personal = _sum(row for row in known if row.review_type == "personal")
+    shared = _sum(row for row in known if row.review_type == "shared")
+    unreviewed = _sum(row for row in known if row.review_type == "unreviewed")
     return {
         "total_cents": total,
-        "personal_cents": _sum(row for row in known if row.review_type == "personal"),
-        "shared_cents": _sum(row for row in known if row.review_type == "shared"),
+        "personal_cents": personal,
+        "shared_cents": shared,
+        "classified_cents": personal + shared,
+        "unreviewed_cents": unreviewed,
+        "refund_cents": _sum(row for row in known if _value(row) < 0),
         "transaction_count": len(known),
         "average_cents": round(total / len(known)) if known else 0,
     }
@@ -261,14 +331,18 @@ def _breakdown(rows: list[SpendRow], key) -> list[dict]:
         name = key(row)
         values[name]["amount"] += _value(row)
         values[name]["count"] += 1
-    total = sum(value["amount"] for value in values.values())
+    magnitude_total = sum(abs(value["amount"]) for value in values.values())
     return sorted(
         [
             {
                 "name": name,
                 "amount_cents": value["amount"],
                 "transaction_count": value["count"],
-                "percentage": round(value["amount"] / total * 100, 1) if total else 0,
+                "percentage": (
+                    round(abs(value["amount"]) / magnitude_total * 100, 1)
+                    if magnitude_total
+                    else 0
+                ),
             }
             for name, value in values.items()
         ],
@@ -337,7 +411,15 @@ def _shared_breakdown(rows: list[SpendRow], mode: str) -> list[dict]:
     ]
 
 
-def _notable_changes(current, previous, categories, merchants, personal_shared, previous_rows):
+def _notable_changes(
+    current,
+    previous,
+    categories,
+    merchants,
+    personal_shared,
+    previous_rows,
+    currency_code,
+):
     notes: list[dict] = []
     previous_breakdown = _breakdown(previous_rows, lambda row: row.parent_category)
     previous_categories = {item["name"]: item["amount_cents"] for item in previous_breakdown}
@@ -358,7 +440,8 @@ def _notable_changes(current, previous, categories, merchants, personal_shared, 
                     "label": item["name"],
                     "amount_cents": delta,
                     "detail": (
-                        f'{"+" if delta > 0 else "-"}${abs(delta) / 100:,.0f} '
+                        f'{"+" if delta > 0 else "-"}{currency_code} '
+                        f'{abs(delta) / 100:,.0f} '
                         "vs previous period"
                     ),
                 }
@@ -371,7 +454,10 @@ def _notable_changes(current, previous, categories, merchants, personal_shared, 
                 "direction": "neutral",
                 "label": merchant["name"],
                 "amount_cents": merchant["amount_cents"],
-                "detail": f'Top merchant · ${merchant["amount_cents"] / 100:,.0f}',
+                "detail": (
+                    f'Top merchant · {currency_code} '
+                    f'{merchant["amount_cents"] / 100:,.0f}'
+                ),
             }
         )
 

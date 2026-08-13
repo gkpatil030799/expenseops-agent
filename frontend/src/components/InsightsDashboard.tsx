@@ -33,6 +33,9 @@ type Summary = {
   total_cents: number;
   personal_cents: number;
   shared_cents: number;
+  classified_cents: number;
+  unreviewed_cents: number;
+  refund_cents: number;
   transaction_count: number;
   average_cents: number;
 };
@@ -61,6 +64,14 @@ type Insights = {
     previous_end_date: string;
     granularity: "day" | "week" | "month";
   };
+  scope: {
+    currency: string;
+    available_currencies: string[];
+    excluded_other_currency_transactions: number;
+    spend_basis: string;
+    viewer_share_identity_connected: boolean;
+    pending_transactions_excluded: boolean;
+  };
   summary: Summary;
   comparison: Summary;
   trend: Trend[];
@@ -83,6 +94,7 @@ type Insights = {
   merchants: string[];
   data_quality: {
     unknown_share_transactions: number;
+    unreviewed_cents: number;
     pending_review_cents: number;
     uncategorized_cents: number;
     pending_transactions_excluded: boolean;
@@ -112,6 +124,7 @@ export function InsightsDashboard() {
   const [merchantInput, setMerchantInput] = useState("");
   const [reviewType, setReviewType] = useState("all");
   const [basis, setBasis] = useState("card");
+  const [currency, setCurrency] = useState("");
   const [data, setData] = useState<Insights | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -140,6 +153,7 @@ export function InsightsDashboard() {
     if (account) params.set("account_id", account);
     if (category) params.set("category", category);
     if (merchant) params.set("merchant", merchant);
+    if (currency) params.set("currency_code", currency);
 
     api<Insights>(`/api/insights/spending?${params}`, { signal: controller.signal })
       .then(setData)
@@ -152,7 +166,7 @@ export function InsightsDashboard() {
         if (!controller.signal.aborted) setLoading(false);
       });
     return () => controller.abort();
-  }, [start, end, account, category, merchant, reviewType, basis, reloadToken]);
+  }, [start, end, account, category, merchant, reviewType, basis, currency, reloadToken]);
 
   function choosePreset(value: DatePreset) {
     setPreset(value);
@@ -171,12 +185,13 @@ export function InsightsDashboard() {
     setMerchantInput("");
     setReviewType("all");
     setBasis("card");
+    setCurrency("");
   }
 
   const filtered = Boolean(
-    preset !== "30d" || account || category || merchant || reviewType !== "all" || basis !== "card",
+    preset !== "30d" || account || category || merchant || reviewType !== "all" || basis !== "card" || currency,
   );
-  const activeFilterCount = [account, category, merchant, reviewType !== "all", basis !== "card"].filter(Boolean).length;
+  const activeFilterCount = [account, category, merchant, reviewType !== "all", basis !== "card", currency].filter(Boolean).length;
 
   if (error && !data) {
     return (
@@ -200,6 +215,7 @@ export function InsightsDashboard() {
         merchantInput={merchantInput}
         reviewType={reviewType}
         basis={basis}
+        currency={currency}
         data={data}
         filtered={filtered}
         activeFilterCount={activeFilterCount}
@@ -212,6 +228,7 @@ export function InsightsDashboard() {
         setMerchantInput={setMerchantInput}
         setReviewType={setReviewType}
         setBasis={setBasis}
+        setCurrency={setCurrency}
         clearFilters={clearFilters}
       />
 
@@ -226,7 +243,7 @@ export function InsightsDashboard() {
 
       {loading && !data ? (
         <DashboardSkeleton />
-      ) : data && data.summary.transaction_count ? (
+      ) : data && (data.summary.transaction_count || data.data_quality.unknown_share_transactions) ? (
         <InsightsContent
           data={data}
           basis={basis}
@@ -259,6 +276,7 @@ type ControlsProps = {
   merchantInput: string;
   reviewType: string;
   basis: string;
+  currency: string;
   data: Insights | null;
   filtered: boolean;
   activeFilterCount: number;
@@ -271,10 +289,15 @@ type ControlsProps = {
   setMerchantInput: (value: string) => void;
   setReviewType: (value: string) => void;
   setBasis: (value: string) => void;
+  setCurrency: (value: string) => void;
   clearFilters: () => void;
 };
 
 function InsightsControls(props: ControlsProps) {
+  const currencyOptions = Array.from(new Set([
+    props.data?.scope.currency || "USD",
+    ...(props.data?.scope.available_currencies || []),
+  ])).sort();
   return (
     <Card variant="primary" className="z-10 bg-white/95 backdrop-blur lg:sticky lg:top-2 lg:shadow-md">
       <CardContent className="space-y-3 p-4">
@@ -323,13 +346,21 @@ function InsightsControls(props: ControlsProps) {
             <ChevronDown className="h-4 w-4 text-slate-500 transition-transform group-open:rotate-180" />
           </summary>
           <div className="border-t border-slate-200 p-3">
-            <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-5">
+            <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-6">
               <Select label="Account" value={props.account} onChange={props.setAccount} options={props.data?.accounts || []} all="All accounts" />
               <Select label="Category" value={props.category} onChange={props.setCategory} options={props.data?.categories || []} all="All categories" />
               <label className="grid gap-1 text-xs font-semibold text-slate-700">
                 Merchant
                 <Input value={props.merchantInput} onChange={(event) => props.setMerchantInput(event.target.value)} placeholder="All merchants" />
               </label>
+              <Select
+                label="Currency"
+                value={props.currency || props.data?.scope.currency || "USD"}
+                onChange={props.setCurrency}
+                options={currencyOptions}
+                all="Currency"
+                includeAll={false}
+              />
               <Select label="Type" value={props.reviewType} onChange={props.setReviewType} options={["personal", "shared"]} all="All types" />
               <label className="grid gap-1 text-xs font-semibold text-slate-700">
                 Spending basis
@@ -350,6 +381,7 @@ function InsightsControls(props: ControlsProps) {
             {props.merchant ? <Chip label={`Merchant: ${props.merchant}`} onRemove={() => { props.setMerchant(""); props.setMerchantInput(""); }} /> : null}
             {props.reviewType !== "all" ? <Chip label={`Type: ${title(props.reviewType)}`} onRemove={() => props.setReviewType("all")} /> : null}
             {props.basis !== "card" ? <Chip label="Basis: My actual share" onRemove={() => props.setBasis("card")} /> : null}
+            {props.currency ? <Chip label={`Currency: ${props.currency}`} onRemove={() => props.setCurrency("")} /> : null}
             <Button variant="ghost" size="sm" onClick={props.clearFilters}><X className="h-4 w-4" />Clear all</Button>
           </div>
         ) : null}
@@ -376,6 +408,7 @@ type ContentProps = {
 
 function InsightsContent(props: ContentProps) {
   const { data } = props;
+  const currency = data.scope.currency;
   const currentRange = formatRange(data.range.start_date, data.range.end_date);
   const previousRange = formatRange(data.range.previous_start_date, data.range.previous_end_date);
   const sharedItems = props.sharedMode === "people" ? data.shared_people : data.shared_groups;
@@ -387,7 +420,7 @@ function InsightsContent(props: ContentProps) {
           <CalendarRange className="h-4 w-4 text-indigo-600" />
           {currentRange}
         </span>
-        <span>Compared with {previousRange} · Displayed as USD; no currency conversion applied</span>
+        <span>Compared with {previousRange} · {currency} only · no currency conversion</span>
       </div>
 
       {props.basis === "actual_share" && data.data_quality.unknown_share_transactions ? (
@@ -395,8 +428,17 @@ function InsightsContent(props: ContentProps) {
           {data.data_quality.unknown_share_transactions} shared transaction{data.data_quality.unknown_share_transactions === 1 ? " has" : "s have"} no confirmed share and {data.data_quality.unknown_share_transactions === 1 ? "is" : "are"} excluded from this view.
         </DataNotice>
       ) : null}
-      {data.data_quality.pending_review_cents >= 10_000 ? (
-        <DataNotice>{money(data.data_quality.pending_review_cents)} is awaiting review and may change classified totals.</DataNotice>
+      {props.basis === "actual_share" && !data.scope.viewer_share_identity_connected ? (
+        <DataNotice tone="warning">Connect and verify your own Splitwise account to calculate My actual share. ExpenseOps will not guess from another payer.</DataNotice>
+      ) : null}
+      {data.scope.excluded_other_currency_transactions ? (
+        <DataNotice>{data.scope.excluded_other_currency_transactions} transaction{data.scope.excluded_other_currency_transactions === 1 ? " is" : "s are"} excluded because this view is limited to {currency}.</DataNotice>
+      ) : null}
+      {data.data_quality.unreviewed_cents ? (
+        <DataNotice>{money(data.data_quality.unreviewed_cents, currency)} is unreviewed and shown separately from Personal and Shared.</DataNotice>
+      ) : null}
+      {data.summary.refund_cents ? (
+        <DataNotice>{money(Math.abs(data.summary.refund_cents), currency)} in refunds is included as a credit in Total spend.</DataNotice>
       ) : null}
       {data.data_quality.pending_transactions_excluded ? (
         <p className="text-xs text-slate-500">Bank-pending transactions are excluded. Personal and Shared include only classified transactions.</p>
@@ -411,14 +453,18 @@ function InsightsContent(props: ContentProps) {
             previous={data.comparison.total_cents}
             featured
             comparisonRange={previousRange}
+            currency={currency}
           />
           <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-            <Kpi label="Personal" value={data.summary.personal_cents} previous={data.comparison.personal_cents} comparisonRange={previousRange} />
-            <Kpi label="Shared" value={data.summary.shared_cents} previous={data.comparison.shared_cents} comparisonRange={previousRange} />
-            <Kpi label="Transactions" raw={String(data.summary.transaction_count)} previousRaw={data.comparison.transaction_count} comparisonRange={previousRange} />
-            <Kpi label="Average" value={data.summary.average_cents} previous={data.comparison.average_cents} comparisonRange={previousRange} />
+            <Kpi label="Personal" value={data.summary.personal_cents} previous={data.comparison.personal_cents} comparisonRange={previousRange} currency={currency} />
+            <Kpi label="Shared" value={data.summary.shared_cents} previous={data.comparison.shared_cents} comparisonRange={previousRange} currency={currency} />
+            <Kpi label="Unreviewed" value={data.summary.unreviewed_cents} previous={data.comparison.unreviewed_cents} comparisonRange={previousRange} currency={currency} />
+            <Kpi label="Transactions" raw={String(data.summary.transaction_count)} previousRaw={data.comparison.transaction_count} comparisonRange={previousRange} currency={currency} />
           </div>
         </div>
+        <p className="mt-2 text-xs text-slate-600">
+          Total {money(data.summary.total_cents, currency)} = Personal {money(data.summary.personal_cents, currency)} + Shared {money(data.summary.shared_cents, currency)} + Unreviewed {money(data.summary.unreviewed_cents, currency)}. Refunds are already netted.
+        </p>
       </section>
 
       <ChartCard title="What changed" eyebrow={`Compared with ${previousRange}`}>
@@ -430,12 +476,12 @@ function InsightsContent(props: ContentProps) {
         eyebrow={`${currentRange} · ${data.range.granularity} view`}
         action={<Toggle values={["total", "split"]} labels={["Total", "Personal / shared"]} value={props.trendMode} onChange={(value) => props.setTrendMode(value as "total" | "split")} />}
       >
-        <LineChart values={data.trend} split={props.trendMode === "split"} granularity={data.range.granularity} />
+        <LineChart values={data.trend} split={props.trendMode === "split"} granularity={data.range.granularity} currency={currency} />
       </ChartCard>
 
       <div className="grid gap-5 xl:grid-cols-[minmax(0,1.15fr)_minmax(0,0.85fr)]">
         <ChartCard title="Where the money went" eyebrow="Category composition">
-          <Donut items={data.category_breakdown} total={data.summary.total_cents} onSelect={props.setCategory} />
+          <Donut items={data.category_breakdown} total={data.summary.total_cents} onSelect={props.setCategory} currency={currency} />
         </ChartCard>
         <ChartCard
           title="Top merchants"
@@ -446,23 +492,24 @@ function InsightsContent(props: ContentProps) {
             items={data.merchant_breakdown.slice(0, props.topCount)}
             showCounts
             onSelect={(value) => { props.setMerchant(value); props.setMerchantInput(value); }}
+            currency={currency}
           />
         </ChartCard>
       </div>
 
       {props.category ? (
         <ChartCard title={`${props.category} detail`} eyebrow="Source categories">
-          <Bars items={data.subcategory_breakdown} onSelect={() => undefined} interactive={false} />
+          <Bars items={data.subcategory_breakdown} onSelect={() => undefined} interactive={false} currency={currency} />
         </ChartCard>
       ) : null}
 
       <ChartCard title="Category trend" eyebrow="How category mix changed over time">
-        <CategoryTrend values={data.category_trend} granularity={data.range.granularity} />
+        <CategoryTrend values={data.category_trend} granularity={data.range.granularity} currency={currency} />
       </ChartCard>
 
       <section className="grid gap-5 lg:grid-cols-2" aria-label="Shared spending detail">
         <ChartCard title="Personal and shared" eyebrow="Classified card spend">
-          <StackedSplit values={data.personal_shared} onSelect={props.setReviewType} />
+          <StackedSplit values={data.personal_shared} onSelect={props.setReviewType} currency={currency} />
         </ChartCard>
         <ChartCard
           title="Shared with"
@@ -470,7 +517,7 @@ function InsightsContent(props: ContentProps) {
           action={<Toggle values={["people", "groups"]} labels={["People", "Groups"]} value={props.sharedMode} onChange={(value) => props.setSharedMode(value as "people" | "groups")} />}
         >
           {sharedItems.length ? (
-            <Bars items={sharedItems.slice(0, 10)} onSelect={() => undefined} interactive={false} />
+            <Bars items={sharedItems.slice(0, 10)} onSelect={() => undefined} interactive={false} currency={currency} />
           ) : (
             <p className="py-8 text-center text-sm text-slate-600">No shared spending in this period.</p>
           )}
@@ -488,6 +535,7 @@ function Kpi({
   previousRaw,
   featured = false,
   comparisonRange,
+  currency,
 }: {
   label: string;
   value?: number;
@@ -496,15 +544,16 @@ function Kpi({
   previousRaw?: number;
   featured?: boolean;
   comparisonRange: string;
+  currency: string;
 }) {
   const current = value ?? Number(raw || 0);
   const prior = previous ?? previousRaw;
-  const comparison = prior === undefined ? null : raw ? countComparison(current, prior) : comparisonText(current, prior);
+  const comparison = prior === undefined ? null : raw ? countComparison(current, prior) : comparisonText(current, prior, currency);
   return (
     <Card variant={featured ? "command" : "primary"} className={featured ? "overflow-hidden" : ""}>
       <CardContent className={featured ? "flex min-h-40 flex-col justify-between p-5" : "min-h-32 p-4"}>
         <p className={`text-xs font-semibold uppercase tracking-[0.12em] ${featured ? "text-indigo-200" : "text-slate-600"}`}>{label}</p>
-        <p className={`mt-2 font-semibold tabular-nums ${featured ? "text-4xl sm:text-5xl" : "text-2xl text-slate-950"}`}>{raw || money(value || 0)}</p>
+        <p className={`mt-2 font-semibold tabular-nums ${featured ? "text-4xl sm:text-5xl" : "text-2xl text-slate-950"}`}>{raw || money(value || 0, currency)}</p>
         <div className={`mt-2 text-xs ${featured ? "text-slate-300" : "text-slate-600"}`}>
           {comparison ? (
             <p>{comparison.primary}{comparison.secondary ? ` ${comparison.secondary}` : ""}</p>
@@ -540,6 +589,7 @@ function Bars({
   showCounts = false,
   total = 0,
   interactive = true,
+  currency,
 }: {
   items: Breakdown[];
   onSelect: (name: string) => void;
@@ -547,6 +597,7 @@ function Bars({
   showCounts?: boolean;
   total?: number;
   interactive?: boolean;
+  currency: string;
 }) {
   const max = Math.max(1, ...items.map((value) => Math.abs(value.amount_cents)));
   return (
@@ -556,17 +607,17 @@ function Bars({
           <>
             <span className="flex justify-between gap-3 text-sm">
               <span className="truncate font-medium text-slate-800">{item.name}</span>
-              <span className="shrink-0 tabular-nums text-slate-900">{money(item.amount_cents)}</span>
+              <span className="shrink-0 tabular-nums text-slate-900">{money(item.amount_cents, currency)}</span>
             </span>
             {showCounts && item.transaction_count ? <span className="mt-0.5 block text-xs text-slate-500">{item.transaction_count} transaction{item.transaction_count === 1 ? "" : "s"}</span> : null}
             <span className="mt-1.5 block h-2 overflow-hidden rounded-full bg-slate-100">
               <span className="block h-full rounded-full bg-indigo-600" style={{ width: `${Math.max(2, Math.abs(item.amount_cents) / max * 100)}%` }} />
             </span>
-            {comparison && meaningfulChange(item.amount_cents, item.previous_amount_cents || 0, total) ? <span className="mt-1 block text-xs text-slate-500">{signedMoney(item.amount_cents - (item.previous_amount_cents || 0))} vs previous period</span> : null}
+            {comparison && meaningfulChange(item.amount_cents, item.previous_amount_cents || 0, total) ? <span className="mt-1 block text-xs text-slate-500">{signedMoney(item.amount_cents - (item.previous_amount_cents || 0), currency)} vs previous period</span> : null}
           </>
         );
         return interactive ? (
-          <button type="button" role="listitem" key={item.name} onClick={() => onSelect(item.name)} className="block min-h-11 w-full rounded-lg p-2 text-left hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500" aria-label={`${item.name}, ${money(item.amount_cents)}. Filter by ${item.name}.`}>
+          <button type="button" role="listitem" key={item.name} onClick={() => onSelect(item.name)} className="block min-h-11 w-full rounded-lg p-2 text-left hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500" aria-label={`${item.name}, ${money(item.amount_cents, currency)}. Filter by ${item.name}.`}>
             {content}
           </button>
         ) : (
@@ -577,33 +628,33 @@ function Bars({
   );
 }
 
-function Donut({ items, total, onSelect }: { items: Breakdown[]; total: number; onSelect: (name: string) => void }) {
+function Donut({ items, total, onSelect, currency }: { items: Breakdown[]; total: number; onSelect: (name: string) => void; currency: string }) {
   const grouped = groupSmallCategories(items);
-  const groupedTotal = grouped.reduce((sum, item) => sum + item.amount_cents, 0);
+  const groupedTotal = grouped.reduce((sum, item) => sum + Math.abs(item.amount_cents), 0);
   let offset = 0;
   const gradient = grouped.map((item) => {
     const start = offset;
-    offset += groupedTotal ? item.amount_cents / groupedTotal * 100 : 0;
+    offset += groupedTotal ? Math.abs(item.amount_cents) / groupedTotal * 100 : 0;
     return `${categoryColor(item.name)} ${start}% ${offset}%`;
   }).join(",");
 
   return (
     <div className="grid items-center gap-5 sm:grid-cols-[180px_1fr]">
-      <div className="relative mx-auto h-40 w-40 rounded-full" style={{ background: `conic-gradient(${gradient})` }} role="img" aria-label={`Category composition. ${money(total)} total.`}>
+      <div className="relative mx-auto h-40 w-40 rounded-full" style={{ background: `conic-gradient(${gradient})` }} role="img" aria-label={`Category composition. ${money(total, currency)} total.`}>
         <div className="absolute inset-6 flex flex-col items-center justify-center rounded-full bg-white text-center">
-          <strong className="text-lg tabular-nums text-slate-950">{money(total)}</strong>
+          <strong className="text-lg tabular-nums text-slate-950">{money(total, currency)}</strong>
           <span className="text-xs text-slate-500">Total</span>
         </div>
       </div>
       <div className="space-y-1">
         {grouped.map((item) => {
-          const percentage = groupedTotal ? Math.round(item.amount_cents / groupedTotal * 100) : 0;
+          const percentage = groupedTotal ? Math.round(Math.abs(item.amount_cents) / groupedTotal * 100) : 0;
           const label = item.name === "Other" ? "Other categories" : item.name;
-          const content = <><span className="flex min-w-0 items-center gap-2"><span className="h-2.5 w-2.5 shrink-0 rounded-sm" style={{ backgroundColor: categoryColor(item.name) }} /><span className="truncate">{label}</span></span><span className="shrink-0 tabular-nums text-slate-600">{money(item.amount_cents)} · {percentage}%</span></>;
+          const content = <><span className="flex min-w-0 items-center gap-2"><span className="h-2.5 w-2.5 shrink-0 rounded-sm" style={{ backgroundColor: categoryColor(item.name) }} /><span className="truncate">{label}</span></span><span className="shrink-0 tabular-nums text-slate-600">{money(item.amount_cents, currency)} · {percentage}%</span></>;
           return item.name === "Other" ? (
             <div key={item.name} className="flex min-h-11 w-full items-center justify-between gap-3 rounded-lg px-2 text-sm">{content}</div>
           ) : (
-            <button key={item.name} type="button" onClick={() => onSelect(item.name)} className="flex min-h-11 w-full items-center justify-between gap-3 rounded-lg px-2 text-sm hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500" aria-label={`${item.name}, ${money(item.amount_cents)}, ${percentage}%. Filter by category.`}>{content}</button>
+            <button key={item.name} type="button" onClick={() => onSelect(item.name)} className="flex min-h-11 w-full items-center justify-between gap-3 rounded-lg px-2 text-sm hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500" aria-label={`${item.name}, ${money(item.amount_cents, currency)}, ${percentage}%. Filter by category.`}>{content}</button>
           );
         })}
       </div>
@@ -611,15 +662,21 @@ function Donut({ items, total, onSelect }: { items: Breakdown[]; total: number; 
   );
 }
 
-function LineChart({ values, split, granularity }: { values: Trend[]; split: boolean; granularity: "day" | "week" | "month" }) {
-  const ticks = axisTicks(Math.max(1, ...values.map((value) => value.total_cents)));
-  const ceiling = ticks.at(-1) || 1;
+function LineChart({ values, split, granularity, currency }: { values: Trend[]; split: boolean; granularity: "day" | "week" | "month"; currency: string }) {
+  const plottedValues = values.flatMap((value) => split
+    ? [value.personal_cents, value.shared_cents]
+    : [value.total_cents]);
+  const floor = Math.min(0, ...plottedValues);
+  const rawCeiling = Math.max(0, ...plottedValues);
+  const rangeTicks = axisTicks(Math.max(1, rawCeiling - floor));
+  const ceiling = floor + (rangeTicks.at(-1) || 1);
+  const ticks = rangeTicks.map((tick) => floor + tick);
   const left = 58;
   const right = 620;
   const top = 18;
   const bottom = 238;
   const x = (index: number) => values.length === 1 ? (left + right) / 2 : left + index / (values.length - 1) * (right - left);
-  const y = (amount: number) => bottom - amount / ceiling * (bottom - top);
+  const y = (amount: number) => bottom - (amount - floor) / (ceiling - floor) * (bottom - top);
   const points = (key: keyof Trend) => values.map((value, index) => `${x(index)},${y(Number(value[key]))}`).join(" ");
   const dateTicks = xTickIndexes(values.length);
 
@@ -632,14 +689,14 @@ function LineChart({ values, split, granularity }: { values: Trend[]; split: boo
       </div>
       <div className="min-h-[260px] w-full overflow-hidden">
         <svg viewBox="0 0 640 280" className="h-[260px] w-full sm:h-[300px]" role="img" aria-label={`Spend over time, ${split ? "personal and shared series" : "total series"}`}>
-          {ticks.map((tick) => <g key={tick}><line x1={left} x2={right} y1={y(tick)} y2={y(tick)} stroke="#e2e8f0" /><text x={left - 8} y={y(tick) + 4} textAnchor="end" fontSize="11" fill="#64748b">{money(tick)}</text></g>)}
+          {ticks.map((tick) => <g key={tick}><line x1={left} x2={right} y1={y(tick)} y2={y(tick)} stroke="#e2e8f0" /><text x={left - 8} y={y(tick) + 4} textAnchor="end" fontSize="11" fill="#64748b">{money(tick, currency)}</text></g>)}
           {split ? (
             <><polyline points={points("personal_cents")} fill="none" stroke="#475569" strokeWidth="3" /><polyline points={points("shared_cents")} fill="none" stroke="#4f46e5" strokeWidth="3" /></>
           ) : <polyline points={points("total_cents")} fill="none" stroke="#4f46e5" strokeWidth="3" />}
           {values.map((value, index) => {
             const label = split
-              ? `${dateLabel(value.period, granularity, true)}. Personal ${money(value.personal_cents)}. Shared ${money(value.shared_cents)}. Total ${money(value.total_cents)}. ${value.transactions} transactions.`
-              : `${dateLabel(value.period, granularity, true)}. Total spend ${money(value.total_cents)}. ${value.transactions} transactions.`;
+              ? `${dateLabel(value.period, granularity, true)}. Personal ${money(value.personal_cents, currency)}. Shared ${money(value.shared_cents, currency)}. Total ${money(value.total_cents, currency)}. ${value.transactions} transactions.`
+              : `${dateLabel(value.period, granularity, true)}. Total spend ${money(value.total_cents, currency)}. ${value.transactions} transactions.`;
             return (
               <g key={value.period} role="img" tabIndex={0} aria-label={label} className="outline-none focus:[&_circle]:stroke-indigo-950 focus:[&_circle]:stroke-[3px]">
                 {split ? (
@@ -651,31 +708,31 @@ function LineChart({ values, split, granularity }: { values: Trend[]; split: boo
           {dateTicks.map((index) => <text key={values[index].period} x={x(index)} y="264" textAnchor="middle" fontSize="10" fill="#64748b">{dateLabel(values[index].period, granularity)}</text>)}
         </svg>
       </div>
-      <DataTable summary="View spending data table" headers={["Period", "Total", "Personal", "Shared", "Transactions"]} rows={values.map((value) => [dateLabel(value.period, granularity, true), money(value.total_cents), money(value.personal_cents), money(value.shared_cents), String(value.transactions)])} />
+      <DataTable summary="View spending data table" headers={["Period", "Total", "Personal", "Shared", "Transactions"]} rows={values.map((value) => [dateLabel(value.period, granularity, true), money(value.total_cents, currency), money(value.personal_cents, currency), money(value.shared_cents, currency), String(value.transactions)])} />
     </div>
   );
 }
 
-function StackedSplit({ values, onSelect }: { values: { personal: number; shared: number }; onSelect: (value: string) => void }) {
-  const total = values.personal + values.shared;
-  const personal = total ? Math.round(values.personal / total * 100) : 0;
-  const shared = total ? 100 - personal : 0;
-  if (!total) return <p className="py-8 text-center text-sm text-slate-600">No classified personal or shared spending in this period.</p>;
+function StackedSplit({ values, onSelect, currency }: { values: { personal: number; shared: number }; onSelect: (value: string) => void; currency: string }) {
+  const magnitudeTotal = Math.abs(values.personal) + Math.abs(values.shared);
+  const personal = magnitudeTotal ? Math.round(Math.abs(values.personal) / magnitudeTotal * 100) : 0;
+  const shared = magnitudeTotal ? 100 - personal : 0;
+  if (!magnitudeTotal) return <p className="py-8 text-center text-sm text-slate-600">No classified personal or shared spending in this period.</p>;
   return (
     <div className="space-y-3">
       <div className="flex h-11 overflow-hidden rounded-lg" aria-label={`Personal ${personal}%, Shared ${shared}%`}>
-        <button type="button" onClick={() => onSelect("personal")} aria-label={`Filter Personal, ${money(values.personal)}, ${personal}%`} className="bg-slate-600 text-xs font-semibold text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-white" style={{ width: `${personal}%` }}>{personal >= 15 ? `Personal ${personal}%` : null}</button>
-        <button type="button" onClick={() => onSelect("shared")} aria-label={`Filter Shared, ${money(values.shared)}, ${shared}%`} className="bg-indigo-600 text-xs font-semibold text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-white" style={{ width: `${shared}%` }}>{shared >= 15 ? `Shared ${shared}%` : null}</button>
+        <button type="button" onClick={() => onSelect("personal")} aria-label={`Filter Personal, ${money(values.personal, currency)}, ${personal}%`} className="bg-slate-600 text-xs font-semibold text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-white" style={{ width: `${personal}%` }}>{personal >= 15 ? `Personal ${personal}%` : null}</button>
+        <button type="button" onClick={() => onSelect("shared")} aria-label={`Filter Shared, ${money(values.shared, currency)}, ${shared}%`} className="bg-indigo-600 text-xs font-semibold text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-white" style={{ width: `${shared}%` }}>{shared >= 15 ? `Shared ${shared}%` : null}</button>
       </div>
       <div className="flex flex-col justify-between gap-2 text-sm text-slate-700 sm:flex-row">
-        <button type="button" onClick={() => onSelect("personal")} className="min-h-11 rounded-lg px-2 text-left hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500"><Legend color="#475569" label={`Personal ${personal}% · ${money(values.personal)}`} /></button>
-        <button type="button" onClick={() => onSelect("shared")} className="min-h-11 rounded-lg px-2 text-left hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500"><Legend color="#4f46e5" label={`Shared ${shared}% · ${money(values.shared)}`} /></button>
+        <button type="button" onClick={() => onSelect("personal")} className="min-h-11 rounded-lg px-2 text-left hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500"><Legend color="#475569" label={`Personal ${personal}% · ${money(values.personal, currency)}`} /></button>
+        <button type="button" onClick={() => onSelect("shared")} className="min-h-11 rounded-lg px-2 text-left hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500"><Legend color="#4f46e5" label={`Shared ${shared}% · ${money(values.shared, currency)}`} /></button>
       </div>
     </div>
   );
 }
 
-function CategoryTrend({ values, granularity }: { values: { period: string; categories: Record<string, number> }[]; granularity: "day" | "week" | "month" }) {
+function CategoryTrend({ values, granularity, currency }: { values: { period: string; categories: Record<string, number> }[]; granularity: "day" | "week" | "month"; currency: string }) {
   const aggregate = new Map<string, number>();
   values.forEach((value) => Object.entries(value.categories).forEach(([name, amount]) => aggregate.set(name, (aggregate.get(name) || 0) + amount)));
   const grouped = groupSmallCategories([...aggregate].map(([name, amount_cents]) => ({ name, amount_cents })), 6);
@@ -691,18 +748,19 @@ function CategoryTrend({ values, granularity }: { values: { period: string; cate
     return { ...value, categories };
   });
   const totals = normalized.map((value) => Object.values(value.categories).reduce((sum, amount) => sum + amount, 0));
-  const max = Math.max(1, ...totals);
+  const magnitudes = normalized.map((value) => Object.values(value.categories).reduce((sum, amount) => sum + Math.abs(amount), 0));
+  const max = Math.max(1, ...magnitudes);
 
   if (!values.length) return <p className="py-8 text-center text-sm text-slate-600">No category trend is available for this period.</p>;
   return (
     <div>
       <div className="hidden h-72 items-end gap-1.5 sm:flex" role="img" aria-label="Stacked category composition over time">
         {normalized.map((value, index) => {
-          const label = [dateLabel(value.period, granularity, true), ...names.filter((name) => value.categories[name]).map((name) => `${name}: ${money(value.categories[name])}`), `Total: ${money(totals[index])}`].join(". ");
+          const label = [dateLabel(value.period, granularity, true), ...names.filter((name) => value.categories[name]).map((name) => `${name}: ${money(value.categories[name], currency)}`), `Total: ${money(totals[index], currency)}`].join(". ");
           return (
             <div key={value.period} tabIndex={0} className="group flex h-full min-w-0 flex-1 flex-col justify-end rounded-sm outline-none focus-visible:ring-2 focus-visible:ring-indigo-500" aria-label={label}>
-              <span className="flex w-full flex-col-reverse overflow-hidden rounded-t" style={{ height: `${totals[index] / max * 100}%` }}>
-                {names.map((name) => <span key={name} style={{ height: `${totals[index] ? (value.categories[name] || 0) / totals[index] * 100 : 0}%`, backgroundColor: categoryColor(name) }} />)}
+              <span className="flex w-full flex-col-reverse overflow-hidden rounded-t" style={{ height: `${magnitudes[index] / max * 100}%` }}>
+                {names.map((name) => <span key={name} style={{ height: `${magnitudes[index] ? Math.abs(value.categories[name] || 0) / magnitudes[index] * 100 : 0}%`, backgroundColor: categoryColor(name) }} />)}
               </span>
               <span className="mt-1 truncate text-center text-[10px] text-slate-500">{dateLabel(value.period, granularity)}</span>
             </div>
@@ -717,13 +775,13 @@ function CategoryTrend({ values, granularity }: { values: { period: string; cate
           return (
             <div key={value.period} role="listitem" className="flex items-center justify-between gap-3 rounded-lg bg-slate-50 px-3 py-2 text-sm">
               <span><strong className="block text-slate-800">{dateLabel(value.period, granularity, true)}</strong><span className="text-xs text-slate-500">Top: {leader?.name || "No category"}</span></span>
-              <span className="shrink-0 font-semibold tabular-nums text-slate-900">{money(totals[index])}</span>
+              <span className="shrink-0 font-semibold tabular-nums text-slate-900">{money(totals[index], currency)}</span>
             </div>
           );
         })}
       </div>
       <div className="mt-3 flex flex-wrap gap-x-4 gap-y-2">{names.map((name) => <Legend key={name} color={categoryColor(name)} label={name} />)}</div>
-      <DataTable summary="View category trend data table" headers={["Period", ...names, "Total"]} rows={normalized.map((value, index) => [dateLabel(value.period, granularity, true), ...names.map((name) => money(value.categories[name] || 0)), money(totals[index])])} />
+      <DataTable summary="View category trend data table" headers={["Period", ...names, "Total"]} rows={normalized.map((value, index) => [dateLabel(value.period, granularity, true), ...names.map((name) => money(value.categories[name] || 0, currency)), money(totals[index], currency)])} />
     </div>
   );
 }
@@ -773,8 +831,8 @@ function Legend({ color, label }: { color: string; label: string }) {
   return <span className="inline-flex items-center gap-1.5"><span className="h-2.5 w-2.5 shrink-0 rounded-sm" style={{ backgroundColor: color }} aria-hidden="true" />{label}</span>;
 }
 
-function Select({ label, value, onChange, options, all }: { label: string; value: string; onChange: (value: string) => void; options: string[]; all: string }) {
-  return <label className="grid gap-1 text-xs font-semibold text-slate-700">{label}<select className="h-11 rounded-lg border border-slate-300 bg-white px-3 text-sm sm:h-10" value={value} onChange={(event) => onChange(event.target.value)}><option value="">{all}</option>{options.map((option) => <option key={option} value={option}>{title(option)}</option>)}</select></label>;
+function Select({ label, value, onChange, options, all, includeAll = true }: { label: string; value: string; onChange: (value: string) => void; options: string[]; all: string; includeAll?: boolean }) {
+  return <label className="grid gap-1 text-xs font-semibold text-slate-700">{label}<select className="h-11 rounded-lg border border-slate-300 bg-white px-3 text-sm sm:h-10" value={value} onChange={(event) => onChange(event.target.value)}>{includeAll ? <option value="">{all}</option> : null}{options.map((option) => <option key={option} value={option}>{title(option)}</option>)}</select></label>;
 }
 
 function DateField({ label, value, onChange }: { label: string; value: string; onChange: (value: string) => void }) {

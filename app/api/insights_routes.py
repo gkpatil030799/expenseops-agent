@@ -49,6 +49,7 @@ def spending_insights(
     review_type: Literal["all", "personal", "shared"] = "all",
     spend_basis: Literal["card", "actual_share"] = "card",
     granularity: Literal["day", "week", "month"] = Query(default="day"),
+    currency_code: str | None = Query(default=None, min_length=3, max_length=3),
 ) -> dict:
     if start_date > end_date:
         raise HTTPException(status_code=422, detail="Start date must not be after end date.")
@@ -63,4 +64,5 @@ def spending_insights(
         review_type=review_type,
         spend_basis=spend_basis,
         granularity=granularity,
+        currency_code=currency_code,
     )

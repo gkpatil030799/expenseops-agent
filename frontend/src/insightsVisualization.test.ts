@@ -5,6 +5,7 @@ import { CATEGORY_COLORS, axisTicks, categoryColor, comparisonText, dateLabel, g
 describe("insights visualization rules", () => {
   it("formats dollar axes and spend tooltip values", () => {
     expect(money(123_400)).toBe("$1,234");
+    expect(money(123_400, "EUR")).toBe("€1,234");
     expect(axisTicks(27_500)).toEqual([0, 10_000, 20_000, 30_000]);
     expect(dateLabel("2026-08-03", "week", true)).toBe("Week of Aug 3");
   });
@@ -36,5 +37,14 @@ describe("insights visualization rules", () => {
       { name: "Food & Dining", amount_cents: 9_700 },
       { name: "Other", amount_cents: 300 },
     ]);
+  });
+
+  it("uses magnitude when refunds make a category negative", () => {
+    const grouped = groupSmallCategories([
+      { name: "Food & Dining", amount_cents: 10_000 },
+      { name: "Health", amount_cents: -4_000 },
+      { name: "Travel", amount_cents: 100 },
+    ]);
+    expect(grouped.map((item) => item.name)).toContain("Health");
   });
 });

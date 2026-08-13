@@ -39,7 +39,7 @@ visual-foundation changes began.
 | Phase 3 — identity and tenancy | In progress | Tenant-safe uniqueness and schema parity; verified OIDC email; atomic OAuth state claims; invite return/switch/wrong-account recovery; owner/member API matrix; removal/transfer; per-user Telegram and Splitwise; explicit Plaid ownership; exact connected identities. PostgreSQL RLS/request-worker role rollout remains an open exit-gate item. |
 | Phase 4 — financial correctness | In progress | Durable Splitwise create/update/delete journal, deterministic idempotency marker, atomic leases, pending-to-posted relationships, finalized-amount and removal reconciliation, valid-draft database invariant, append-only audit events, and visible Recovery UI implemented; transactional outbox moves into Phase 5 |
 | Phase 5 — durable workers | In progress | Transactional outbox schema/service, leased retry/dead-letter worker, durable production Plaid webhook acknowledgement, post-delivery Telegram sent markers, Telegram `update_id` dedupe/retry, resumable Gmail receipt/history pagination, scheduler overlap leases, and truthful cron failures implemented; Splitwise worker, inbound Telegram queue, provider Retry-After, and Railway worker rollout remain open |
-| Phase 6 — product-domain correctness | Not started | — |
+| Phase 6 — product-domain correctness | In progress | Insights now scopes every response to one explicit currency, resolves actual share from the authenticated user's verified Splitwise identity, exposes unreviewed/refund reconciliation, and renders signed data safely; Household and Deals domain gates remain open |
 | Phase 7 — security and operations | Not started | — |
 | Phase 8 — GA validation and re-audit | Not started | — |
 
@@ -105,6 +105,21 @@ amount modification, reversal/removal handling, and valid-draft invariant are im
 Phase 5 is not complete until Splitwise mutations and inbound Telegram processing use durable workers,
 provider `Retry-After` is honored, and the dedicated Railway worker service is configured and observed.
 
+## Phase 6 interim evidence
+
+| Check | Result |
+| --- | --- |
+| Currency isolation | Current and comparison rows are filtered to one explicit ISO currency; available currencies and excluded other-currency transaction counts are returned; no implicit conversion or aggregation occurs |
+| Viewer-relative actual share | The service resolves the authenticated user's enabled, verified Splitwise identity and selects that participant's owed share; it no longer assumes the first payer is the viewer |
+| Unknown-share safety | A missing/unverified viewer identity or absent viewer allocation excludes that shared amount and surfaces a warning instead of guessing |
+| Accounting equation | `total_cents = personal_cents + shared_cents + unreviewed_cents`; classified, unreviewed, and signed refund totals are returned explicitly |
+| Refund semantics | Refunds remain signed credits in totals; category percentages, donut sizing, stacked composition, and time-series scaling use safe magnitude/range calculations without changing displayed signs |
+| Reporting UI | Currency selection, excluded-currency scope, exact Total reconciliation, separate Unreviewed KPI, refund disclosure, and viewer-identity guidance are visible in Insights |
+| Regression gate | Backend 548 passed; focused Insights 6 passed; Ruff passed; frontend unit 21 passed; production build passed; lint had zero errors |
+
+Phase 6 remains in progress until Household route verification/freshness and Deals trust/reversibility
+contracts pass their domain exit gates, followed by the complete product-domain browser matrix.
+
 ## V1 validation evidence
 
 | Check | Result |
@@ -163,8 +178,8 @@ developer server from producing misleading screenshots or accessibility results.
 | Check | Result |
 | --- | --- |
 | Reporting scope | Exact current and comparison ranges are visible; bank-pending exclusions and classified Personal/Shared scope are disclosed |
-| Currency safety | UI explicitly says values are displayed as USD and that no currency conversion is applied; multi-currency correctness remains assigned to Phase 6 |
-| KPI hierarchy | Total Spend is the dominant analytical KPI; Personal, Shared, Transactions, and Average are secondary |
+| Currency safety | Superseded by Phase 6: values are now isolated to the selected currency, with other-currency exclusions disclosed and no implicit conversion |
+| KPI hierarchy | Total Spend is the dominant analytical KPI; Personal, Shared, Unreviewed, and Transactions are secondary |
 | Narrative order | What changed follows the KPI tier, then trend, category composition, merchants, category trend, and shared-spend detail |
 | Filter density | Date presets remain available; account/category/merchant/type/basis controls collapse under Refine view with active-count and removable chips |
 | Chart integrity | Split trend focus points follow their actual series; explicit legends replace ambiguous color inference; synthetic grouped Other is not exposed as a misleading filter |
@@ -178,9 +193,9 @@ developer server from producing misleading screenshots or accessibility results.
 | Insights accessibility | Zero critical or serious axe violations |
 | Full Playwright suite | 28 passed across desktop Chromium and Pixel 5 mobile Chromium |
 
-V4 changes only presentation, interaction, and reporting-scope disclosure. It does not certify the
-underlying accounting model. Insights remains non-releasable for general availability until the
-Phase 6 currency, viewer-share, refund, deduplication, and reconciliation invariants pass.
+V4 established the visual and interaction layer. The Phase 6 evidence above now covers currency
+isolation, viewer-relative share, refunds, and summary reconciliation; broader product-domain and
+full GA validation gates remain open.
 
 ## V5 validation evidence
 

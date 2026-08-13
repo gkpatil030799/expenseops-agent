@@ -21,26 +21,26 @@ export function categoryColor(name: string): string {
   return CATEGORY_COLORS[name] || CATEGORY_COLORS.Other;
 }
 
-export function money(cents: number): string {
+export function money(cents: number, currency = "USD"): string {
   return new Intl.NumberFormat("en-US", {
     style: "currency",
-    currency: "USD",
+    currency,
     maximumFractionDigits: 0,
   }).format(cents / 100);
 }
 
-export function signedMoney(cents: number): string {
-  if (!cents) return money(0);
-  return `${cents > 0 ? "+" : "−"}${money(Math.abs(cents))}`;
+export function signedMoney(cents: number, currency = "USD"): string {
+  if (!cents) return money(0, currency);
+  return `${cents > 0 ? "+" : "−"}${money(Math.abs(cents), currency)}`;
 }
 
-export function comparisonText(current: number, previous: number): {
+export function comparisonText(current: number, previous: number, currency = "USD"): {
   primary: string;
   secondary: string | null;
 } {
   const delta = current - previous;
   if (!delta) return { primary: "No change", secondary: null };
-  const primary = `${signedMoney(delta)} vs previous period`;
+  const primary = `${signedMoney(delta, currency)} vs previous period`;
   if (Math.abs(previous) < NEAR_ZERO_COMPARISON_CENTS) {
     return { primary, secondary: null };
   }
@@ -57,10 +57,10 @@ export function meaningfulChange(current: number, previous: number, total: numbe
 }
 
 export function groupSmallCategories<T extends CategoryAmount>(items: T[], maxCategories = 7): T[] {
-  const total = items.reduce((sum, item) => sum + item.amount_cents, 0);
+  const total = items.reduce((sum, item) => sum + Math.abs(item.amount_cents), 0);
   const major = items.filter((item, index) =>
     item.name !== "Other" && item.name !== "Uncategorized" && index < maxCategories &&
-    (!total || Math.abs(item.amount_cents) / Math.abs(total) * 100 >= SMALL_CATEGORY_PERCENT));
+    (!total || Math.abs(item.amount_cents) / total * 100 >= SMALL_CATEGORY_PERCENT));
   const grouped = items.filter((item) => !major.includes(item));
   if (!grouped.length) return major;
   const other = grouped.reduce((sum, item) => sum + item.amount_cents, 0);
