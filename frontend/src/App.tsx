@@ -143,7 +143,7 @@ function DashboardApp() {
   const [reviewNotice, setReviewNotice] = useState<ActionNotice | null>(null);
   const pendingTransactionActions = useRef(new Set<number>());
   const [log, setLog] = useState<unknown>({ status: "Ready" });
-  const [onboardingNotice, setOnboardingNotice] = useState<{ tone: "success" | "error"; text: string } | null>(null);
+  const [onboardingNotice, setOnboardingNotice] = useState<{ tone: "success" | "error"; text: string; action?: "switch-account" } | null>(null);
   const [accountContext, setAccountContext] = useState<AccountContext | null>(null);
   const [authResolved, setAuthResolved] = useState(false);
   const [activeWorkspace, setActiveWorkspace] = useState<"expenses" | "household" | "promotions" | "settings">(() => {
@@ -224,16 +224,15 @@ function DashboardApp() {
       }).then(() => {
         params.delete("invite");
         params.set("workspace", "settings");
-        window.history.replaceState({}, "", `/?${params.toString()}`);
-        setActiveWorkspace("settings");
-        setOnboardingNotice({ tone: "success", text: "Invitation accepted. The shared workspace is now available in Settings." });
+        window.location.replace(`/?${params.toString()}&joined=1`);
       }).catch((error) => {
-        params.delete("invite");
+        const detail = error instanceof ApiError ? error.detail : typeof error === "object" && error && "detail" in error && typeof error.detail === "string" ? error.detail : "The invitation could not be accepted.";
+        const wrongAccount = detail.toLowerCase().includes("email does not match");
+        if (!wrongAccount) params.delete("invite");
         params.set("workspace", "settings");
         window.history.replaceState({}, "", `/?${params.toString()}`);
         setActiveWorkspace("settings");
-        const detail = typeof error === "object" && error && "detail" in error && typeof error.detail === "string" ? error.detail : "The invitation could not be accepted.";
-        setOnboardingNotice({ tone: "error", text: `${detail} Ask the workspace owner for a new link or sign in with the invited Google account.` });
+        setOnboardingNotice({ tone: "error", text: wrongAccount ? `${detail} Sign out and continue with the invited Google account.` : `${detail} Ask the workspace owner for a new link.`, action: wrongAccount ? "switch-account" : undefined });
       });
       return;
     }
@@ -241,6 +240,11 @@ function DashboardApp() {
       params.delete("connect");
       window.history.replaceState({}, "", `/?${params.toString()}`);
       void openPlaidLink();
+    }
+    if (params.get("joined") === "1") {
+      params.delete("joined");
+      window.history.replaceState({}, "", `/?${params.toString()}`);
+      setOnboardingNotice({ tone: "success", text: "Invitation accepted. You are now in the shared workspace." });
     }
   }, [accountContext]);
 
@@ -672,6 +676,7 @@ function DashboardApp() {
         {onboardingNotice ? (
           <div role={onboardingNotice.tone === "error" ? "alert" : "status"} className={`flex items-start justify-between gap-3 rounded-xl border px-4 py-3 text-sm ${onboardingNotice.tone === "error" ? "border-rose-200 bg-rose-50 text-rose-800" : "border-emerald-200 bg-emerald-50 text-emerald-800"}`}>
             <span>{onboardingNotice.text}</span>
+            {onboardingNotice.action === "switch-account" ? <Button size="sm" variant="outline" onClick={async () => { const returnPath = `${window.location.pathname}${window.location.search}`; await fetch("/auth/logout", { method: "POST", credentials: "same-origin" }); window.location.assign(`/auth/login?redirect_after=${encodeURIComponent(returnPath)}`); }}>Switch account</Button> : null}
             <button type="button" aria-label="Dismiss onboarding message" onClick={() => setOnboardingNotice(null)} className="rounded p-1 hover:bg-black/5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500"><X className="h-4 w-4" /></button>
           </div>
         ) : null}
@@ -895,7 +900,10 @@ function AuthLoading() {
 }
 
 function SignInPage() {
-  return <main className="grid min-h-screen place-items-center bg-[radial-gradient(circle_at_top,rgba(79,70,229,0.12),transparent_32rem)] p-5"><Card className="w-full max-w-md text-center"><CardHeader><div className="mx-auto flex h-12 w-12 items-center justify-center rounded-xl bg-indigo-600 text-white"><Split className="h-6 w-6" /></div><CardTitle className="mt-3 text-2xl">ExpenseOps</CardTitle><CardDescription>Sign in to your private expense and household workspace.</CardDescription></CardHeader><CardContent><Button className="w-full" onClick={() => window.location.assign("/auth/login")}><UserCheck className="h-4 w-4" />Sign in</Button></CardContent></Card></main>;
+  const returnPath = `${window.location.pathname}${window.location.search}${window.location.hash}`;
+  const loginUrl = `/auth/login?redirect_after=${encodeURIComponent(returnPath)}`;
+  const invitation = new URLSearchParams(window.location.search).has("invite");
+  return <main className="grid min-h-screen place-items-center bg-[radial-gradient(circle_at_top,rgba(79,70,229,0.12),transparent_32rem)] p-5"><Card className="w-full max-w-md text-center"><CardHeader><div className="mx-auto flex h-12 w-12 items-center justify-center rounded-xl bg-indigo-600 text-white"><Split className="h-6 w-6" /></div><CardTitle className="mt-3 text-2xl">{invitation ? "Join your ExpenseOps workspace" : "ExpenseOps"}</CardTitle><CardDescription>{invitation ? "Sign in with the email address that received this invitation. You will return here to join the workspace." : "Sign in to your private expense and household workspace."}</CardDescription></CardHeader><CardContent><Button className="w-full" onClick={() => window.location.assign(loginUrl)}><UserCheck className="h-4 w-4" />{invitation ? "Sign in to accept invitation" : "Sign in"}</Button></CardContent></Card></main>;
 }
 
 function mergeTransactions(current: Transaction[], incoming: Transaction[]) {

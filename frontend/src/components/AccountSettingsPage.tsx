@@ -15,10 +15,10 @@ type AccountContext = {
 type Workspace = { id: number; name: string; role: string; current: boolean };
 type Member = { user_id: number; email: string; display_name: string; role: string };
 type Integrations = {
-  gmail: { connected: boolean };
-  plaid: { connected: boolean; institutions: { id: number; name: string }[] };
-  telegram: { connected: boolean };
-  splitwise: { connected: boolean; available: boolean };
+  gmail: { connected: boolean; identity?: string | null };
+  plaid: { connected: boolean; institutions: { id: number; name: string; owner_user_id?: number | null; owner_name?: string | null; ownership_verified: boolean; is_mine: boolean }[] };
+  telegram: { connected: boolean; telegram_user_id?: string | null; chat_id?: string | null };
+  splitwise: { connected: boolean; available: boolean; identity?: string | null; email?: string | null; verified?: boolean };
   google_maps: { connected: boolean; managed_by: string };
   openai: { connected: boolean; managed_by: string };
 };
@@ -151,6 +151,22 @@ export function AccountSettingsPage({ context, splitwiseTools, learnedBehaviorTo
     }, "Invitation link created. Share it privately with the invited person.");
   }
 
+  async function removeMember(member: Member) {
+    if (!window.confirm(`Remove ${member.display_name} from ${context.workspace.name}? They will immediately lose access to this workspace.`)) return;
+    await performAction(`remove-member-${member.user_id}`, async () => {
+      await api(`/api/workspaces/${context.workspace.id}/members/${member.user_id}`, { method: "DELETE" });
+      await load();
+    }, `${member.display_name} was removed from the workspace.`);
+  }
+
+  async function transferOwnership(member: Member) {
+    if (!window.confirm(`Transfer ownership of ${context.workspace.name} to ${member.display_name}? You will become a member and only the new owner can reverse this change.`)) return;
+    await performAction(`transfer-owner-${member.user_id}`, async () => {
+      await api(`/api/workspaces/${context.workspace.id}/members/${member.user_id}/transfer-ownership`, { method: "POST" });
+      await load();
+    }, `Ownership was transferred to ${member.display_name}.`);
+  }
+
   async function connectGmail() {
     await performAction("connect-gmail", async () => {
       const value = await api<{ authorization_url: string }>("/api/integrations/gmail/connect", {
@@ -181,6 +197,14 @@ export function AccountSettingsPage({ context, splitwiseTools, learnedBehaviorTo
       await api(path, { method: "DELETE" });
       await load();
     }, "Integration disconnected. Your existing history was retained.");
+  }
+
+  async function claimBank(id: number, name: string) {
+    if (!window.confirm(`Confirm that the ${name} connection belongs to you? Its transactions will use your personal Splitwise payer identity.`)) return;
+    await performAction(`claim-plaid-${id}`, async () => {
+      await api(`/api/integrations/plaid/${id}/claim`, { method: "POST" });
+      await load();
+    }, `${name} is now attributed to your ExpenseOps identity.`);
   }
 
   const checklist = integrations ? onboardingChecklist(integrations) : [];
@@ -223,25 +247,25 @@ export function AccountSettingsPage({ context, splitwiseTools, learnedBehaviorTo
                 {canManageWorkspace ? <div className="flex flex-col gap-2 border-t border-slate-200 pt-3 sm:flex-row"><Input aria-label="Current workspace name" value={renameValue} onChange={(event) => setRenameValue(event.target.value)} /><Button variant="outline" disabled={!renameValue.trim() || renameValue.trim() === context.workspace.name || busyAction === "rename-workspace"} onClick={renameWorkspace}><Pencil className="h-4 w-4" />{busyAction === "rename-workspace" ? "Renaming…" : "Rename"}</Button></div> : null}
               </CardContent></Card>
               <Card><CardHeader><CardTitle>Members</CardTitle><CardDescription>{canManageWorkspace ? "Invite someone using a single-use, seven-day link." : "Member access is managed by a workspace owner."}</CardDescription></CardHeader><CardContent className="grid gap-3">
-                <div className="grid gap-2">{members.map((member) => <div key={member.user_id} className="flex min-h-11 flex-col justify-between gap-1 rounded-lg border border-slate-200 px-3 py-2 sm:flex-row sm:items-center"><span className="min-w-0"><span className="block truncate font-medium text-slate-950">{member.display_name}</span><span className="block truncate text-sm text-slate-600">{member.email}</span></span><span className="text-xs font-semibold uppercase tracking-wide text-slate-600">{member.role}</span></div>)}</div>
+                <div className="grid gap-2">{members.map((member) => <div key={member.user_id} className="flex min-h-11 flex-col justify-between gap-3 rounded-lg border border-slate-200 px-3 py-2 sm:flex-row sm:items-center"><span className="min-w-0"><span className="block truncate font-medium text-slate-950">{member.display_name}{member.user_id === context.user.id ? " (you)" : ""}</span><span className="block truncate text-sm text-slate-600">{member.email}</span></span><div className="flex flex-wrap items-center gap-2"><span className="text-xs font-semibold uppercase tracking-wide text-slate-600">{member.role}</span>{canManageWorkspace && member.user_id !== context.user.id ? <><Button size="sm" variant="outline" disabled={Boolean(busyAction)} onClick={() => transferOwnership(member)}>{busyAction === `transfer-owner-${member.user_id}` ? "Transferring…" : "Make owner"}</Button><Button size="sm" variant="outline" disabled={Boolean(busyAction)} className="border-rose-300 text-rose-700 hover:bg-rose-50 hover:text-rose-800" onClick={() => removeMember(member)}><UserMinus className="h-4 w-4" />{busyAction === `remove-member-${member.user_id}` ? "Removing…" : "Remove"}</Button></> : null}</div></div>)}</div>
                 {canManageWorkspace ? <><div className="flex flex-col gap-2 sm:flex-row"><Input type="email" value={inviteEmail} onChange={(event) => setInviteEmail(event.target.value)} placeholder="friend@example.com" /><Button disabled={!inviteEmail.includes("@") || busyAction === "invite-member"} onClick={invite}><Users className="h-4 w-4" />{busyAction === "invite-member" ? "Creating link…" : "Invite"}</Button></div>{inviteLink ? <CopyValue label="Share this invitation privately" value={inviteLink} /> : null}</> : null}
               </CardContent></Card>
             </div>
           </SettingsPanel> : null}
 
           {section === "personal" ? <SettingsPanel title="Personal connections" description="Services tied to you as an individual, not every workspace member.">
-            <Card><CardHeader><CardTitle>Telegram</CardTitle><CardDescription>Personal delivery channel for your notifications, approvals, and receipt uploads.</CardDescription></CardHeader><CardContent className="space-y-3">
-              <IntegrationRow name="Telegram" mark="TG" scope="Personal" connected={integrations?.telegram.connected} connectedDetail="Connected to your ExpenseOps user; exact Telegram identity is not returned by the current status API." busy={busyAction === "connect-telegram" || busyAction === "disconnect-/api/integrations/telegram"} onConnect={connectTelegram} onDisconnect={() => disconnect("/api/integrations/telegram")} />
+            <Card><CardHeader><CardTitle>Your accounts</CardTitle><CardDescription>Each member connects their own bank, Splitwise payer, and Telegram delivery identity.</CardDescription></CardHeader><CardContent className="space-y-3">
+              <IntegrationRow name="Telegram" mark="TG" scope="Personal" connected={integrations?.telegram.connected} connectedDetail={integrations?.telegram.telegram_user_id ? `Telegram user ${integrations.telegram.telegram_user_id} · chat ${integrations.telegram.chat_id}` : "Connected to your ExpenseOps identity."} busy={busyAction === "connect-telegram" || busyAction === "disconnect-/api/integrations/telegram"} onConnect={connectTelegram} onDisconnect={() => disconnect("/api/integrations/telegram")} />
               {telegramSetup ? <TelegramSetup value={telegramSetup} /> : null}
+              <IntegrationRow name="Plaid" mark="P" scope="Personal" connected={integrations?.plaid.institutions.some((value) => value.is_mine)} connectedDetail={integrations?.plaid.institutions.filter((value) => value.is_mine).map((value) => value.name).join(", ") || "Connect your bank so ExpenseOps can attribute its transactions to you."} onConnect={() => window.location.assign("/?workspace=expenses&connect=plaid")} />
+              {integrations?.plaid.institutions.map((institution) => <div key={institution.id} className="flex min-h-11 flex-col justify-between gap-2 rounded-lg bg-slate-50 px-3 py-2 text-sm sm:flex-row sm:items-center"><span className="min-w-0"><span className="block truncate font-medium text-slate-950">{institution.name}</span><span className="block text-xs text-slate-600">{institution.owner_name ? `${institution.owner_name}${institution.ownership_verified ? " · verified owner" : " · verification needed"}` : "Owner not confirmed"}</span></span><div className="flex gap-2">{!institution.owner_user_id ? <Button size="sm" variant="outline" disabled={Boolean(busyAction)} onClick={() => claimBank(institution.id, institution.name)}>{busyAction === `claim-plaid-${institution.id}` ? "Confirming…" : "Confirm mine"}</Button> : null}{institution.is_mine || canManageWorkspace ? <Button size="sm" variant="outline" disabled={busyAction === `disconnect-/api/integrations/plaid/${institution.id}`} onClick={() => disconnect(`/api/integrations/plaid/${institution.id}`)}><Unplug className="h-4 w-4" />{busyAction === `disconnect-/api/integrations/plaid/${institution.id}` ? "Disconnecting…" : "Disconnect"}</Button> : null}</div></div>)}
+              <IntegrationRow name="Splitwise" mark="S" scope="Personal" connected={integrations?.splitwise.connected} available={integrations?.splitwise.available} unavailableDetail="Splitwise sign-in is not configured by the application administrator." connectedDetail={integrations?.splitwise.identity ? `${integrations.splitwise.identity}${integrations.splitwise.email ? ` · ${integrations.splitwise.email}` : ""}${integrations.splitwise.verified ? " · verified payer" : " · reconnect to verify payer"}` : "Connect your personal Splitwise account."} busy={busyAction === "connect-splitwise" || busyAction === "disconnect-/api/integrations/splitwise"} onConnect={connectSplitwise} onDisconnect={() => disconnect("/api/integrations/splitwise")} />
             </CardContent></Card>
           </SettingsPanel> : null}
 
           {section === "workspace-connections" ? <SettingsPanel title="Workspace connections" description="Shared data sources and application-managed providers for this workspace.">
             <Card><CardContent className="grid gap-3 p-4 sm:p-5">
-              <IntegrationRow name="Gmail" mark="G" scope="Workspace" connected={integrations?.gmail.connected} connectedDetail="Connected account; exact Gmail identity is not returned by the current status API." ownerManaged={!canManageWorkspace} busy={busyAction === "connect-gmail" || busyAction === "disconnect-/api/integrations/gmail"} onConnect={canManageWorkspace ? connectGmail : undefined} onDisconnect={canManageWorkspace ? () => disconnect("/api/integrations/gmail") : undefined} />
-              <IntegrationRow name="Plaid" mark="P" scope="Workspace" connected={integrations?.plaid.connected} connectedDetail={integrations?.plaid.institutions.map((value) => value.name).join(", ") || "Connected bank identity is unavailable."} ownerManaged={!canManageWorkspace} onConnect={canManageWorkspace ? () => window.location.assign("/?workspace=expenses&connect=plaid") : undefined} />
-              {canManageWorkspace ? integrations?.plaid.institutions.map((institution) => <div key={institution.id} className="flex min-h-11 items-center justify-between gap-3 rounded-lg bg-slate-50 px-3 py-2 text-sm"><span className="truncate">{institution.name}</span><Button size="sm" variant="outline" disabled={busyAction === `disconnect-/api/integrations/plaid/${institution.id}`} onClick={() => disconnect(`/api/integrations/plaid/${institution.id}`)}><Unplug className="h-4 w-4" />{busyAction === `disconnect-/api/integrations/plaid/${institution.id}` ? "Disconnecting…" : "Disconnect"}</Button></div>) : null}
-              <IntegrationRow name="Splitwise" mark="S" scope="Workspace" connected={integrations?.splitwise.connected} available={integrations?.splitwise.available} unavailableDetail="Splitwise sign-in is not configured yet. Ask a workspace owner to finish setup." connectedDetail="Connected integration; exact Splitwise identity is not returned by the current status API." ownerManaged={!canManageWorkspace} busy={busyAction === "connect-splitwise" || busyAction === "disconnect-/api/integrations/splitwise"} onConnect={canManageWorkspace ? connectSplitwise : undefined} onDisconnect={canManageWorkspace ? () => disconnect("/api/integrations/splitwise") : undefined} />
+              <IntegrationRow name="Gmail" mark="G" scope="Workspace" connected={integrations?.gmail.connected} connectedDetail={integrations?.gmail.identity ? `Connected as ${integrations.gmail.identity}` : "Connected workspace receipt inbox."} ownerManaged={!canManageWorkspace} busy={busyAction === "connect-gmail" || busyAction === "disconnect-/api/integrations/gmail"} onConnect={canManageWorkspace ? connectGmail : undefined} onDisconnect={canManageWorkspace ? () => disconnect("/api/integrations/gmail") : undefined} />
               <IntegrationRow name="Google Maps" mark="M" scope="Application" connected connectedDetail="Application-managed routing and place search." />
               <IntegrationRow name="OpenAI" mark="AI" scope="Application" connected connectedDetail="Application-managed language and receipt processing." />
             </CardContent></Card>

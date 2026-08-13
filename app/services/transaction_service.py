@@ -16,9 +16,20 @@ from sqlalchemy.orm import Session
 from app.config import Settings, get_settings
 from app.job_tenancy import telegram_settings_for_workspace
 from app.logging_config import log_event
-from app.models import ExpenseTransaction, PlaidItem, TransactionStatus, utc_now
+from app.models import (
+    ExpenseTransaction,
+    PlaidItem,
+    SplitwiseIntegration,
+    TransactionStatus,
+    WorkspaceMembership,
+    utc_now,
+)
 from app.security import decrypt_secret
-from app.services.agent_service import classify_transaction, transaction_display_name
+from app.services.agent_service import (
+    classify_transaction,
+    friend_display_name,
+    transaction_display_name,
+)
 from app.services.notification_service import NotificationService
 from app.services.plaid_service import PlaidService
 from app.services.share_calculator import (
@@ -93,14 +104,26 @@ class TransactionService:
         workspace_id = session_info.get("workspace_id") if settings is None else None
         if workspace_id is not None:
             self.settings = telegram_settings_for_workspace(
-                db, int(workspace_id), self.settings
+                db,
+                int(workspace_id),
+                self.settings,
+                user_id=session_info.get("user_id"),
             )
         self.plaid_service = plaid_service
         self.splitwise_service = splitwise_service or SplitwiseService(self.settings)
+        self._notification_service_injected = notification_service is not None
         self.notification_service = notification_service or NotificationService(self.settings)
 
     def sync_item(self, item: PlaidItem) -> dict[str, int]:
         log_event(logger, "plaid_sync_started", plaid_item_db_id=item.id)
+        if not self._notification_service_injected and item.workspace_id is not None:
+            recipient_settings = telegram_settings_for_workspace(
+                self.db,
+                item.workspace_id,
+                self.settings,
+                user_id=item.owner_user_id,
+            )
+            self.notification_service = NotificationService(recipient_settings)
         plaid = self.plaid_service or PlaidService(self.settings)
         if item.enabled is False or not item.access_token_encrypted:
             raise TransactionError("Plaid connection is disconnected")
@@ -899,7 +922,7 @@ class TransactionService:
             participant_count=len(friend_user_ids),
         )
         self._ensure_can_post(tx, post_pending=post_pending)
-        payer_user_id = int(self.splitwise_service.get_current_user()["id"])
+        payer_user_id = self._verified_splitwise_payer_id(tx)
         shares = build_equal_split_shares(
             total_cents=abs(tx.amount_cents),
             payer_user_id=payer_user_id,
@@ -940,9 +963,11 @@ class TransactionService:
             split_mode=split_mode,
         )
         self._ensure_can_post(tx, post_pending=post_pending)
-        resolved_payer_user_id = payer_user_id or int(
-            self.splitwise_service.get_current_user()["id"]
+        resolved_payer_user_id = self._verified_splitwise_payer_id(
+            tx, fallback_payer_user_id=payer_user_id
         )
+        if payer_user_id is not None and payer_user_id != resolved_payer_user_id:
+            raise TransactionError("The payer must match the verified owner of this bank account.")
         if owed_by_user_id is not None:
             shares = build_custom_split_shares(
                 total_cents=abs(tx.amount_cents),
@@ -972,6 +997,63 @@ class TransactionService:
         if tx is None:
             raise TransactionError(f"Transaction {tx_id} not found")
         return tx
+
+    def _verified_splitwise_payer_id(
+        self,
+        tx: ExpenseTransaction,
+        *,
+        fallback_payer_user_id: int | None = None,
+    ) -> int:
+        actor_user_id = getattr(self.db, "info", {}).get("user_id")
+        if actor_user_id is None:
+            # Trusted jobs and focused unit tests may inject an explicit provider
+            # service without a request actor. Interactive requests always carry
+            # the authenticated actor in the tenant session.
+            if fallback_payer_user_id is not None:
+                return fallback_payer_user_id
+            return int(self.splitwise_service.get_current_user()["id"])
+
+        item = tx.plaid_item or self.db.get(PlaidItem, tx.plaid_item_id)
+        if item is None:
+            raise TransactionError("The transaction's bank connection could not be verified.")
+        if item.owner_user_id is None:
+            member_count = self.db.scalar(
+                select(func.count(WorkspaceMembership.id)).where(
+                    WorkspaceMembership.workspace_id == item.workspace_id
+                )
+            )
+            if member_count != 1:
+                raise TransactionError(
+                    "This bank connection needs an owner before it can post to Splitwise. "
+                    "Confirm ownership in Settings."
+                )
+            item.owner_user_id = int(actor_user_id)
+            item.ownership_verified_at = utc_now()
+            self.db.flush()
+        if item.owner_user_id != int(actor_user_id):
+            raise TransactionError(
+                "Only the verified owner of this bank account can post its transactions."
+            )
+
+        integration = self.db.scalar(
+            select(SplitwiseIntegration).where(
+                SplitwiseIntegration.workspace_id == item.workspace_id,
+                SplitwiseIntegration.user_id == int(actor_user_id),
+                SplitwiseIntegration.enabled.is_(True),
+            )
+        )
+        if integration is None:
+            raise TransactionError("Connect your personal Splitwise account before posting.")
+        if not integration.splitwise_user_id or integration.verified_at is None:
+            identity = self.splitwise_service.get_current_user()
+            integration.splitwise_user_id = str(identity.get("id") or "") or None
+            integration.display_name = friend_display_name(identity)
+            integration.email = str(identity.get("email") or "") or None
+            integration.verified_at = utc_now()
+            self.db.flush()
+        if not integration.splitwise_user_id:
+            raise TransactionError("Splitwise did not return a verified payer identity.")
+        return int(integration.splitwise_user_id)
 
     def _base_splitwise_payload(
         self, *, tx: ExpenseTransaction, shares, group_id, description, details, currency_code
@@ -1040,6 +1122,10 @@ class TransactionService:
             raise
 
     def _ensure_can_post(self, tx: ExpenseTransaction, *, post_pending: bool) -> None:
+        if tx.splitwise_expense_id:
+            raise TransactionError(
+                f"Transaction already posted to Splitwise expense {tx.splitwise_expense_id}."
+            )
         if tx.status == TransactionStatus.REMOVED.value:
             raise TransactionError("Cannot post a transaction Plaid marked as removed.")
         if tx.amount_cents <= 0:

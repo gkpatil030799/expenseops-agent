@@ -7,7 +7,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.db import get_db
-from app.models import User, Workspace
+from app.models import User, Workspace, WorkspaceMembership
 from app.tenancy import require_membership
 
 DbSession = Annotated[Session, Depends(get_db)]
@@ -38,3 +38,17 @@ def get_current_workspace(request: Request, db: DbSession, user: CurrentUser) ->
 
 
 CurrentWorkspace = Annotated[Workspace, Depends(get_current_workspace)]
+
+
+def get_current_workspace_owner(
+    db: DbSession,
+    user: CurrentUser,
+    workspace: CurrentWorkspace,
+) -> WorkspaceMembership:
+    membership = require_membership(db, user.id, workspace.id)
+    if membership.role != "owner":
+        raise HTTPException(status_code=403, detail="Owner access required")
+    return membership
+
+
+CurrentWorkspaceOwner = Annotated[WorkspaceMembership, Depends(get_current_workspace_owner)]

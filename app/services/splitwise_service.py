@@ -13,7 +13,7 @@ from app.db import SessionLocal
 from app.models import SplitwiseIntegration, User, WorkspaceMembership
 from app.security import decrypt_secret
 from app.services.agent_service import friend_display_name
-from app.tenancy import DEFAULT_USER_EMAIL, get_active_workspace_id
+from app.tenancy import DEFAULT_USER_EMAIL, get_active_user_id, get_active_workspace_id
 
 
 class SplitwiseAPIError(RuntimeError):
@@ -27,8 +27,16 @@ class SplitwiseService:
     oauth_request_token_url = "https://secure.splitwise.com/oauth/request_token"
     oauth_access_token_url = "https://secure.splitwise.com/oauth/access_token"
 
-    def __init__(self, settings: Settings | None = None):
-        self.settings = _workspace_settings(settings or get_settings())
+    def __init__(
+        self,
+        settings: Settings | None = None,
+        *,
+        resolve_workspace_credentials: bool = True,
+    ):
+        base_settings = settings or get_settings()
+        self.settings = (
+            _workspace_settings(base_settings) if resolve_workspace_credentials else base_settings
+        )
         self.base_url = self.settings.splitwise_base_url.rstrip("/")
 
     def _headers(self) -> dict[str, str]:
@@ -284,14 +292,21 @@ def _workspace_settings(settings: Settings) -> Settings:
         return settings
     try:
         with SessionLocal() as db:
-            integration = (
+            active_user_id = get_active_user_id()
+            filters = [
+                SplitwiseIntegration.workspace_id == workspace_id,
+                SplitwiseIntegration.enabled.is_(True),
+            ]
+            if active_user_id is not None:
+                filters.append(SplitwiseIntegration.user_id == active_user_id)
+            integrations = (
                 db.query(SplitwiseIntegration)
-                .filter(
-                    SplitwiseIntegration.workspace_id == workspace_id,
-                    SplitwiseIntegration.enabled.is_(True),
-                )
-                .one_or_none()
+                .filter(*filters)
+                .order_by(SplitwiseIntegration.id)
+                .limit(2)
+                .all()
             )
+            integration = integrations[0] if len(integrations) == 1 else None
             if integration is not None:
                 credentials = json.loads(decrypt_secret(integration.credentials_encrypted))
                 return settings.model_copy(update=credentials)

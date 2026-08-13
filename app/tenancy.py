@@ -14,6 +14,7 @@ from app.models import TenantScoped, User, Workspace, WorkspaceMembership
 DEFAULT_USER_EMAIL = "local@expenseops.invalid"
 DEFAULT_WORKSPACE_NAME = "Personal workspace"
 _active_workspace_id: ContextVar[int | None] = ContextVar("active_workspace_id", default=None)
+_active_user_id: ContextVar[int | None] = ContextVar("active_user_id", default=None)
 
 
 @dataclass(frozen=True)
@@ -112,6 +113,18 @@ def reset_active_workspace(token) -> None:
 
 def get_active_workspace_id() -> int | None:
     return _active_workspace_id.get()
+
+
+def set_active_user(user_id: int | None):
+    return _active_user_id.set(user_id)
+
+
+def reset_active_user(token) -> None:
+    _active_user_id.reset(token)
+
+
+def get_active_user_id() -> int | None:
+    return _active_user_id.get()
 
 
 def set_trusted_workspace(db: Session, workspace_id: int) -> None:

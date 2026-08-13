@@ -36,7 +36,7 @@ visual-foundation changes began.
 | V7 — Deals hierarchy | Complete (visual layer) | Value-first deal cards, merchant identity, trusted-domain disclosure, review interstitials for unverified links, visible Open/Save actions, feedback overflow, purposeful empty/disconnected states, and urgency-based expiry treatment |
 | V8 — visual/accessibility validation | Complete (automated gate) | Six-width responsive matrix, 44px touch-target audit across primary and expanded flows, keyboard skip/focus restoration, reduced motion, 200%-zoom-equivalent layout, mobile-nav clearance, edge-state fixtures, and four-project Playwright coverage |
 | Phase 2 — UX action integrity | Complete | Structured API client; global resilience surfaces; scoped Expense, Deals, Settings, and Splitwise actions; cross-browser failure-isolation gate; checkpoint on `agent/launch-readiness` |
-| Phase 3 — identity and tenancy | Not started | — |
+| Phase 3 — identity and tenancy | In progress | Tenant-safe uniqueness and schema parity; verified OIDC email; atomic OAuth state claims; invite return/switch/wrong-account recovery; owner/member API matrix; removal/transfer; per-user Telegram and Splitwise; explicit Plaid ownership; exact connected identities. PostgreSQL RLS/request-worker role rollout remains an open exit-gate item. |
 | Phase 4 — financial correctness | Not started | — |
 | Phase 5 — durable workers | Not started | — |
 | Phase 6 — product-domain correctness | Not started | — |
@@ -48,6 +48,24 @@ visual-foundation changes began.
 No item is considered resolved merely because its code was changed. Resolution requires a linked
 implementation commit, automated tests, applicable screenshots or operational evidence, and a
 passing phase exit gate.
+
+## Phase 3 interim evidence
+
+| Check | Result |
+| --- | --- |
+| Tenant uniqueness migration | Duplicate preferred-place keys, model versions, active models, and job keys work independently across workspaces |
+| Migration/model parity | Clean `alembic upgrade head` followed by `alembic check` passes |
+| Identity assurance | OIDC requires a provider-verified email; OAuth state is consumed with an atomic compare-and-set update |
+| Invitations | Signed-out return URL is preserved; acceptance selects the joined workspace; wrong-account flow preserves the invitation and offers account switching |
+| Workspace access | Owner-only shared Gmail mutations, member removal, ownership transfer, final-owner protection, and actor-attributed audit events are covered |
+| Personal providers | Each member resolves their own Telegram recipient and Splitwise payer; ambiguous multi-member delivery is blocked rather than sent to the first identity |
+| Bank ownership | New Plaid links are attributed to the authenticated user; legacy links require explicit confirmation; posting by a different actor is rejected |
+| Settings UX | Exact Gmail, Telegram, Splitwise, Plaid owner, and verification details are visible; role-restricted controls are omitted |
+| Regression gate | Backend 529 passed; focused Phase 3 backend 139 passed; frontend unit 20 passed; production build passed; Playwright 120 passed across Chromium, mobile Chromium, Firefox, and WebKit |
+
+Phase 3 is not complete until PostgreSQL row-level security and separate request/trusted-worker
+roles are implemented and proven against a real PostgreSQL test database. This remaining control is
+intentionally not represented as complete by the ORM isolation tests.
 
 ## V1 validation evidence
 

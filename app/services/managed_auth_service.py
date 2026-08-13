@@ -104,6 +104,8 @@ def provision_oidc_identity(
     email = str(claims.get("email") or "").strip().casefold()
     if not subject or not email:
         raise OIDCValidationError("Identity token must include subject and email")
+    if claims.get("email_verified") is not True:
+        raise OIDCValidationError("Identity provider must verify the email address")
     identity = db.scalar(
         select(AuthIdentity).where(
             AuthIdentity.provider == provider,
@@ -114,20 +116,19 @@ def provision_oidc_identity(
     claimed_legacy_workspace = False
     if identity is None:
         user = None
-        if claims.get("email_verified") is True:
-            candidate = db.scalar(select(User).where(User.email == email))
-            if (
-                candidate is None
-                and settings.oidc_bootstrap_email.strip().casefold() == email
-            ):
-                candidate = db.scalar(select(User).where(User.email == DEFAULT_USER_EMAIL))
-            if candidate is not None:
-                has_identity = db.scalar(
-                    select(AuthIdentity.id).where(AuthIdentity.user_id == candidate.id)
-                )
-                if has_identity is None:
-                    user = candidate
-                    claimed_legacy_workspace = candidate.email == DEFAULT_USER_EMAIL
+        candidate = db.scalar(select(User).where(User.email == email))
+        if (
+            candidate is None
+            and settings.oidc_bootstrap_email.strip().casefold() == email
+        ):
+            candidate = db.scalar(select(User).where(User.email == DEFAULT_USER_EMAIL))
+        if candidate is not None:
+            has_identity = db.scalar(
+                select(AuthIdentity.id).where(AuthIdentity.user_id == candidate.id)
+            )
+            if has_identity is None:
+                user = candidate
+                claimed_legacy_workspace = candidate.email == DEFAULT_USER_EMAIL
         if user is None:
             user = User(
                 email=email,
@@ -406,6 +407,7 @@ def _claim_legacy_integrations(
         db.add(
             SplitwiseIntegration(
                 workspace_id=workspace_id,
+                user_id=user_id,
                 credentials_encrypted=encrypt_secret(json.dumps(splitwise_credentials)),
             )
         )

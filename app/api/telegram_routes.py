@@ -106,6 +106,7 @@ from app.services.transaction_service import TransactionError, TransactionServic
 from app.tenancy import (
     ensure_default_tenancy,
     hash_api_token,
+    set_active_user,
     set_active_workspace,
     set_trusted_workspace,
 )
@@ -317,6 +318,8 @@ def _resolve_telegram_tenant(update: dict, db: DbSession) -> TelegramIdentity | 
     )
     if identity is not None:
         set_trusted_workspace(db, identity.workspace_id)
+        db.info["user_id"] = identity.user_id
+        set_active_user(identity.user_id)
         set_active_workspace(identity.workspace_id)
         return identity
 
@@ -328,6 +331,8 @@ def _resolve_telegram_tenant(update: dict, db: DbSession) -> TelegramIdentity | 
         raise HTTPException(status_code=403, detail="Unauthorized Telegram user")
     context = ensure_default_tenancy(db)
     set_trusted_workspace(db, context.workspace_id)
+    db.info["user_id"] = context.user_id
+    set_active_user(context.user_id)
     set_active_workspace(context.workspace_id)
     identity = TelegramIdentity(
         workspace_id=context.workspace_id,

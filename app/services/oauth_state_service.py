@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 import secrets
-from datetime import UTC, datetime, timedelta
+from datetime import timedelta
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
 from app.models import OAuthState, utc_now
@@ -50,23 +50,33 @@ def consume_oauth_state(
     user_id: int | None = None,
     workspace_id: int | None = None,
 ) -> tuple[OAuthState, str | None]:
+    state_hash = hash_api_token(raw)
+    conditions = [
+        OAuthState.state_hash == state_hash,
+        OAuthState.provider == provider,
+        OAuthState.used_at.is_(None),
+        OAuthState.expires_at > utc_now(),
+    ]
+    if user_id is not None:
+        conditions.append(OAuthState.user_id == user_id)
+    if workspace_id is not None:
+        conditions.append(OAuthState.workspace_id == workspace_id)
+    result = db.execute(
+        update(OAuthState)
+        .where(*conditions)
+        .values(used_at=utc_now())
+    )
+    if result.rowcount != 1:
+        db.rollback()
+        raise OAuthStateError("OAuth state is invalid or expired")
+    db.commit()
     state = db.scalar(
         select(OAuthState).where(
-            OAuthState.state_hash == hash_api_token(raw),
+            OAuthState.state_hash == state_hash,
             OAuthState.provider == provider,
         )
     )
-    if state is None or state.used_at is not None or _aware(state.expires_at) <= utc_now():
+    if state is None:  # Defensive: the consumed row must still exist after commit.
         raise OAuthStateError("OAuth state is invalid or expired")
-    if user_id is not None and state.user_id != user_id:
-        raise OAuthStateError("OAuth state does not belong to this user")
-    if workspace_id is not None and state.workspace_id != workspace_id:
-        raise OAuthStateError("OAuth state does not belong to this workspace")
-    state.used_at = utc_now()
     payload = decrypt_secret(state.payload_encrypted) if state.payload_encrypted else None
-    db.commit()
     return state, payload
-
-
-def _aware(value: datetime) -> datetime:
-    return value if value.tzinfo else value.replace(tzinfo=UTC)

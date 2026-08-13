@@ -22,8 +22,10 @@ from app.services.managed_auth_service import (
 from app.tenancy import (
     TenantContext,
     ensure_default_tenancy,
+    reset_active_user,
     reset_active_workspace,
     resolve_user_token,
+    set_active_user,
     set_active_workspace,
 )
 
@@ -133,6 +135,7 @@ async def _call_with_context(request: Request, call_next, context: TenantContext
     _set_request_context(request, context)
     tokens = set_tenant_log_context(context.user_id, context.workspace_id)
     workspace_token = set_active_workspace(context.workspace_id)
+    user_token = set_active_user(context.user_id)
     try:
         if request.method == "POST" and request.url.path in {
             "/transactions/interpret",
@@ -154,6 +157,7 @@ async def _call_with_context(request: Request, call_next, context: TenantContext
         return await call_next(request)
     finally:
         reset_active_workspace(workspace_token)
+        reset_active_user(user_token)
         reset_tenant_log_context(tokens)
 
 

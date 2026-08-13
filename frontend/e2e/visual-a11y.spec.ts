@@ -141,10 +141,10 @@ async function mockSettings(page: Page, role = "owner") {
       { user_id: 2, email: "janhavi@example.com", display_name: "Janhavi", role: "member" },
     ] });
     if (pathname === "/api/integrations") return route.fulfill({ json: {
-      gmail: { connected: true },
-      plaid: { connected: true, institutions: [{ id: 8, name: "Chase" }] },
-      telegram: { connected: true },
-      splitwise: { connected: true, available: true },
+      gmail: { connected: true, identity: "household@gmail.com" },
+      plaid: { connected: true, institutions: [{ id: 8, name: "Chase", owner_user_id: 1, owner_name: "Gunjan Patil", ownership_verified: true, is_mine: true }] },
+      telegram: { connected: true, telegram_user_id: "123456", chat_id: "123456" },
+      splitwise: { connected: true, available: true, identity: "Gunjan Patil", email: "gunjan@example.com", verified: true },
       google_maps: { connected: true, managed_by: "application" },
       openai: { connected: true, managed_by: "application" },
     } });
@@ -385,12 +385,15 @@ test("settings label personal and workspace connections and hide owner actions f
   await page.getByRole("menuitem", { name: "Settings" }).click();
 
   await chooseSettingsSection(page, "personal", /Personal connections/);
-  await expect(page.getByText("Personal", { exact: true })).toBeVisible();
-  await expect(page.getByText(/exact Telegram identity is not returned/i)).toBeVisible();
+  await expect(page.getByText("Personal", { exact: true }).first()).toBeVisible();
+  await expect(page.getByText(/Telegram user 123456/i)).toBeVisible();
+  await expect(page.getByText(/verified payer/i)).toBeVisible();
+  await expect(page.getByText("Chase", { exact: true }).first()).toBeVisible();
+  await expect(page.getByRole("button", { name: /Disconnect/ })).toHaveCount(3);
 
   await chooseSettingsSection(page, "workspace-connections", /Workspace connections/);
   await expect(page.getByText("Workspace", { exact: true }).first()).toBeVisible();
-  await expect(page.getByText("Chase", { exact: true })).toBeVisible();
+  await expect(page.getByText(/household@gmail.com/i)).toBeVisible();
   await expect(page.getByRole("button", { name: /Disconnect/ })).toHaveCount(0);
   await expect(page.getByText("Owner managed").first()).toBeVisible();
 });

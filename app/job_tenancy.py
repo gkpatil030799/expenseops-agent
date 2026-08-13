@@ -113,17 +113,28 @@ def gmail_settings_for_session(db: Session, settings: Settings) -> Settings:
 
 
 def telegram_settings_for_workspace(
-    db: Session, workspace_id: int, settings: Settings
+    db: Session,
+    workspace_id: int,
+    settings: Settings,
+    user_id: int | None = None,
 ) -> Settings:
-    identity = db.scalar(
-        select(TelegramIdentity)
-        .execution_options(skip_tenant_scope=True)
-        .where(
-            TelegramIdentity.workspace_id == workspace_id,
-            TelegramIdentity.enabled.is_(True),
+    filters = [
+        TelegramIdentity.workspace_id == workspace_id,
+        TelegramIdentity.enabled.is_(True),
+    ]
+    if user_id is not None:
+        filters.append(TelegramIdentity.user_id == user_id)
+    identities = list(
+        db.scalars(
+            select(TelegramIdentity)
+            .execution_options(skip_tenant_scope=True)
+            .where(*filters)
+            .order_by(TelegramIdentity.id)
+            .limit(2)
         )
-        .order_by(TelegramIdentity.id)
     )
+    # Never guess a recipient when a workspace has several personal identities.
+    identity = identities[0] if len(identities) == 1 else None
     if identity is not None:
         return settings.model_copy(update={"telegram_chat_id": identity.chat_id})
     default = ensure_default_tenancy(db)

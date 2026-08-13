@@ -242,6 +242,15 @@ def accept_invitation(
                 is_default=False,
             )
         )
+    for membership in db.scalars(
+        select(WorkspaceMembership).where(WorkspaceMembership.user_id == user.id)
+    ):
+        membership.is_default = membership.workspace_id == invitation.workspace_id
+    session_id = getattr(request.state, "auth_session_id", None)
+    if session_id is not None:
+        auth_session = db.get(AuthSession, session_id)
+        if auth_session is not None and auth_session.user_id == user.id:
+            auth_session.selected_workspace_id = invitation.workspace_id
     original_workspace = current.id
     set_trusted_workspace(db, invitation.workspace_id)
     invitation.status = "accepted"
@@ -258,6 +267,77 @@ def accept_invitation(
     db.commit()
     set_trusted_workspace(db, original_workspace)
     return {"ok": True, "workspace_id": invitation.workspace_id}
+
+
+@router.delete("/{workspace_id}/members/{member_user_id}", status_code=204)
+def remove_member(
+    workspace_id: int,
+    member_user_id: int,
+    db: DbSession,
+    user: CurrentUser,
+) -> None:
+    actor = _membership(db, user.id, workspace_id)
+    if actor.role != "owner":
+        raise HTTPException(status_code=403, detail="Owner access required")
+    if member_user_id == user.id:
+        raise HTTPException(
+            status_code=400,
+            detail="Use Leave workspace to remove your own membership",
+        )
+    target = db.scalar(
+        select(WorkspaceMembership).where(
+            WorkspaceMembership.workspace_id == workspace_id,
+            WorkspaceMembership.user_id == member_user_id,
+        )
+    )
+    if target is None:
+        raise HTTPException(status_code=404, detail="Workspace member not found")
+    record_audit(
+        db,
+        workspace_id=workspace_id,
+        user_id=user.id,
+        event_type="member_removed",
+        resource_type="workspace_membership",
+        resource_id=str(target.id),
+        metadata={"removed_user_id": member_user_id},
+    )
+    db.delete(target)
+    db.commit()
+
+
+@router.post("/{workspace_id}/members/{member_user_id}/transfer-ownership")
+def transfer_ownership(
+    workspace_id: int,
+    member_user_id: int,
+    db: DbSession,
+    user: CurrentUser,
+) -> dict:
+    actor = _membership(db, user.id, workspace_id)
+    if actor.role != "owner":
+        raise HTTPException(status_code=403, detail="Owner access required")
+    if member_user_id == user.id:
+        raise HTTPException(status_code=400, detail="Choose another workspace member")
+    target = db.scalar(
+        select(WorkspaceMembership).where(
+            WorkspaceMembership.workspace_id == workspace_id,
+            WorkspaceMembership.user_id == member_user_id,
+        )
+    )
+    if target is None:
+        raise HTTPException(status_code=404, detail="Workspace member not found")
+    target.role = "owner"
+    actor.role = "member"
+    record_audit(
+        db,
+        workspace_id=workspace_id,
+        user_id=user.id,
+        event_type="ownership_transferred",
+        resource_type="workspace_membership",
+        resource_id=str(target.id),
+        metadata={"new_owner_user_id": member_user_id},
+    )
+    db.commit()
+    return {"ok": True, "owner_user_id": member_user_id}
 
 
 @router.post("/{workspace_id}/invitations/{invitation_id}/revoke")

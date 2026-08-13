@@ -10,7 +10,7 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import RedirectResponse
 from sqlalchemy import select
 
-from app.api.deps import CurrentUser, CurrentWorkspace, DbSession
+from app.api.deps import CurrentUser, CurrentWorkspace, CurrentWorkspaceOwner, DbSession
 from app.config import get_settings
 from app.logging_config import log_event
 from app.models import (
@@ -19,6 +19,8 @@ from app.models import (
     SplitwiseIntegration,
     TelegramIdentity,
     TelegramLinkCode,
+    User,
+    WorkspaceMembership,
     utc_now,
 )
 from app.rate_limit import rate_limiter
@@ -36,23 +38,61 @@ logger = logging.getLogger(__name__)
 
 
 @router.get("")
-def statuses(db: DbSession) -> dict:
+def statuses(db: DbSession, user: CurrentUser) -> dict:
     settings = get_settings()
+    gmail = db.scalar(select(GmailAccount).where(GmailAccount.enabled.is_(True)))
+    telegram = db.scalar(
+        select(TelegramIdentity).where(
+            TelegramIdentity.user_id == user.id,
+            TelegramIdentity.enabled.is_(True),
+        )
+    )
+    splitwise = db.scalar(
+        select(SplitwiseIntegration).where(
+            SplitwiseIntegration.user_id == user.id,
+            SplitwiseIntegration.enabled.is_(True),
+        )
+    )
     plaid = list(
         db.scalars(select(PlaidItem).where(PlaidItem.enabled.is_(True)).order_by(PlaidItem.id))
     )
+    owner_ids = {item.owner_user_id for item in plaid if item.owner_user_id is not None}
+    owners = {
+        value.id: value
+        for value in db.scalars(select(User).where(User.id.in_(owner_ids)))
+    } if owner_ids else {}
     return {
-        "gmail": {"connected": db.scalar(select(GmailAccount.id)) is not None},
+        "gmail": {
+            "connected": gmail is not None,
+            "identity": gmail.google_user_id if gmail is not None else None,
+        },
         "plaid": {
             "connected": bool(plaid),
             "institutions": [
-                {"id": item.id, "name": item.institution_name or "Connected bank"} for item in plaid
+                {
+                    "id": item.id,
+                    "name": item.institution_name or "Connected bank",
+                    "owner_user_id": item.owner_user_id,
+                    "owner_name": owners[item.owner_user_id].display_name
+                    if item.owner_user_id in owners
+                    else None,
+                    "ownership_verified": item.ownership_verified_at is not None,
+                    "is_mine": item.owner_user_id == user.id,
+                }
+                for item in plaid
             ],
         },
-        "telegram": {"connected": db.scalar(select(TelegramIdentity.id)) is not None},
+        "telegram": {
+            "connected": telegram is not None,
+            "telegram_user_id": telegram.telegram_user_id if telegram is not None else None,
+            "chat_id": telegram.chat_id if telegram is not None else None,
+        },
         "splitwise": {
-            "connected": db.scalar(select(SplitwiseIntegration.id)) is not None,
+            "connected": splitwise is not None,
             "available": settings.has_splitwise_oauth1_consumer,
+            "identity": splitwise.display_name if splitwise is not None else None,
+            "email": splitwise.email if splitwise is not None else None,
+            "verified": splitwise.verified_at is not None if splitwise is not None else False,
         },
         "google_maps": {"connected": True, "managed_by": "application"},
         "openai": {"connected": True, "managed_by": "application"},
@@ -61,7 +101,7 @@ def statuses(db: DbSession) -> dict:
 
 @router.get("/onboarding")
 def onboarding(db: DbSession, user: CurrentUser, workspace: CurrentWorkspace) -> dict:
-    values = statuses(db)
+    values = statuses(db, user)
     return {
         "account_created": True,
         "workspace_created": True,
@@ -80,6 +120,7 @@ def connect_gmail(
     db: DbSession,
     user: CurrentUser,
     workspace: CurrentWorkspace,
+    _owner: CurrentWorkspaceOwner,
 ) -> dict:
     settings = get_settings()
     if not settings.gmail_client_id or not settings.gmail_client_secret:
@@ -122,6 +163,7 @@ def gmail_callback(
     db: DbSession,
     user: CurrentUser,
     workspace: CurrentWorkspace,
+    _owner: CurrentWorkspaceOwner,
 ) -> RedirectResponse:
     settings = get_settings()
     try:
@@ -147,18 +189,30 @@ def gmail_callback(
         response.raise_for_status()
         token_data = response.json()
         refresh_token = str(token_data.get("refresh_token") or "")
-        if not refresh_token:
-            raise ValueError("Gmail did not return a refresh token")
+        access_token = str(token_data.get("access_token") or "")
+        if not refresh_token or not access_token:
+            raise ValueError("Gmail did not return complete OAuth credentials")
+        identity_response = httpx.get(
+            "https://openidconnect.googleapis.com/v1/userinfo",
+            headers={"Authorization": f"Bearer {access_token}"},
+            timeout=15,
+        )
+        identity_response.raise_for_status()
+        identity_data = identity_response.json()
+        google_identity = str(identity_data.get("email") or identity_data.get("sub") or "")
+        if not google_identity or identity_data.get("email_verified") is False:
+            raise ValueError("Gmail did not return a verified account identity")
         account = db.scalar(select(GmailAccount).where(GmailAccount.workspace_id == workspace.id))
         if account is None:
             account = GmailAccount(
                 user_id=user.id,
-                google_user_id="me",
+                google_user_id=google_identity,
                 refresh_token_encrypted=encrypt_secret(refresh_token),
             )
             db.add(account)
         else:
             account.user_id = user.id
+            account.google_user_id = google_identity
             account.refresh_token_encrypted = encrypt_secret(refresh_token)
             account.enabled = True
             account.updated_at = utc_now()
@@ -193,7 +247,12 @@ def gmail_callback(
 
 
 @router.delete("/gmail", status_code=204)
-def disconnect_gmail(db: DbSession, user: CurrentUser, workspace: CurrentWorkspace) -> None:
+def disconnect_gmail(
+    db: DbSession,
+    user: CurrentUser,
+    workspace: CurrentWorkspace,
+    _owner: CurrentWorkspaceOwner,
+) -> None:
     account = db.scalar(select(GmailAccount))
     if account is not None:
         db.delete(account)
@@ -225,9 +284,7 @@ def telegram_link_code(
     )
     db.commit()
     bot_username = settings.telegram_bot_username.strip().lstrip("@")
-    connect_url = (
-        f"https://t.me/{bot_username}?start=connect_{raw}" if bot_username else None
-    )
+    connect_url = f"https://t.me/{bot_username}?start=connect_{raw}" if bot_username else None
     return {
         "code": raw,
         "command": f"/connect {raw}",
@@ -238,7 +295,7 @@ def telegram_link_code(
 
 @router.delete("/telegram", status_code=204)
 def disconnect_telegram(db: DbSession, user: CurrentUser, workspace: CurrentWorkspace) -> None:
-    for identity in db.scalars(select(TelegramIdentity)):
+    for identity in db.scalars(select(TelegramIdentity).where(TelegramIdentity.user_id == user.id)):
         db.delete(identity)
     record_audit(db, workspace_id=workspace.id, user_id=user.id, event_type="telegram_disconnected")
     db.commit()
@@ -254,6 +311,17 @@ def disconnect_plaid(
     item = db.get(PlaidItem, item_id)
     if item is None:
         raise HTTPException(status_code=404, detail="Plaid connection not found")
+    membership = db.scalar(
+        select(WorkspaceMembership).where(
+            WorkspaceMembership.workspace_id == workspace.id,
+            WorkspaceMembership.user_id == user.id,
+        )
+    )
+    if item.owner_user_id != user.id and (membership is None or membership.role != "owner"):
+        raise HTTPException(
+            status_code=403,
+            detail="Only the bank owner or workspace owner can disconnect it",
+        )
     item.enabled = False
     item.access_token_encrypted = None
     record_audit(
@@ -267,9 +335,42 @@ def disconnect_plaid(
     db.commit()
 
 
+@router.post("/plaid/{item_id}/claim")
+def claim_legacy_plaid_item(
+    item_id: int,
+    db: DbSession,
+    user: CurrentUser,
+    workspace: CurrentWorkspace,
+) -> dict:
+    """Explicitly attribute a pre-ownership bank connection to the signed-in user."""
+    item = db.get(PlaidItem, item_id)
+    if item is None or not item.enabled:
+        raise HTTPException(status_code=404, detail="Plaid connection not found")
+    if item.owner_user_id is not None and item.owner_user_id != user.id:
+        raise HTTPException(status_code=409, detail="This bank is already owned by another member")
+    item.owner_user_id = user.id
+    item.ownership_verified_at = utc_now()
+    record_audit(
+        db,
+        workspace_id=workspace.id,
+        user_id=user.id,
+        event_type="plaid_ownership_confirmed",
+        resource_type="plaid_item",
+        resource_id=str(item.id),
+    )
+    db.commit()
+    return {"ok": True, "owner_user_id": user.id}
+
+
 @router.delete("/splitwise", status_code=204)
-def disconnect_splitwise(db: DbSession, user: CurrentUser, workspace: CurrentWorkspace) -> None:
-    integration = db.scalar(select(SplitwiseIntegration))
+def disconnect_splitwise(
+    db: DbSession,
+    user: CurrentUser,
+    workspace: CurrentWorkspace,
+) -> None:
+    integration = db.scalar(
+        select(SplitwiseIntegration).where(SplitwiseIntegration.user_id == user.id)
+    )
     if integration is not None:
         db.delete(integration)
     record_audit(

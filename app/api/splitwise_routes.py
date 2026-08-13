@@ -6,6 +6,7 @@ from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import RedirectResponse
 
 from app.api.deps import CurrentUser, CurrentWorkspace, DbSession
+from app.config import get_settings
 from app.models import SplitwiseIntegration, utc_now
 from app.schemas import (
     CreateGroupRequest,
@@ -59,7 +60,9 @@ def get_me() -> SplitwiseUserOut:
 
 @router.get("/oauth/authorize", response_model=SplitwiseOAuthAuthorizeResponse)
 def get_oauth_authorize_url(
-    db: DbSession, user: CurrentUser, workspace: CurrentWorkspace
+    db: DbSession,
+    user: CurrentUser,
+    workspace: CurrentWorkspace,
 ) -> SplitwiseOAuthAuthorizeResponse:
     try:
         data = SplitwiseService().get_oauth_authorize_url()
@@ -103,9 +106,16 @@ def oauth_callback(
         )
         integration = (
             db.query(SplitwiseIntegration)
-            .filter(SplitwiseIntegration.workspace_id == workspace.id)
+            .filter(
+                SplitwiseIntegration.workspace_id == workspace.id,
+                SplitwiseIntegration.user_id == user.id,
+            )
             .one_or_none()
         )
+        identity = SplitwiseService(
+            get_settings().model_copy(update=data),
+            resolve_workspace_credentials=False,
+        ).get_current_user()
         credentials = encrypt_secret(
             json.dumps(
                 {
@@ -115,12 +125,19 @@ def oauth_callback(
             )
         )
         if integration is None:
-            integration = SplitwiseIntegration(credentials_encrypted=credentials)
+            integration = SplitwiseIntegration(
+                user_id=user.id,
+                credentials_encrypted=credentials,
+            )
             db.add(integration)
         else:
             integration.credentials_encrypted = credentials
             integration.enabled = True
             integration.updated_at = utc_now()
+        integration.splitwise_user_id = str(identity.get("id") or "") or None
+        integration.display_name = friend_display_name(identity)
+        integration.email = str(identity.get("email") or "") or None
+        integration.verified_at = utc_now()
         record_audit(
             db,
             workspace_id=workspace.id,
@@ -155,7 +172,12 @@ def list_groups(q: str = Query(default="")) -> list[GroupOut]:
 
 
 @router.post("/groups", response_model=GroupOut, status_code=201)
-def create_group(request: CreateGroupRequest) -> GroupOut:
+def create_group(
+    request: CreateGroupRequest,
+    db: DbSession,
+    user: CurrentUser,
+    workspace: CurrentWorkspace,
+) -> GroupOut:
     try:
         group = SplitwiseService().create_group(
             name=request.name,
@@ -163,6 +185,15 @@ def create_group(request: CreateGroupRequest) -> GroupOut:
             simplify_by_default=request.simplify_by_default,
             user_ids=request.user_ids,
         )
+        record_audit(
+            db,
+            workspace_id=workspace.id,
+            user_id=user.id,
+            event_type="splitwise_group_created",
+            resource_type="splitwise_group",
+            resource_id=str(group.get("id") or ""),
+        )
+        db.commit()
         return _group_out(group)
     except SplitwiseAPIError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -186,7 +217,13 @@ def list_group_members(group_id: int) -> list[FriendOut]:
 
 
 @router.post("/groups/{group_id}/invite", response_model=list[FriendOut])
-def invite_group_member(group_id: int, request: InviteGroupMemberRequest) -> list[FriendOut]:
+def invite_group_member(
+    group_id: int,
+    request: InviteGroupMemberRequest,
+    db: DbSession,
+    user: CurrentUser,
+    workspace: CurrentWorkspace,
+) -> list[FriendOut]:
     try:
         service = SplitwiseService()
         friend = service.create_friend(
@@ -195,26 +232,68 @@ def invite_group_member(group_id: int, request: InviteGroupMemberRequest) -> lis
             last_name=request.last_name,
         )
         service.add_user_to_group(group_id, int(friend["id"]))
+        record_audit(
+            db,
+            workspace_id=workspace.id,
+            user_id=user.id,
+            event_type="splitwise_group_member_invited",
+            resource_type="splitwise_group",
+            resource_id=str(group_id),
+            metadata={"invited_email_domain": request.email.rpartition("@")[2]},
+        )
+        db.commit()
         return [_friend_out(member) for member in service.get_group_members(group_id)]
     except SplitwiseAPIError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.post("/groups/{group_id}/members", response_model=list[FriendOut])
-def add_group_member(group_id: int, request: GroupMemberRequest) -> list[FriendOut]:
+def add_group_member(
+    group_id: int,
+    request: GroupMemberRequest,
+    db: DbSession,
+    user: CurrentUser,
+    workspace: CurrentWorkspace,
+) -> list[FriendOut]:
     try:
         service = SplitwiseService()
         service.add_user_to_group(group_id, request.user_id)
+        record_audit(
+            db,
+            workspace_id=workspace.id,
+            user_id=user.id,
+            event_type="splitwise_group_member_added",
+            resource_type="splitwise_group",
+            resource_id=str(group_id),
+            metadata={"splitwise_user_id": request.user_id},
+        )
+        db.commit()
         return [_friend_out(member) for member in service.get_group_members(group_id)]
     except SplitwiseAPIError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.delete("/groups/{group_id}/members/{user_id}", response_model=list[FriendOut])
-def remove_group_member(group_id: int, user_id: int) -> list[FriendOut]:
+def remove_group_member(
+    group_id: int,
+    user_id: int,
+    db: DbSession,
+    actor: CurrentUser,
+    workspace: CurrentWorkspace,
+) -> list[FriendOut]:
     try:
         service = SplitwiseService()
         service.remove_user_from_group(group_id, user_id)
+        record_audit(
+            db,
+            workspace_id=workspace.id,
+            user_id=actor.id,
+            event_type="splitwise_group_member_removed",
+            resource_type="splitwise_group",
+            resource_id=str(group_id),
+            metadata={"splitwise_user_id": user_id},
+        )
+        db.commit()
         return [_friend_out(member) for member in service.get_group_members(group_id)]
     except SplitwiseAPIError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

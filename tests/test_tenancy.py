@@ -292,6 +292,59 @@ def test_transaction_notifications_resolve_telegram_chat_from_active_workspace(
     assert resolved == {"a": "chat-a", "b": "chat-b"}
 
 
+def test_two_members_in_one_workspace_resolve_their_own_telegram_recipient(tenant_db):
+    factory, contexts = tenant_db
+    with factory() as db:
+        member = db.get(User, contexts["b"].user_id)
+        db.add(
+            WorkspaceMembership(
+                workspace_id=contexts["a"].workspace_id,
+                user_id=member.id,
+                role="member",
+                is_default=False,
+            )
+        )
+        db.add_all(
+            [
+                TelegramIdentity(
+                    workspace_id=contexts["a"].workspace_id,
+                    user_id=contexts["a"].user_id,
+                    telegram_user_id="owner-tg",
+                    chat_id="owner-chat",
+                ),
+                TelegramIdentity(
+                    workspace_id=contexts["a"].workspace_id,
+                    user_id=contexts["b"].user_id,
+                    telegram_user_id="member-tg",
+                    chat_id="member-chat",
+                ),
+            ]
+        )
+        db.commit()
+        base = Settings(telegram_chat_id="legacy-chat", _env_file=None)
+        owner = job_tenancy.telegram_settings_for_workspace(
+            db,
+            contexts["a"].workspace_id,
+            base,
+            user_id=contexts["a"].user_id,
+        )
+        member_settings = job_tenancy.telegram_settings_for_workspace(
+            db,
+            contexts["a"].workspace_id,
+            base,
+            user_id=contexts["b"].user_id,
+        )
+        ambiguous = job_tenancy.telegram_settings_for_workspace(
+            db,
+            contexts["a"].workspace_id,
+            base,
+        )
+
+    assert owner.telegram_chat_id == "owner-chat"
+    assert member_settings.telegram_chat_id == "member-chat"
+    assert ambiguous.telegram_chat_id == ""
+
+
 def test_transaction_lists_and_gets_do_not_leak_other_workspace(tenant_db):
     factory, contexts = tenant_db
     values = _seed_representative_data(factory, contexts)

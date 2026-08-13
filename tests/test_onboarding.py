@@ -22,6 +22,7 @@ from app.models import (
     GmailAccount,
     OAuthState,
     PlaidItem,
+    SplitwiseIntegration,
     TelegramIdentity,
     TelegramLinkCode,
     User,
@@ -175,6 +176,12 @@ def test_first_login_provisions_user_personal_workspace_and_owner(database):
         assert membership.is_default is True
 
 
+def test_unverified_oidc_email_is_rejected(database):
+    claims = _verifier().validate(_identity_token(email_verified=False))
+    with database() as db, pytest.raises(OIDCValidationError, match="verify the email"):
+        provision_oidc_identity(db, claims, provider="https://identity.example")
+
+
 def test_oidc_at_hash_is_validated_when_access_token_is_available():
     access_token = "provider-access-token"
     token = _identity_token(at_hash=jwt.calculate_at_hash(access_token, hashlib.sha256))
@@ -251,9 +258,7 @@ def test_verified_bootstrap_claims_legacy_integrations_and_default_stays_stable(
         )
         assert ensure_default_tenancy(db) == migrated
         gmail = db.scalar(select(GmailAccount).execution_options(skip_tenant_scope=True))
-        telegram = db.scalar(
-            select(TelegramIdentity).execution_options(skip_tenant_scope=True)
-        )
+        telegram = db.scalar(select(TelegramIdentity).execution_options(skip_tenant_scope=True))
         from app.models import SplitwiseIntegration
 
         splitwise = db.scalar(
@@ -357,6 +362,133 @@ def test_valid_invitation_is_single_use_and_does_not_accept_guessed_workspace(on
                 WorkspaceMembership.workspace_id == contexts["owner"].workspace_id,
             )
         )
+        selected = db.scalar(
+            select(WorkspaceMembership).where(
+                WorkspaceMembership.user_id == contexts["guest"].user_id,
+                WorkspaceMembership.is_default.is_(True),
+            )
+        )
+        assert selected.workspace_id == contexts["owner"].workspace_id
+
+
+def test_workspace_integration_permissions_and_personal_telegram_disconnect(
+    onboarding_app,
+):
+    client, database, contexts = onboarding_app
+    token = _invite(client, contexts["owner"].workspace_id)
+    assert (
+        client.post(
+            "/api/workspaces/invitations/accept",
+            headers={"Authorization": "Bearer guest-token"},
+            json={"token": token},
+        ).status_code
+        == 200
+    )
+    with database() as db:
+        db.info["workspace_id"] = contexts["owner"].workspace_id
+        db.add_all(
+            [
+                GmailAccount(
+                    workspace_id=contexts["owner"].workspace_id,
+                    user_id=contexts["owner"].user_id,
+                    google_user_id="owner@gmail.test",
+                    refresh_token_encrypted="encrypted",
+                ),
+                PlaidItem(
+                    workspace_id=contexts["owner"].workspace_id,
+                    item_id="shared-item",
+                    access_token_encrypted="encrypted",
+                ),
+                SplitwiseIntegration(
+                    workspace_id=contexts["owner"].workspace_id,
+                    user_id=contexts["owner"].user_id,
+                    credentials_encrypted="encrypted",
+                ),
+                TelegramIdentity(
+                    workspace_id=contexts["owner"].workspace_id,
+                    user_id=contexts["owner"].user_id,
+                    telegram_user_id="owner-telegram",
+                    chat_id="owner-chat",
+                ),
+                TelegramIdentity(
+                    workspace_id=contexts["owner"].workspace_id,
+                    user_id=contexts["guest"].user_id,
+                    telegram_user_id="guest-telegram",
+                    chat_id="guest-chat",
+                ),
+            ]
+        )
+        db.commit()
+        plaid_id = db.scalar(select(PlaidItem.id).where(PlaidItem.item_id == "shared-item"))
+
+    member_headers = {"Authorization": "Bearer guest-token"}
+    assert client.delete("/api/integrations/gmail", headers=member_headers).status_code == 403
+    assert (
+        client.delete(f"/api/integrations/plaid/{plaid_id}", headers=member_headers).status_code
+        == 403
+    )
+    # Splitwise is personal: disconnecting as the guest cannot touch the owner's account.
+    assert client.delete("/api/integrations/splitwise", headers=member_headers).status_code == 204
+    status = client.get("/api/integrations", headers=member_headers)
+    assert status.status_code == 200
+    assert status.json()["telegram"]["connected"] is True
+    assert client.delete("/api/integrations/telegram", headers=member_headers).status_code == 204
+
+    with database() as db:
+        identities = list(
+            db.scalars(select(TelegramIdentity).execution_options(skip_tenant_scope=True))
+        )
+        assert [(identity.user_id, identity.telegram_user_id) for identity in identities] == [
+            (contexts["owner"].user_id, "owner-telegram")
+        ]
+        assert db.scalar(select(GmailAccount.id).execution_options(skip_tenant_scope=True))
+        assert db.scalar(select(PlaidItem.enabled).execution_options(skip_tenant_scope=True))
+        assert db.scalar(select(SplitwiseIntegration.id).execution_options(skip_tenant_scope=True))
+
+
+def test_owner_can_transfer_ownership_and_new_owner_can_remove_member(onboarding_app):
+    client, database, contexts = onboarding_app
+    token = _invite(client, contexts["owner"].workspace_id)
+    client.post(
+        "/api/workspaces/invitations/accept",
+        headers={"Authorization": "Bearer guest-token"},
+        json={"token": token},
+    )
+    transfer = client.post(
+        f"/api/workspaces/{contexts['owner'].workspace_id}/members/"
+        f"{contexts['guest'].user_id}/transfer-ownership",
+        headers={"Authorization": "Bearer owner-token"},
+    )
+    assert transfer.status_code == 200
+    with database() as db:
+        roles = {
+            membership.user_id: membership.role
+            for membership in db.scalars(
+                select(WorkspaceMembership).where(
+                    WorkspaceMembership.workspace_id == contexts["owner"].workspace_id
+                )
+            )
+        }
+        assert roles == {
+            contexts["owner"].user_id: "member",
+            contexts["guest"].user_id: "owner",
+        }
+
+    removed = client.delete(
+        f"/api/workspaces/{contexts['owner'].workspace_id}/members/{contexts['owner'].user_id}",
+        headers={"Authorization": "Bearer guest-token"},
+    )
+    assert removed.status_code == 204
+    with database() as db:
+        assert (
+            db.scalar(
+                select(WorkspaceMembership.id).where(
+                    WorkspaceMembership.workspace_id == contexts["owner"].workspace_id,
+                    WorkspaceMembership.user_id == contexts["owner"].user_id,
+                )
+            )
+            is None
+        )
 
 
 def test_expired_and_wrong_email_invitations_are_rejected(onboarding_app):
@@ -426,9 +558,7 @@ def test_oauth_state_is_durable_tenant_bound_and_single_use(database):
         assert raw not in stored.payload_encrypted
 
 
-def test_gmail_callback_attaches_credentials_to_initiating_workspace(
-    onboarding_app, monkeypatch
-):
+def test_gmail_callback_attaches_credentials_to_initiating_workspace(onboarding_app, monkeypatch):
     client, database, contexts = onboarding_app
     with database() as db:
         state = create_oauth_state(
@@ -443,7 +573,17 @@ def test_gmail_callback_attaches_credentials_to_initiating_workspace(
             return None
 
         def json(self):
-            return {"refresh_token": "gmail-refresh-secret"}
+            return {
+                "refresh_token": "gmail-refresh-secret",
+                "access_token": "gmail-access-secret",
+            }
+
+    class IdentityResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"email": "owner@gmail.test", "email_verified": True}
 
     monkeypatch.setattr(
         integration_routes,
@@ -456,6 +596,11 @@ def test_gmail_callback_attaches_credentials_to_initiating_workspace(
         ),
     )
     monkeypatch.setattr(integration_routes.httpx, "post", lambda *_args, **_kwargs: TokenResponse())
+    monkeypatch.setattr(
+        integration_routes.httpx,
+        "get",
+        lambda *_args, **_kwargs: IdentityResponse(),
+    )
     monkeypatch.setattr(integration_routes, "encrypt_secret", lambda value: f"encrypted:{value}")
     response = client.get(
         "/api/integrations/gmail/callback",
@@ -465,11 +610,10 @@ def test_gmail_callback_attaches_credentials_to_initiating_workspace(
     )
     assert response.status_code == 303
     with database() as db:
-        account = db.scalar(
-            select(GmailAccount).execution_options(skip_tenant_scope=True)
-        )
+        account = db.scalar(select(GmailAccount).execution_options(skip_tenant_scope=True))
         assert account.workspace_id == contexts["owner"].workspace_id
         assert account.user_id == contexts["owner"].user_id
+        assert account.google_user_id == "owner@gmail.test"
         assert account.refresh_token_encrypted == "encrypted:gmail-refresh-secret"
 
 
@@ -571,9 +715,7 @@ def test_telegram_link_code_returns_direct_bot_link(database, monkeypatch):
         assert value["code"] not in stored.code_hash
 
 
-def test_integration_status_reports_splitwise_onboarding_availability(
-    onboarding_app, monkeypatch
-):
+def test_integration_status_reports_splitwise_onboarding_availability(onboarding_app, monkeypatch):
     client, _database, _contexts = onboarding_app
     monkeypatch.setattr(
         integration_routes,
@@ -591,7 +733,13 @@ def test_integration_status_reports_splitwise_onboarding_availability(
     )
 
     assert response.status_code == 200
-    assert response.json()["splitwise"] == {"connected": False, "available": True}
+    assert response.json()["splitwise"] == {
+        "connected": False,
+        "available": True,
+        "identity": None,
+        "email": None,
+        "verified": False,
+    }
 
 
 @pytest.mark.parametrize(

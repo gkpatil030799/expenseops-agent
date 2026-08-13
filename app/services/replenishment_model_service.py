@@ -135,6 +135,10 @@ class ReplenishmentModelService:
             previous_metrics = dict(previous.metrics_json or {})
             previous_metrics["rollback_reason"] = f"Rolled back to model {target.version}."
             previous.metrics_json = previous_metrics
+            # Retire the current model before activating its replacement. This
+            # keeps the database's one-active-model-per-workspace invariant true
+            # for every statement, including SQLite's executemany ordering.
+            self.db.flush([previous])
         target.status = "active"
         target_metrics = dict(target.metrics_json or {})
         target_metrics["activation_reason"] = "Manual rollback selected this validated artifact."

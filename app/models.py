@@ -10,10 +10,12 @@ from sqlalchemy import (
     DateTime,
     Float,
     ForeignKey,
+    Index,
     Integer,
     String,
     Text,
     UniqueConstraint,
+    text,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -34,12 +36,16 @@ class TenantScoped:
 
 class User(Base):
     __tablename__ = "users"
+    __table_args__ = (
+        UniqueConstraint("email", name="uq_users_email"),
+        UniqueConstraint("api_token_hash", name="uq_users_api_token_hash"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    email: Mapped[str] = mapped_column(String(320), unique=True, index=True)
+    email: Mapped[str] = mapped_column(String(320), index=True)
     display_name: Mapped[str] = mapped_column(String(255))
     status: Mapped[str] = mapped_column(String(32), default="active", index=True)
-    api_token_hash: Mapped[str | None] = mapped_column(String(64), unique=True, nullable=True)
+    api_token_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
@@ -60,8 +66,10 @@ class WorkspaceMembership(Base):
     __table_args__ = (UniqueConstraint("workspace_id", "user_id", name="uq_workspace_membership"),)
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    workspace_id: Mapped[int] = mapped_column(ForeignKey("workspaces.id"), index=True)
-    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    workspace_id: Mapped[int] = mapped_column(
+        ForeignKey("workspaces.id", ondelete="CASCADE"), index=True
+    )
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
     role: Mapped[str] = mapped_column(String(32), default="member")
     is_default: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
@@ -74,7 +82,10 @@ class GmailAccount(TenantScoped, Base):
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    workspace_id: Mapped[int] = mapped_column(
+        ForeignKey("workspaces.id", ondelete="CASCADE"), nullable=False, default=1, index=True
+    )
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
     google_user_id: Mapped[str] = mapped_column(String(320), default="me")
     refresh_token_encrypted: Mapped[str] = mapped_column(Text)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
@@ -89,7 +100,10 @@ class TelegramIdentity(TenantScoped, Base):
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    workspace_id: Mapped[int] = mapped_column(
+        ForeignKey("workspaces.id", ondelete="CASCADE"), nullable=False, default=1, index=True
+    )
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
     telegram_user_id: Mapped[str] = mapped_column(String(128), index=True)
     chat_id: Mapped[str] = mapped_column(String(128), index=True)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
@@ -98,10 +112,25 @@ class TelegramIdentity(TenantScoped, Base):
 
 class SplitwiseIntegration(TenantScoped, Base):
     __tablename__ = "splitwise_integrations"
-    __table_args__ = (UniqueConstraint("workspace_id", name="uq_splitwise_workspace"),)
+    __table_args__ = (
+        UniqueConstraint("workspace_id", "user_id", name="uq_splitwise_workspace_user"),
+        UniqueConstraint(
+            "workspace_id", "splitwise_user_id", name="uq_splitwise_workspace_external_user"
+        ),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    workspace_id: Mapped[int] = mapped_column(
+        ForeignKey("workspaces.id", ondelete="CASCADE"), nullable=False, default=1, index=True
+    )
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
     credentials_encrypted: Mapped[str] = mapped_column(Text)
+    splitwise_user_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    display_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    email: Mapped[str | None] = mapped_column(String(320), nullable=True)
+    verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
@@ -126,11 +155,12 @@ class AuthIdentity(Base):
 
 class AuthSession(Base):
     __tablename__ = "auth_sessions"
+    __table_args__ = (UniqueConstraint("token_hash", name="uq_auth_sessions_token_hash"),)
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
     selected_workspace_id: Mapped[int] = mapped_column(ForeignKey("workspaces.id"), index=True)
-    token_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    token_hash: Mapped[str] = mapped_column(String(64), index=True)
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
@@ -139,11 +169,15 @@ class AuthSession(Base):
 
 class WorkspaceInvitation(TenantScoped, Base):
     __tablename__ = "workspace_invitations"
+    __table_args__ = (UniqueConstraint("token_hash", name="uq_workspace_invitation_token_hash"),)
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    workspace_id: Mapped[int] = mapped_column(
+        ForeignKey("workspaces.id", ondelete="CASCADE"), nullable=False, default=1, index=True
+    )
     email: Mapped[str] = mapped_column(String(320), index=True)
     role: Mapped[str] = mapped_column(String(32), default="member")
-    token_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    token_hash: Mapped[str] = mapped_column(String(64), index=True)
     status: Mapped[str] = mapped_column(String(32), default="pending", index=True)
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
     invited_by_user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
@@ -153,6 +187,7 @@ class WorkspaceInvitation(TenantScoped, Base):
 
 class OAuthState(Base):
     __tablename__ = "oauth_states"
+    __table_args__ = (UniqueConstraint("state_hash", name="uq_oauth_state_hash"),)
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     provider: Mapped[str] = mapped_column(String(64), index=True)
@@ -162,7 +197,7 @@ class OAuthState(Base):
     user_id: Mapped[int | None] = mapped_column(
         ForeignKey("users.id", ondelete="CASCADE"), nullable=True, index=True
     )
-    state_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    state_hash: Mapped[str] = mapped_column(String(64), index=True)
     payload_encrypted: Mapped[str | None] = mapped_column(Text, nullable=True)
     redirect_after: Mapped[str | None] = mapped_column(String(500), nullable=True)
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
@@ -172,10 +207,14 @@ class OAuthState(Base):
 
 class TelegramLinkCode(TenantScoped, Base):
     __tablename__ = "telegram_link_codes"
+    __table_args__ = (UniqueConstraint("code_hash", name="uq_telegram_link_code_hash"),)
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    workspace_id: Mapped[int] = mapped_column(
+        ForeignKey("workspaces.id", ondelete="CASCADE"), nullable=False, default=1, index=True
+    )
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
-    code_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    code_hash: Mapped[str] = mapped_column(String(64), index=True)
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
     used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
@@ -286,6 +325,12 @@ class PlaidItem(TenantScoped, Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     item_id: Mapped[str] = mapped_column(String(128), unique=True, index=True)
+    owner_user_id: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    ownership_verified_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     access_token_encrypted: Mapped[str | None] = mapped_column(Text, nullable=True)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
     cursor: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -585,6 +630,14 @@ class ReplenishmentModelVersion(TenantScoped, Base):
     __tablename__ = "replenishment_model_versions"
     __table_args__ = (
         UniqueConstraint("workspace_id", "version", name="uq_model_version_workspace_version"),
+        Index(
+            "uq_replenishment_workspace_single_active_model",
+            "workspace_id",
+            "status",
+            unique=True,
+            postgresql_where=text("status = 'active'"),
+            sqlite_where=text("status = 'active'"),
+        ),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)

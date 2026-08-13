@@ -7,7 +7,7 @@ from hashlib import sha256
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
 from sqlalchemy import select
 
-from app.api.deps import DbSession
+from app.api.deps import CurrentUser, CurrentWorkspaceOwner, DbSession
 from app.config import get_settings
 from app.logging_config import log_event
 from app.models import PlaidItem, PlaidWebhookEvent, utc_now
@@ -39,7 +39,10 @@ logger = logging.getLogger(__name__)
 
 
 @router.post("/link-token", response_model=LinkTokenResponse)
-def create_link_token(request: Request) -> LinkTokenResponse:
+def create_link_token(
+    request: Request,
+    _user: CurrentUser,
+) -> LinkTokenResponse:
     try:
         user_id = getattr(request.state, "user_id", "legacy")
         data = PlaidService().create_link_token(client_user_id=f"expenseops-user-{user_id}")
@@ -52,7 +55,10 @@ def create_link_token(request: Request) -> LinkTokenResponse:
 
 @router.post("/exchange-public-token", response_model=PublicTokenExchangeResponse)
 def exchange_public_token(
-    payload: PublicTokenExchangeRequest, request: Request, db: DbSession
+    payload: PublicTokenExchangeRequest,
+    request: Request,
+    db: DbSession,
+    user: CurrentUser,
 ) -> PublicTokenExchangeResponse:
     try:
         plaid_data = PlaidService().exchange_public_token(payload.public_token)
@@ -67,11 +73,20 @@ def exchange_public_token(
     if item is None:
         item = PlaidItem(
             item_id=item_id,
+            owner_user_id=user.id,
+            ownership_verified_at=utc_now(),
             access_token_encrypted=access_token_encrypted,
             institution_name=payload.institution_name,
         )
         db.add(item)
     else:
+        if item.owner_user_id is not None and item.owner_user_id != user.id:
+            raise HTTPException(
+                status_code=409,
+                detail="This bank connection already belongs to another workspace member",
+            )
+        item.owner_user_id = user.id
+        item.ownership_verified_at = utc_now()
         item.access_token_encrypted = access_token_encrypted
         item.enabled = True
         item.institution_name = payload.institution_name or item.institution_name
@@ -104,7 +119,11 @@ def exchange_public_token(
 
 
 @router.post("/sync")
-def sync_all_items(db: DbSession) -> dict:
+def sync_all_items(
+    db: DbSession,
+    _user: CurrentUser,
+    _owner: CurrentWorkspaceOwner,
+) -> dict:
     try:
         return TransactionService(db).sync_all_items()
     except Exception as exc:
