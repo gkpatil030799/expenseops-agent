@@ -1,11 +1,11 @@
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { Brain, Building2, CheckCircle2, ChevronRight, Circle, Copy, ExternalLink, Link2, MessageCircle, Pencil, Plus, Settings2, Shield, SlidersHorizontal, Unplug, UserMinus, UserRound, Users, UsersRound, WalletCards } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { PageHeader } from "@/components/ui/page-header";
-import { api } from "@/lib/api";
+import { ApiError, api, apiErrorMessage } from "@/lib/api";
 import { onboardingChecklist } from "@/onboardingLogic";
 
 type AccountContext = {
@@ -49,6 +49,28 @@ export function AccountSettingsPage({ context, splitwiseTools, learnedBehaviorTo
   const [integrationError, setIntegrationError] = useState("");
   const [onboarding, setOnboarding] = useState<OnboardingStatus | null>(null);
   const [section, setSection] = useState<SettingsSection>("account");
+  const [busyAction, setBusyAction] = useState<string | null>(null);
+  const pendingActions = useRef(new Set<string>());
+
+  async function performAction<T>(key: string, work: () => Promise<T>, success?: string) {
+    if (pendingActions.current.has(key)) return undefined;
+    pendingActions.current.add(key);
+    setBusyAction(key);
+    setMessage("");
+    setIntegrationError("");
+    try {
+      const result = await work();
+      if (success) setMessage(success);
+      return result;
+    } catch (error) {
+      const supportId = error instanceof ApiError ? ` Support ID: ${error.correlationId}` : "";
+      setIntegrationError(`${apiErrorMessage(error, "This change could not be completed.")}${supportId}`);
+      return undefined;
+    } finally {
+      pendingActions.current.delete(key);
+      setBusyAction((current) => current === key ? null : current);
+    }
+  }
 
   async function load() {
     const [workspaceValues, integrationValues, memberValues, onboardingValue] = await Promise.all([
@@ -63,7 +85,12 @@ export function AccountSettingsPage({ context, splitwiseTools, learnedBehaviorTo
     setOnboarding(onboardingValue);
   }
 
-  useEffect(() => void load(), []);
+  useEffect(() => {
+    void load().catch((error) => {
+      const supportId = error instanceof ApiError ? ` Support ID: ${error.correlationId}` : "";
+      setIntegrationError(`${apiErrorMessage(error, "Settings could not be loaded.")}${supportId}`);
+    });
+  }, []);
 
   useEffect(() => {
     if (!telegramSetup) return;
@@ -82,77 +109,78 @@ export function AccountSettingsPage({ context, splitwiseTools, learnedBehaviorTo
   }, [telegramSetup]);
 
   async function createWorkspace() {
-    await api("/api/workspaces", { method: "POST", body: JSON.stringify({ name: workspaceName }) });
-    setWorkspaceName("");
-    await load();
+    await performAction("create-workspace", async () => {
+      await api("/api/workspaces", { method: "POST", body: JSON.stringify({ name: workspaceName }) });
+      setWorkspaceName("");
+      await load();
+    }, "Workspace created.");
   }
 
   async function switchWorkspace(id: number) {
-    await api(`/api/workspaces/${id}/switch`, { method: "POST" });
-    window.location.reload();
+    await performAction(`switch-workspace-${id}`, async () => {
+      await api(`/api/workspaces/${id}/switch`, { method: "POST" });
+      window.location.reload();
+    });
   }
 
   async function renameWorkspace() {
-    await api(`/api/workspaces/${context.workspace.id}`, {
-      method: "PATCH",
-      body: JSON.stringify({ name: renameValue }),
-    });
-    setMessage("Workspace renamed.");
-    await load();
+    await performAction("rename-workspace", async () => {
+      await api(`/api/workspaces/${context.workspace.id}`, {
+        method: "PATCH",
+        body: JSON.stringify({ name: renameValue }),
+      });
+      await load();
+    }, "Workspace renamed.");
   }
 
   async function leaveWorkspace() {
     if (!window.confirm(`Leave ${context.workspace.name}?`)) return;
-    await api(`/api/workspaces/${context.workspace.id}/membership`, { method: "DELETE" });
-    window.location.reload();
+    await performAction("leave-workspace", async () => {
+      await api(`/api/workspaces/${context.workspace.id}/membership`, { method: "DELETE" });
+      window.location.reload();
+    });
   }
 
   async function invite() {
-    const value = await api<{ invite_token: string }>(
-      `/api/workspaces/${context.workspace.id}/invitations`,
-      { method: "POST", body: JSON.stringify({ email: inviteEmail, role: "member" }) },
-    );
-    setInviteLink(`${window.location.origin}/?invite=${encodeURIComponent(value.invite_token)}`);
+    await performAction("invite-member", async () => {
+      const value = await api<{ invite_token: string }>(
+        `/api/workspaces/${context.workspace.id}/invitations`,
+        { method: "POST", body: JSON.stringify({ email: inviteEmail, role: "member" }) },
+      );
+      setInviteLink(`${window.location.origin}/?invite=${encodeURIComponent(value.invite_token)}`);
+    }, "Invitation link created. Share it privately with the invited person.");
   }
 
   async function connectGmail() {
-    setIntegrationError("");
-    try {
+    await performAction("connect-gmail", async () => {
       const value = await api<{ authorization_url: string }>("/api/integrations/gmail/connect", {
         method: "POST",
       });
       window.location.assign(value.authorization_url);
-    } catch (error) {
-      setIntegrationError(connectionError(error, "Gmail"));
-    }
+    });
   }
 
   async function connectTelegram() {
-    setIntegrationError("");
-    try {
+    await performAction("connect-telegram", async () => {
       const value = await api<{ command: string; connect_url: string | null }>("/api/integrations/telegram/link-code", {
         method: "POST",
       });
       setTelegramSetup(value);
-    } catch (error) {
-      setIntegrationError(connectionError(error, "Telegram"));
-    }
+    });
   }
 
   async function connectSplitwise() {
-    setIntegrationError("");
-    try {
+    await performAction("connect-splitwise", async () => {
       const value = await api<{ authorize_url: string }>("/splitwise/oauth/authorize");
       window.location.assign(value.authorize_url);
-    } catch (error) {
-      setIntegrationError(connectionError(error, "Splitwise"));
-    }
+    });
   }
 
   async function disconnect(path: string) {
-    await api(path, { method: "DELETE" });
-    setMessage("Integration disconnected. Your existing history was retained.");
-    await load();
+    await performAction(`disconnect-${path}`, async () => {
+      await api(path, { method: "DELETE" });
+      await load();
+    }, "Integration disconnected. Your existing history was retained.");
   }
 
   const checklist = integrations ? onboardingChecklist(integrations) : [];
@@ -190,30 +218,30 @@ export function AccountSettingsPage({ context, splitwiseTools, learnedBehaviorTo
           {section === "workspace" ? <SettingsPanel title="Workspace and members" description="Switch workspaces, manage the current household, and invite people.">
             <div className="grid gap-5 xl:grid-cols-2">
               <Card><CardHeader><CardTitle>Workspaces</CardTitle><CardDescription>Switch among workspaces where you are a member.</CardDescription></CardHeader><CardContent className="grid gap-3">
-                {workspaces.map((workspace) => <button key={workspace.id} type="button" onClick={() => !workspace.current && switchWorkspace(workspace.id)} className="flex min-h-11 items-center justify-between rounded-lg border border-slate-200 px-3 py-2 text-left hover:border-indigo-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500"><span><span className="font-medium text-slate-950">{workspace.name}</span><span className="ml-2 text-xs capitalize text-slate-600">{workspace.role}</span></span>{workspace.current ? <CheckCircle2 className="h-4 w-4 text-emerald-600" /> : <ChevronRight className="h-4 w-4 text-slate-400" />}</button>)}
-                <div className="flex flex-col gap-2 sm:flex-row"><Input value={workspaceName} onChange={(event) => setWorkspaceName(event.target.value)} placeholder="New workspace name" /><Button disabled={!workspaceName.trim()} onClick={createWorkspace}><Plus className="h-4 w-4" />Create</Button></div>
-                {canManageWorkspace ? <div className="flex flex-col gap-2 border-t border-slate-200 pt-3 sm:flex-row"><Input aria-label="Current workspace name" value={renameValue} onChange={(event) => setRenameValue(event.target.value)} /><Button variant="outline" disabled={!renameValue.trim() || renameValue.trim() === context.workspace.name} onClick={renameWorkspace}><Pencil className="h-4 w-4" />Rename</Button></div> : null}
+                {workspaces.map((workspace) => <button key={workspace.id} type="button" disabled={Boolean(busyAction)} onClick={() => !workspace.current && switchWorkspace(workspace.id)} className="flex min-h-11 items-center justify-between rounded-lg border border-slate-200 px-3 py-2 text-left hover:border-indigo-300 disabled:cursor-not-allowed disabled:opacity-60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500"><span><span className="font-medium text-slate-950">{workspace.name}</span><span className="ml-2 text-xs capitalize text-slate-600">{workspace.role}</span></span>{workspace.current ? <CheckCircle2 className="h-4 w-4 text-emerald-600" /> : <ChevronRight className="h-4 w-4 text-slate-400" />}</button>)}
+                <div className="flex flex-col gap-2 sm:flex-row"><Input value={workspaceName} onChange={(event) => setWorkspaceName(event.target.value)} placeholder="New workspace name" /><Button disabled={!workspaceName.trim() || busyAction === "create-workspace"} onClick={createWorkspace}><Plus className="h-4 w-4" />{busyAction === "create-workspace" ? "Creating…" : "Create"}</Button></div>
+                {canManageWorkspace ? <div className="flex flex-col gap-2 border-t border-slate-200 pt-3 sm:flex-row"><Input aria-label="Current workspace name" value={renameValue} onChange={(event) => setRenameValue(event.target.value)} /><Button variant="outline" disabled={!renameValue.trim() || renameValue.trim() === context.workspace.name || busyAction === "rename-workspace"} onClick={renameWorkspace}><Pencil className="h-4 w-4" />{busyAction === "rename-workspace" ? "Renaming…" : "Rename"}</Button></div> : null}
               </CardContent></Card>
               <Card><CardHeader><CardTitle>Members</CardTitle><CardDescription>{canManageWorkspace ? "Invite someone using a single-use, seven-day link." : "Member access is managed by a workspace owner."}</CardDescription></CardHeader><CardContent className="grid gap-3">
                 <div className="grid gap-2">{members.map((member) => <div key={member.user_id} className="flex min-h-11 flex-col justify-between gap-1 rounded-lg border border-slate-200 px-3 py-2 sm:flex-row sm:items-center"><span className="min-w-0"><span className="block truncate font-medium text-slate-950">{member.display_name}</span><span className="block truncate text-sm text-slate-600">{member.email}</span></span><span className="text-xs font-semibold uppercase tracking-wide text-slate-600">{member.role}</span></div>)}</div>
-                {canManageWorkspace ? <><div className="flex flex-col gap-2 sm:flex-row"><Input type="email" value={inviteEmail} onChange={(event) => setInviteEmail(event.target.value)} placeholder="friend@example.com" /><Button disabled={!inviteEmail.includes("@")} onClick={invite}><Users className="h-4 w-4" />Invite</Button></div>{inviteLink ? <CopyValue label="Share this invitation privately" value={inviteLink} /> : null}</> : null}
+                {canManageWorkspace ? <><div className="flex flex-col gap-2 sm:flex-row"><Input type="email" value={inviteEmail} onChange={(event) => setInviteEmail(event.target.value)} placeholder="friend@example.com" /><Button disabled={!inviteEmail.includes("@") || busyAction === "invite-member"} onClick={invite}><Users className="h-4 w-4" />{busyAction === "invite-member" ? "Creating link…" : "Invite"}</Button></div>{inviteLink ? <CopyValue label="Share this invitation privately" value={inviteLink} /> : null}</> : null}
               </CardContent></Card>
             </div>
           </SettingsPanel> : null}
 
           {section === "personal" ? <SettingsPanel title="Personal connections" description="Services tied to you as an individual, not every workspace member.">
             <Card><CardHeader><CardTitle>Telegram</CardTitle><CardDescription>Personal delivery channel for your notifications, approvals, and receipt uploads.</CardDescription></CardHeader><CardContent className="space-y-3">
-              <IntegrationRow name="Telegram" mark="TG" scope="Personal" connected={integrations?.telegram.connected} connectedDetail="Connected to your ExpenseOps user; exact Telegram identity is not returned by the current status API." onConnect={connectTelegram} onDisconnect={() => disconnect("/api/integrations/telegram")} />
+              <IntegrationRow name="Telegram" mark="TG" scope="Personal" connected={integrations?.telegram.connected} connectedDetail="Connected to your ExpenseOps user; exact Telegram identity is not returned by the current status API." busy={busyAction === "connect-telegram" || busyAction === "disconnect-/api/integrations/telegram"} onConnect={connectTelegram} onDisconnect={() => disconnect("/api/integrations/telegram")} />
               {telegramSetup ? <TelegramSetup value={telegramSetup} /> : null}
             </CardContent></Card>
           </SettingsPanel> : null}
 
           {section === "workspace-connections" ? <SettingsPanel title="Workspace connections" description="Shared data sources and application-managed providers for this workspace.">
             <Card><CardContent className="grid gap-3 p-4 sm:p-5">
-              <IntegrationRow name="Gmail" mark="G" scope="Workspace" connected={integrations?.gmail.connected} connectedDetail="Connected account; exact Gmail identity is not returned by the current status API." ownerManaged={!canManageWorkspace} onConnect={canManageWorkspace ? connectGmail : undefined} onDisconnect={canManageWorkspace ? () => disconnect("/api/integrations/gmail") : undefined} />
+              <IntegrationRow name="Gmail" mark="G" scope="Workspace" connected={integrations?.gmail.connected} connectedDetail="Connected account; exact Gmail identity is not returned by the current status API." ownerManaged={!canManageWorkspace} busy={busyAction === "connect-gmail" || busyAction === "disconnect-/api/integrations/gmail"} onConnect={canManageWorkspace ? connectGmail : undefined} onDisconnect={canManageWorkspace ? () => disconnect("/api/integrations/gmail") : undefined} />
               <IntegrationRow name="Plaid" mark="P" scope="Workspace" connected={integrations?.plaid.connected} connectedDetail={integrations?.plaid.institutions.map((value) => value.name).join(", ") || "Connected bank identity is unavailable."} ownerManaged={!canManageWorkspace} onConnect={canManageWorkspace ? () => window.location.assign("/?workspace=expenses&connect=plaid") : undefined} />
-              {canManageWorkspace ? integrations?.plaid.institutions.map((institution) => <div key={institution.id} className="flex min-h-11 items-center justify-between gap-3 rounded-lg bg-slate-50 px-3 py-2 text-sm"><span className="truncate">{institution.name}</span><Button size="sm" variant="outline" onClick={() => disconnect(`/api/integrations/plaid/${institution.id}`)}><Unplug className="h-4 w-4" />Disconnect</Button></div>) : null}
-              <IntegrationRow name="Splitwise" mark="S" scope="Workspace" connected={integrations?.splitwise.connected} available={integrations?.splitwise.available} unavailableDetail="Splitwise sign-in is not configured yet. Ask a workspace owner to finish setup." connectedDetail="Connected integration; exact Splitwise identity is not returned by the current status API." ownerManaged={!canManageWorkspace} onConnect={canManageWorkspace ? connectSplitwise : undefined} onDisconnect={canManageWorkspace ? () => disconnect("/api/integrations/splitwise") : undefined} />
+              {canManageWorkspace ? integrations?.plaid.institutions.map((institution) => <div key={institution.id} className="flex min-h-11 items-center justify-between gap-3 rounded-lg bg-slate-50 px-3 py-2 text-sm"><span className="truncate">{institution.name}</span><Button size="sm" variant="outline" disabled={busyAction === `disconnect-/api/integrations/plaid/${institution.id}`} onClick={() => disconnect(`/api/integrations/plaid/${institution.id}`)}><Unplug className="h-4 w-4" />{busyAction === `disconnect-/api/integrations/plaid/${institution.id}` ? "Disconnecting…" : "Disconnect"}</Button></div>) : null}
+              <IntegrationRow name="Splitwise" mark="S" scope="Workspace" connected={integrations?.splitwise.connected} available={integrations?.splitwise.available} unavailableDetail="Splitwise sign-in is not configured yet. Ask a workspace owner to finish setup." connectedDetail="Connected integration; exact Splitwise identity is not returned by the current status API." ownerManaged={!canManageWorkspace} busy={busyAction === "connect-splitwise" || busyAction === "disconnect-/api/integrations/splitwise"} onConnect={canManageWorkspace ? connectSplitwise : undefined} onDisconnect={canManageWorkspace ? () => disconnect("/api/integrations/splitwise") : undefined} />
               <IntegrationRow name="Google Maps" mark="M" scope="Application" connected connectedDetail="Application-managed routing and place search." />
               <IntegrationRow name="OpenAI" mark="AI" scope="Application" connected connectedDetail="Application-managed language and receipt processing." />
             </CardContent></Card>
@@ -233,7 +261,7 @@ export function AccountSettingsPage({ context, splitwiseTools, learnedBehaviorTo
 
           {section === "privacy" ? <SettingsPanel title="Privacy and account actions" description="Understand where data is used and access irreversible workspace actions.">
             <Card><CardHeader><CardTitle>Data boundaries</CardTitle><CardDescription>Connections are used only for the current ExpenseOps workspace unless labeled Personal or Application above.</CardDescription></CardHeader><CardContent className="space-y-2 text-sm leading-6 text-slate-700"><p>Disconnect a provider from its connection section to stop future imports. Existing transaction and learning history is retained unless a deletion workflow explicitly says otherwise.</p><p>Self-service account deletion and retention controls are not yet available in this build; they remain a launch blocker tracked in the readiness plan.</p></CardContent></Card>
-            <Card className="border-rose-200"><CardHeader><div className="inline-flex w-fit items-center gap-2 rounded-full bg-rose-50 px-2.5 py-1 text-xs font-semibold uppercase tracking-wide text-rose-700"><Shield className="h-3.5 w-3.5" />Danger zone</div><CardTitle>Leave this workspace</CardTitle><CardDescription>Your access will be removed. Shared workspace data is not deleted.</CardDescription></CardHeader><CardContent><Button variant="outline" className="border-rose-300 text-rose-700 hover:bg-rose-50 hover:text-rose-800" onClick={leaveWorkspace}><UserMinus className="h-4 w-4" />Leave {context.workspace.name}</Button></CardContent></Card>
+            <Card className="border-rose-200"><CardHeader><div className="inline-flex w-fit items-center gap-2 rounded-full bg-rose-50 px-2.5 py-1 text-xs font-semibold uppercase tracking-wide text-rose-700"><Shield className="h-3.5 w-3.5" />Danger zone</div><CardTitle>Leave this workspace</CardTitle><CardDescription>Your access will be removed. Shared workspace data is not deleted.</CardDescription></CardHeader><CardContent><Button variant="outline" disabled={busyAction === "leave-workspace"} className="border-rose-300 text-rose-700 hover:bg-rose-50 hover:text-rose-800" onClick={leaveWorkspace}><UserMinus className="h-4 w-4" />{busyAction === "leave-workspace" ? "Leaving…" : `Leave ${context.workspace.name}`}</Button></CardContent></Card>
           </SettingsPanel> : null}
         </main>
       </div>
@@ -266,14 +294,9 @@ function ChecklistRow({ done, label, detail }: { done: boolean; label: string; d
   return <div className="flex items-start gap-3 rounded-lg border border-slate-200 p-3"><Icon className={`mt-0.5 h-5 w-5 ${done ? "text-emerald-600" : "text-slate-400"}`} /><div><p className="font-medium text-slate-950">{label}</p><p className="text-sm text-slate-600">{detail}</p></div></div>;
 }
 
-function IntegrationRow({ name, mark, scope, connected, available = true, connectedDetail, unavailableDetail, ownerManaged = false, onConnect, onDisconnect }: { name: string; mark: string; scope: "Personal" | "Workspace" | "Application"; connected?: boolean; available?: boolean; connectedDetail?: string; unavailableDetail?: string; ownerManaged?: boolean; onConnect?: () => void; onDisconnect?: () => void }) {
+function IntegrationRow({ name, mark, scope, connected, available = true, connectedDetail, unavailableDetail, ownerManaged = false, busy = false, onConnect, onDisconnect }: { name: string; mark: string; scope: "Personal" | "Workspace" | "Application"; connected?: boolean; available?: boolean; connectedDetail?: string; unavailableDetail?: string; ownerManaged?: boolean; busy?: boolean; onConnect?: () => void; onDisconnect?: () => void }) {
   const status = connected ? connectedDetail || "Connected" : available ? "Not connected" : unavailableDetail || "Connection is not available yet.";
-  return <div className="flex flex-col gap-3 rounded-xl border border-slate-200 p-3 sm:flex-row sm:items-center sm:justify-between"><div className="flex min-w-0 items-start gap-3"><span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-slate-950 text-xs font-bold text-white">{mark}</span><div className="min-w-0"><div className="flex flex-wrap items-center gap-2"><p className="font-medium text-slate-950">{name}</p><span className="rounded-full bg-slate-100 px-2 py-0.5 text-[11px] font-semibold text-slate-600">{scope}</span>{connected ? <span className="inline-flex items-center gap-1 text-xs font-medium text-emerald-700"><CheckCircle2 className="h-3.5 w-3.5" />Connected</span> : null}</div><p className="mt-1 text-sm leading-5 text-slate-600">{status}</p></div></div><div className="shrink-0">{onConnect && !connected && available ? <Button size="sm" onClick={onConnect}><Link2 className="h-4 w-4" />Connect</Button> : onConnect && !connected ? <span className="rounded-full bg-slate-100 px-2.5 py-1 text-xs font-medium text-slate-600">Setup needed</span> : onDisconnect && connected ? <Button size="sm" variant="outline" onClick={onDisconnect}><Unplug className="h-4 w-4" />Disconnect</Button> : ownerManaged ? <span className="rounded-full bg-slate-100 px-2.5 py-1 text-xs font-medium text-slate-600">Owner managed</span> : null}</div></div>;
-}
-
-function connectionError(error: unknown, provider: string) {
-  const detail = typeof error === "object" && error && "detail" in error && typeof error.detail === "string" ? error.detail : "Please try again.";
-  return `${provider} connection could not start. ${detail}`;
+  return <div className="flex flex-col gap-3 rounded-xl border border-slate-200 p-3 sm:flex-row sm:items-center sm:justify-between"><div className="flex min-w-0 items-start gap-3"><span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-slate-950 text-xs font-bold text-white">{mark}</span><div className="min-w-0"><div className="flex flex-wrap items-center gap-2"><p className="font-medium text-slate-950">{name}</p><span className="rounded-full bg-slate-100 px-2 py-0.5 text-[11px] font-semibold text-slate-600">{scope}</span>{connected ? <span className="inline-flex items-center gap-1 text-xs font-medium text-emerald-700"><CheckCircle2 className="h-3.5 w-3.5" />Connected</span> : null}</div><p className="mt-1 text-sm leading-5 text-slate-600">{status}</p></div></div><div className="shrink-0">{onConnect && !connected && available ? <Button size="sm" disabled={busy} onClick={onConnect}><Link2 className="h-4 w-4" />{busy ? "Connecting…" : "Connect"}</Button> : onConnect && !connected ? <span className="rounded-full bg-slate-100 px-2.5 py-1 text-xs font-medium text-slate-600">Setup needed</span> : onDisconnect && connected ? <Button size="sm" variant="outline" disabled={busy} onClick={onDisconnect}><Unplug className="h-4 w-4" />{busy ? "Disconnecting…" : "Disconnect"}</Button> : ownerManaged ? <span className="rounded-full bg-slate-100 px-2.5 py-1 text-xs font-medium text-slate-600">Owner managed</span> : null}</div></div>;
 }
 
 function initials(value: string) {
@@ -308,5 +331,14 @@ function TelegramSetup({ value }: { value: { command: string; connect_url: strin
 }
 
 function CopyValue({ label, value }: { label: string; value: string }) {
-  return <div className="rounded-lg bg-slate-100 p-3"><p className="mb-1 text-xs font-semibold uppercase tracking-wide text-slate-600">{label}</p><div className="flex items-center gap-2"><code className="min-w-0 flex-1 truncate text-sm">{value}</code><Button size="sm" variant="outline" aria-label={`Copy ${label}`} onClick={() => navigator.clipboard.writeText(value)}><Copy className="h-4 w-4" /></Button></div></div>;
+  const [copyStatus, setCopyStatus] = useState<"idle" | "copied" | "failed">("idle");
+  async function copy() {
+    try {
+      await navigator.clipboard.writeText(value);
+      setCopyStatus("copied");
+    } catch {
+      setCopyStatus("failed");
+    }
+  }
+  return <div className="rounded-lg bg-slate-100 p-3"><p className="mb-1 text-xs font-semibold uppercase tracking-wide text-slate-600">{label}</p><div className="flex items-center gap-2"><code className="min-w-0 flex-1 truncate text-sm">{value}</code><Button size="sm" variant="outline" aria-label={`Copy ${label}`} onClick={copy}><Copy className="h-4 w-4" />{copyStatus === "copied" ? "Copied" : "Copy"}</Button></div>{copyStatus === "failed" ? <p role="alert" className="mt-2 text-xs font-medium text-rose-700">Copy was blocked. Select the value and copy it manually.</p> : copyStatus === "copied" ? <p role="status" className="sr-only">Copied to clipboard.</p> : null}</div>;
 }

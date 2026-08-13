@@ -753,6 +753,62 @@ test("long merchant names, large spend, and refunds remain readable on phones", 
   expect(dimensions.scrollWidth).toBeLessThanOrEqual(dimensions.clientWidth);
 });
 
+test("a failed transaction action stays visible without blocking another row", async ({ page }) => {
+  const baseTransaction = {
+    id: 101,
+    plaid_transaction_id: "plaid-101",
+    merchant_name: "Aldi",
+    name: "ALDI 12",
+    amount_cents: 4250,
+    amount: "42.50",
+    iso_currency_code: "USD",
+    institution_name: "Chase",
+    category: "Groceries",
+    payment_channel: "in store",
+    date: "2026-08-12",
+    authorized_date: "2026-08-12",
+    pending: false,
+    status: "ask_user",
+    agent_question: "How should this be handled?",
+    splitwise_expense_id: null,
+    splitwise_payload_json: null,
+    last_error: null,
+    classification_suggestion: "unsure",
+    classification_reason: null,
+    can_undo_transaction: false,
+    created_at: "2026-08-12T12:00:00Z",
+    updated_at: "2026-08-12T12:00:00Z",
+  };
+  await mockExpenseDashboard(page, [baseTransaction, {
+    ...baseTransaction,
+    id: 102,
+    plaid_transaction_id: "plaid-102",
+    merchant_name: "Target",
+    name: "TARGET 42",
+    amount_cents: 2800,
+    amount: "28.00",
+  }]);
+  let releaseFailure: (() => void) | undefined;
+  await page.route("**/transactions/101/personal", async (route) => {
+    await new Promise<void>((resolve) => { releaseFailure = resolve; });
+    await route.fulfill({
+      status: 503,
+      headers: { "Content-Type": "application/json", "X-Request-ID": "review-action-503" },
+      body: JSON.stringify({ detail: "Splitwise is temporarily unavailable." }),
+    });
+  });
+  await page.goto("/");
+
+  await page.getByTestId("transaction-card-101").getByRole("button", { name: "Personal" }).click();
+  await expect(page.getByTestId("transaction-card-101").getByText("Saving as personal…")).toBeVisible();
+  await expect(page.getByTestId("transaction-card-102").getByRole("button", { name: "Personal" })).toBeEnabled();
+
+  releaseFailure?.();
+  await expect(page.getByTestId("transaction-card-101").getByRole("alert")).toContainText("Splitwise is temporarily unavailable.");
+  await expect(page.getByTestId("transaction-card-101").getByRole("alert")).toContainText("review-action-503");
+  await expect(page.getByTestId("transaction-card-101").getByRole("button", { name: "Personal" })).toBeEnabled();
+});
+
 for (const width of [320, 375, 390, 768, 1024, 1440]) {
   test(`dashboard has no document overflow at ${width}px`, async ({ page }) => {
     await page.setViewportSize({ width, height: width < 768 ? 844 : 900 });

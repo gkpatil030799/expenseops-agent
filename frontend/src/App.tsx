@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type ComponentType } from "react";
+import { useEffect, useMemo, useRef, useState, type ComponentType } from "react";
 import {
   Activity,
   AlertCircle,
@@ -51,7 +51,7 @@ import {
   filterTransactions,
   memoryForTransactions,
 } from "@/dashboardLogic";
-import { api } from "@/lib/api";
+import { ApiError, api, apiErrorMessage } from "@/lib/api";
 import { authenticationView } from "@/onboardingLogic";
 import { SandboxLabPage } from "$sandbox/SandboxLabPage";
 import type {
@@ -87,6 +87,7 @@ type AccountContext = {
   workspace: { id: number; name: string; workspace_type: string };
 };
 type WorkspaceView = "expenses" | "household" | "promotions" | "settings";
+type ActionNotice = { tone: "success" | "error"; text: string; correlationId?: string };
 
 function App() {
   if (
@@ -137,6 +138,10 @@ function DashboardApp() {
   const [expandedTransactions, setExpandedTransactions] = useState<Record<number, boolean>>({});
   const [currentSplitwiseUser, setCurrentSplitwiseUser] = useState<SplitwiseUser | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
+  const [transactionActionById, setTransactionActionById] = useState<Record<number, string>>({});
+  const [transactionNoticeById, setTransactionNoticeById] = useState<Record<number, ActionNotice>>({});
+  const [reviewNotice, setReviewNotice] = useState<ActionNotice | null>(null);
+  const pendingTransactionActions = useRef(new Set<number>());
   const [log, setLog] = useState<unknown>({ status: "Ready" });
   const [onboardingNotice, setOnboardingNotice] = useState<{ tone: "success" | "error"; text: string } | null>(null);
   const [accountContext, setAccountContext] = useState<AccountContext | null>(null);
@@ -249,6 +254,55 @@ function DashboardApp() {
       setLog(error);
     } finally {
       setBusy(null);
+    }
+  }
+
+  async function runTransactionAction<T>({
+    id,
+    label,
+    success,
+    action,
+    reload = true,
+  }: {
+    id: number;
+    label: string;
+    success?: string;
+    action: () => Promise<T>;
+    reload?: boolean;
+  }) {
+    if (pendingTransactionActions.current.has(id)) return;
+    pendingTransactionActions.current.add(id);
+    setTransactionActionById((current) => ({ ...current, [id]: label }));
+    setTransactionNoticeById((current) => {
+      const next = { ...current };
+      delete next[id];
+      return next;
+    });
+    try {
+      const data = await action();
+      setLog(data);
+      if (success) {
+        setReviewNotice({ tone: "success", text: success });
+      }
+      if (reload) await refreshReviewData();
+    } catch (error) {
+      setLog(error);
+      const correlationId = error instanceof ApiError ? error.correlationId : undefined;
+      setTransactionNoticeById((current) => ({
+        ...current,
+        [id]: {
+          tone: "error",
+          text: apiErrorMessage(error, "This action could not be completed. Your transaction is still available."),
+          correlationId,
+        },
+      }));
+    } finally {
+      pendingTransactionActions.current.delete(id);
+      setTransactionActionById((current) => {
+        const next = { ...current };
+        delete next[id];
+        return next;
+      });
     }
   }
 
@@ -395,19 +449,21 @@ function DashboardApp() {
   }
 
   async function markPersonal(id: number) {
-    await run(
-      `personal-${id}`,
-      () => api(`/transactions/${id}/personal`, { method: "POST", body: "{}" }),
-      true,
-    );
+    await runTransactionAction({
+      id,
+      label: "Saving as personal…",
+      success: "Transaction saved as personal.",
+      action: () => api(`/transactions/${id}/personal`, { method: "POST", body: "{}" }),
+    });
   }
 
   async function undoTransaction(id: number) {
-    await run(
-      `undo-${id}`,
-      () => api(`/transactions/${id}/undo`, { method: "POST", body: "{}" }),
-      true,
-    );
+    await runTransactionAction({
+      id,
+      label: "Moving back to review…",
+      success: "Transaction moved back to the review queue.",
+      action: () => api(`/transactions/${id}/undo`, { method: "POST", body: "{}" }),
+    });
   }
 
   async function submitSplit(id: number, confirm: boolean) {
@@ -415,9 +471,11 @@ function DashboardApp() {
     const friends = selectedGroup
       ? selectedNonPayerGroupMembers(id)
       : selectedFriendsByTx[id] || [];
-    await run(
-      `${confirm ? "split" : "draft"}-${id}`,
-      () =>
+    await runTransactionAction({
+      id,
+      label: confirm ? "Posting split…" : "Saving draft…",
+      success: confirm ? "Split posted to Splitwise." : "Split saved as a draft.",
+      action: () =>
         api<SplitResponse>(`/transactions/${id}/split/equal`, {
           method: "POST",
           body: JSON.stringify({
@@ -426,8 +484,7 @@ function DashboardApp() {
             confirm,
           }),
         }),
-      true,
-    );
+    });
   }
 
   async function submitCustomSplit(transaction: Transaction, confirm: boolean) {
@@ -455,9 +512,11 @@ function DashboardApp() {
       };
     });
 
-    await run(
-      `${confirm ? "custom-split" : "custom-preview"}-${txId}`,
-      () =>
+    await runTransactionAction({
+      id: txId,
+      label: confirm ? "Posting split…" : "Checking split…",
+      success: confirm ? "Split posted to Splitwise." : "Split calculation checked.",
+      action: () =>
         api<SplitResponse>(`/transactions/${txId}/split/custom`, {
           method: "POST",
           body: JSON.stringify({
@@ -469,16 +528,20 @@ function DashboardApp() {
             confirm,
           }),
         }),
-      true,
-    );
+    });
   }
 
   async function searchFriends(txId: number) {
     const query = friendQueriesByTx[txId] || "";
-    await run(`friends-${txId}`, async () => {
-      const friends = await api<Friend[]>(`/splitwise/friends?q=${encodeURIComponent(query)}`);
-      setFriendResultsByTx((current) => ({ ...current, [txId]: friends.slice(0, 8) }));
-      return { friend_results: friends.slice(0, 8) };
+    await runTransactionAction({
+      id: txId,
+      label: "Searching friends…",
+      reload: false,
+      action: async () => {
+        const friends = await api<Friend[]>(`/splitwise/friends?q=${encodeURIComponent(query)}`);
+        setFriendResultsByTx((current) => ({ ...current, [txId]: friends.slice(0, 8) }));
+        return { friend_results: friends.slice(0, 8) };
+      },
     });
   }
 
@@ -499,20 +562,30 @@ function DashboardApp() {
 
   async function searchGroups(txId: number) {
     const query = groupQueriesByTx[txId] || "";
-    await run(`groups-${txId}`, async () => {
-      const groups = await api<Group[]>(`/splitwise/groups?q=${encodeURIComponent(query)}`);
-      setGroupResultsByTx((current) => ({ ...current, [txId]: groups.slice(0, 8) }));
-      return { group_results: groups.slice(0, 8) };
+    await runTransactionAction({
+      id: txId,
+      label: "Searching groups…",
+      reload: false,
+      action: async () => {
+        const groups = await api<Group[]>(`/splitwise/groups?q=${encodeURIComponent(query)}`);
+        setGroupResultsByTx((current) => ({ ...current, [txId]: groups.slice(0, 8) }));
+        return { group_results: groups.slice(0, 8) };
+      },
     });
   }
 
   async function selectGroup(txId: number, group: Group) {
-    await run(`group-${txId}`, async () => {
-      const members = await api<Friend[]>(`/splitwise/groups/${group.id}/members`);
-      setSelectedGroupByTx((current) => ({ ...current, [txId]: group }));
-      setGroupMembersByTx((current) => ({ ...current, [txId]: members }));
-      setSelectedGroupMembersByTx((current) => ({ ...current, [txId]: [] }));
-      return { selected_group: group, members };
+    await runTransactionAction({
+      id: txId,
+      label: "Loading group…",
+      reload: false,
+      action: async () => {
+        const members = await api<Friend[]>(`/splitwise/groups/${group.id}/members`);
+        setSelectedGroupByTx((current) => ({ ...current, [txId]: group }));
+        setGroupMembersByTx((current) => ({ ...current, [txId]: members }));
+        setSelectedGroupMembersByTx((current) => ({ ...current, [txId]: [] }));
+        return { selected_group: group, members };
+      },
     });
   }
 
@@ -620,6 +693,15 @@ function DashboardApp() {
 
         {expenseTab === "review" ? <div className="space-y-6">
         <ReviewFilters filters={filters} onChange={updateFilter} />
+        {reviewNotice ? (
+          <div
+            role={reviewNotice.tone === "error" ? "alert" : "status"}
+            className={`flex items-start justify-between gap-3 rounded-control border px-4 py-3 text-sm ${reviewNotice.tone === "error" ? "border-rose-200 bg-rose-50 text-rose-800" : "border-emerald-200 bg-emerald-50 text-emerald-800"}`}
+          >
+            <span>{reviewNotice.text}</span>
+            <button type="button" aria-label="Dismiss transaction message" onClick={() => setReviewNotice(null)} className="inline-flex size-11 shrink-0 items-center justify-center rounded-control hover:bg-black/5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-600"><X aria-hidden="true" className="size-4" /></button>
+          </div>
+        ) : null}
         <div>
           <section className="space-y-4">
             <div className="flex flex-wrap items-center justify-between gap-3">
@@ -638,7 +720,8 @@ function DashboardApp() {
                   <TransactionCard
                     key={transaction.id}
                     transaction={transaction}
-                    busy={busy}
+                    busy={transactionActionById[transaction.id] || null}
+                    actionNotice={transactionNoticeById[transaction.id] || null}
                     query={friendQueriesByTx[transaction.id] || ""}
                     friendResults={friendResultsByTx[transaction.id] || []}
                     selectedFriends={selectedFriendsByTx[transaction.id] || []}
@@ -711,7 +794,8 @@ function DashboardApp() {
           <section aria-labelledby="recently-handled-title"><div className="mb-3 flex items-center justify-between"><h2 id="recently-handled-title" className="text-lg font-semibold text-slate-950">Recently handled</h2><Button variant="ghost" size="sm" onClick={()=>changeExpenseTab("activity")}>View all activity</Button></div>
             <RecentActivity
               transactions={recentTransactions.slice(0, 5)}
-              busy={busy}
+              loading={busy === "recent" && recentTransactions.length === 0}
+              actionById={transactionActionById}
               onUndo={undoTransaction}
             />
           </section>
@@ -1578,6 +1662,7 @@ function StatusPill({
 function TransactionCard({
   transaction,
   busy,
+  actionNotice,
   query,
   friendResults,
   selectedFriends,
@@ -1614,6 +1699,7 @@ function TransactionCard({
 }: {
   transaction: Transaction;
   busy: string | null;
+  actionNotice: ActionNotice | null;
   query: string;
   friendResults: Friend[];
   selectedFriends: Friend[];
@@ -1738,6 +1824,17 @@ function TransactionCard({
             ]} />
           </div>
         </div>
+        {busy ? (
+          <p role="status" aria-live="polite" className="flex items-center gap-2 rounded-control border border-indigo-100 bg-indigo-50 px-3 py-2 text-sm font-medium text-indigo-800">
+            <RefreshCw aria-hidden="true" className="size-4 animate-spin motion-reduce:animate-none" />
+            {busy}
+          </p>
+        ) : actionNotice ? (
+          <p role="alert" className="rounded-control border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-800">
+            {actionNotice.text}
+            {actionNotice.correlationId ? <span className="mt-1 block text-xs font-medium">Support ID: {actionNotice.correlationId}</span> : null}
+          </p>
+        ) : null}
       </CardHeader>
 
       {isExpanded ? (
@@ -2263,11 +2360,13 @@ function GroupPicker({
 
 function RecentActivity({
   transactions,
-  busy,
+  loading,
+  actionById,
   onUndo,
 }: {
   transactions: Transaction[];
-  busy: string | null;
+  loading: boolean;
+  actionById: Record<number, string>;
   onUndo: (id: number) => void;
 }) {
   return (
@@ -2280,7 +2379,7 @@ function RecentActivity({
         <CardDescription>Completed transactions that can be moved back to review</CardDescription>
       </CardHeader>
       <CardContent className="max-h-[520px] space-y-1 overflow-auto pr-3">
-        {busy !== null && transactions.length === 0 ? (
+        {loading ? (
           <SkeletonRows rows={4} />
         ) : transactions.length ? (
           transactions.map((transaction) => (
@@ -2309,10 +2408,10 @@ function RecentActivity({
                   size="sm"
                   className="text-amber-700 hover:border-amber-200 hover:bg-amber-50"
                   onClick={() => onUndo(transaction.id)}
-                  disabled={busy !== null}
+                  disabled={Boolean(actionById[transaction.id])}
                 >
-                  <RotateCcw className="h-4 w-4" />
-                  Undo
+                  <RotateCcw className={`h-4 w-4 ${actionById[transaction.id] ? "animate-spin motion-reduce:animate-none" : ""}`} />
+                  {actionById[transaction.id] || "Undo"}
                 </Button>
               ) : null}
             </div>

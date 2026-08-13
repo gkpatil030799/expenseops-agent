@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   AlertCircle,
   CheckCircle2,
@@ -15,7 +15,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
-import { api } from "@/lib/api";
+import { ApiError, api, apiErrorMessage } from "@/lib/api";
 import type { Friend, Group } from "@/types";
 
 type GroupType = "home" | "trip" | "couple" | "other";
@@ -34,8 +34,26 @@ export function GroupManagementPanel({ currentUserId }: { currentUserId: number 
   const [inviteFirstName, setInviteFirstName] = useState("");
   const [inviteLastName, setInviteLastName] = useState("");
   const [inviteEmail, setInviteEmail] = useState("");
-  const [busy, setBusy] = useState<string | null>(null);
-  const [notice, setNotice] = useState<{ tone: "success" | "error"; text: string } | null>(null);
+  const [busyActions, setBusyActions] = useState<Set<string>>(() => new Set());
+  const [notice, setNotice] = useState<{ tone: "success" | "error"; text: string; correlationId?: string } | null>(null);
+  const pendingActions = useRef(new Set<string>());
+  const latestMemberRequest = useRef(0);
+
+  function startAction(action: string) {
+    if (pendingActions.current.has(action)) return false;
+    pendingActions.current.add(action);
+    setBusyActions((current) => new Set(current).add(action));
+    return true;
+  }
+
+  function finishAction(action: string) {
+    pendingActions.current.delete(action);
+    setBusyActions((current) => {
+      const next = new Set(current);
+      next.delete(action);
+      return next;
+    });
+  }
 
   const visibleFriends = useMemo(() => {
     const query = friendFilter.trim().toLowerCase();
@@ -64,7 +82,7 @@ export function GroupManagementPanel({ currentUserId }: { currentUserId: number 
   }, [selectedGroupId]);
 
   async function loadDirectory() {
-    setBusy("refresh");
+    if (!startAction("refresh")) return;
     setNotice(null);
     try {
       const [loadedGroups, loadedFriends] = await Promise.all([
@@ -82,24 +100,27 @@ export function GroupManagementPanel({ currentUserId }: { currentUserId: number 
     } catch (error) {
       setNotice({ tone: "error", text: errorMessage(error) });
     } finally {
-      setBusy(null);
+      finishAction("refresh");
     }
   }
 
   async function loadMembers(groupId: number) {
-    setBusy("members");
+    const action = `members-${groupId}`;
+    if (!startAction(action)) return;
+    const requestNumber = ++latestMemberRequest.current;
     try {
       const [group, loadedMembers] = await Promise.all([
         api<Group>(`/splitwise/groups/${groupId}`),
         api<Friend[]>(`/splitwise/groups/${groupId}/members`),
       ]);
+      if (requestNumber !== latestMemberRequest.current) return;
       setGroups((current) => current.map((item) => (item.id === group.id ? group : item)));
       setMembers(loadedMembers);
       setMemberToAdd("");
     } catch (error) {
       setNotice({ tone: "error", text: errorMessage(error) });
     } finally {
-      setBusy(null);
+      finishAction(action);
     }
   }
 
@@ -115,7 +136,7 @@ export function GroupManagementPanel({ currentUserId }: { currentUserId: number 
       setNotice({ tone: "error", text: "Enter a group name." });
       return;
     }
-    setBusy("create");
+    if (!startAction("create")) return;
     setNotice(null);
     try {
       const created = await api<Group>("/splitwise/groups", {
@@ -135,13 +156,13 @@ export function GroupManagementPanel({ currentUserId }: { currentUserId: number 
     } catch (error) {
       setNotice({ tone: "error", text: errorMessage(error) });
     } finally {
-      setBusy(null);
+      finishAction("create");
     }
   }
 
   async function addMember() {
     if (selectedGroupId === null || !memberToAdd) return;
-    setBusy("add");
+    if (!startAction("add")) return;
     setNotice(null);
     try {
       const updated = await api<Friend[]>(`/splitwise/groups/${selectedGroupId}/members`, {
@@ -154,7 +175,7 @@ export function GroupManagementPanel({ currentUserId }: { currentUserId: number 
     } catch (error) {
       setNotice({ tone: "error", text: errorMessage(error) });
     } finally {
-      setBusy(null);
+      finishAction("add");
     }
   }
 
@@ -164,7 +185,7 @@ export function GroupManagementPanel({ currentUserId }: { currentUserId: number 
       setNotice({ tone: "error", text: "Enter the participant's first name and email." });
       return;
     }
-    setBusy("invite");
+    if (!startAction("invite")) return;
     setNotice(null);
     try {
       const updated = await api<Friend[]>(`/splitwise/groups/${selectedGroupId}/invite`, {
@@ -186,7 +207,7 @@ export function GroupManagementPanel({ currentUserId }: { currentUserId: number 
     } catch (error) {
       setNotice({ tone: "error", text: errorMessage(error) });
     } finally {
-      setBusy(null);
+      finishAction("invite");
     }
   }
 
@@ -206,7 +227,7 @@ export function GroupManagementPanel({ currentUserId }: { currentUserId: number 
   async function removeMember(member: Friend) {
     if (selectedGroupId === null || member.id === currentUserId) return;
     if (!window.confirm(`Remove ${member.display_name} from this Splitwise group?`)) return;
-    setBusy(`remove-${member.id}`);
+    if (!startAction(`remove-${member.id}`)) return;
     setNotice(null);
     try {
       const updated = await api<Friend[]>(
@@ -221,7 +242,7 @@ export function GroupManagementPanel({ currentUserId }: { currentUserId: number 
         text: `${errorMessage(error)} Splitwise requires the participant's group balance to be zero before removal.`,
       });
     } finally {
-      setBusy(null);
+      finishAction(`remove-${member.id}`);
     }
   }
 
@@ -243,11 +264,11 @@ export function GroupManagementPanel({ currentUserId }: { currentUserId: number 
           size="icon"
           className="shrink-0 rounded-lg border border-slate-200 bg-white text-slate-600 shadow-sm hover:bg-slate-50"
           onClick={loadDirectory}
-          disabled={busy !== null}
+          disabled={busyActions.has("refresh")}
           aria-label="Refresh Splitwise groups"
           title="Refresh Splitwise groups"
         >
-          <RefreshCw className={`h-4 w-4 ${busy === "refresh" ? "animate-spin" : ""}`} />
+          <RefreshCw className={`h-4 w-4 ${busyActions.has("refresh") ? "animate-spin motion-reduce:animate-none" : ""}`} />
         </Button>
       </CardHeader>
       <CardContent className="space-y-4">
@@ -264,7 +285,7 @@ export function GroupManagementPanel({ currentUserId }: { currentUserId: number 
             ) : (
               <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
             )}
-            {notice.text}
+            <span>{notice.text}{notice.correlationId ? <span className="mt-1 block text-xs font-medium">Support ID: {notice.correlationId}</span> : null}</span>
           </div>
         ) : null}
 
@@ -308,7 +329,7 @@ export function GroupManagementPanel({ currentUserId }: { currentUserId: number 
             </label>
             <div className="relative overflow-hidden rounded-xl border border-slate-200 bg-white">
               <div className="scroll-fade max-h-48 space-y-1 overflow-y-auto px-2 py-3">
-              {busy === "refresh" && !friends.length ? (
+              {busyActions.has("refresh") && !friends.length ? (
                 <GroupSkeletonRows rows={3} />
               ) : visibleFriends.length ? (
                 visibleFriends.map((friend) => (
@@ -343,9 +364,9 @@ export function GroupManagementPanel({ currentUserId }: { currentUserId: number 
                 />
                 Simplify group debts
               </label>
-              <Button className="w-full sm:w-auto" onClick={createGroup} disabled={busy !== null || !newGroupName.trim()}>
+              <Button className="w-full sm:w-auto" onClick={createGroup} disabled={busyActions.has("create") || !newGroupName.trim()}>
                 <Plus className="h-4 w-4" />
-                Create group
+                {busyActions.has("create") ? "Creating…" : "Create group"}
               </Button>
             </div>
           </section>
@@ -384,9 +405,9 @@ export function GroupManagementPanel({ currentUserId }: { currentUserId: number 
                 <option value="">Choose a friend to add</option>
                 {availableMembers.map((friend) => <option key={friend.id} value={friend.id}>{friend.display_name}</option>)}
               </select>
-              <Button variant="outline" onClick={addMember} disabled={busy !== null || !memberToAdd}>
+              <Button variant="outline" onClick={addMember} disabled={busyActions.has("add") || !memberToAdd}>
                 <UserPlus className="h-4 w-4" />
-                Add
+                {busyActions.has("add") ? "Adding…" : "Add"}
               </Button>
             </div>
             </div>
@@ -419,14 +440,14 @@ export function GroupManagementPanel({ currentUserId }: { currentUserId: number 
                 <Button
                   onClick={inviteMember}
                   disabled={
-                    busy !== null ||
+                    busyActions.has("invite") ||
                     selectedGroupId === null ||
                     !inviteFirstName.trim() ||
                     !inviteEmail.trim()
                   }
                 >
                   <MailPlus className="h-4 w-4" />
-                  Send invite
+                  {busyActions.has("invite") ? "Sending…" : "Send invite"}
                 </Button>
               </div>
             </div>
@@ -469,7 +490,7 @@ export function GroupManagementPanel({ currentUserId }: { currentUserId: number 
                 <p className="mt-0.5 text-xs text-slate-600">Remove is available after balances are settled.</p>
               </div>
               <div className="scroll-fade max-h-64 space-y-1 overflow-y-auto px-2 py-3">
-              {busy === "members" ? (
+              {[...busyActions].some((action) => action.startsWith("members-")) ? (
                 <GroupSkeletonRows rows={3} />
               ) : members.length ? (
                 members.map((member) => {
@@ -492,11 +513,11 @@ export function GroupManagementPanel({ currentUserId }: { currentUserId: number 
                         size="sm"
                         className="text-rose-700 hover:bg-rose-50 hover:text-rose-800"
                         onClick={() => removeMember(member)}
-                        disabled={busy !== null || isCurrentUser}
+                        disabled={busyActions.has(`remove-${member.id}`) || isCurrentUser}
                         title={isCurrentUser ? "Your own membership cannot be removed here" : "Remove participant"}
                       >
                         <UserMinus className="h-4 w-4" />
-                        Remove
+                        {busyActions.has(`remove-${member.id}`) ? "Removing…" : "Remove"}
                       </Button>
                     </div>
                   );
@@ -553,10 +574,6 @@ function GroupSkeletonRows({ rows }: { rows: number }) {
 }
 
 function errorMessage(error: unknown) {
-  if (typeof error === "string") return error;
-  if (error && typeof error === "object") {
-    const detail = (error as { detail?: unknown }).detail;
-    if (typeof detail === "string") return detail;
-  }
-  return "The Splitwise operation failed. Try refreshing and retrying.";
+  const detail = apiErrorMessage(error, "The Splitwise operation failed. Try refreshing and retrying.");
+  return error instanceof ApiError ? `${detail} Support ID: ${error.correlationId}` : detail;
 }

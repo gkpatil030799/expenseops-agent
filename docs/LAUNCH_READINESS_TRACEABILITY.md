@@ -35,7 +35,7 @@ visual-foundation changes began.
 | V6 — Settings information architecture | Complete (visual layer) | Eight explicit destinations, desktop sidebar/mobile selector, owner-aware workspace controls, separated connection scopes, discoverable Splitwise group tools, dedicated privacy/danger section, and completed-onboarding suppression |
 | V7 — Deals hierarchy | Complete (visual layer) | Value-first deal cards, merchant identity, trusted-domain disclosure, review interstitials for unverified links, visible Open/Save actions, feedback overflow, purposeful empty/disconnected states, and urgency-based expiry treatment |
 | V8 — visual/accessibility validation | Complete (automated gate) | Six-width responsive matrix, 44px touch-target audit across primary and expanded flows, keyboard skip/focus restoration, reduced motion, 200%-zoom-equivalent layout, mobile-nav clearance, edge-state fixtures, and four-project Playwright coverage |
-| Phase 2 — UX action integrity | Not started | — |
+| Phase 2 — UX action integrity | Complete | Structured API client; global resilience surfaces; scoped Expense, Deals, Settings, and Splitwise actions; cross-browser failure-isolation gate; checkpoint on `agent/launch-readiness` |
 | Phase 3 — identity and tenancy | Not started | — |
 | Phase 4 — financial correctness | Not started | — |
 | Phase 5 — durable workers | Not started | — |
@@ -224,3 +224,27 @@ remain assigned to Phases 2 and 6.
 The automated V8 gate is complete. Manual VoiceOver/NVDA journeys, physical-device validation,
 and formal human contrast review remain release evidence to collect in Phase 8; they are not
 represented as completed by Axe or browser emulation.
+
+## Phase 2 validation evidence
+
+| Check | Result |
+| --- | --- |
+| API response handling | Successful `204`, `205`, and empty `2xx` responses resolve without JSON parse failures; malformed successful responses fail explicitly |
+| Structured errors | HTTP status, customer-safe detail, retryability, error kind, and response/request correlation ID are retained in one `ApiError` contract |
+| Failure distinctions | Offline, network, expired session, slow request, provider outage, malformed response, and stale last-loaded data have distinct application states |
+| Correlation transport | The browser sends `X-Request-ID`; FastAPI CORS accepts it; the server response ID is shown as a support ID on contextual failures |
+| Crash containment | A top-level React error boundary replaces a blank screen with a safe reload path and does not claim data loss |
+| Financial action scope | Personal, Draft, Split, custom preview/post, friend/group lookup, group-member loading, and Undo are guarded per transaction instead of freezing the review queue |
+| Financial retry safety | Failed financial actions remain on their transaction with the provider reason; no automatic Retry control was introduced before Phase 4 idempotency |
+| Settings and onboarding actions | Workspace create/switch/rename/leave, invitations, integration connect/disconnect, and clipboard operations expose progress, terminal feedback, and duplicate guards |
+| Splitwise administration | Group creation, participant add/remove, email invite, directory refresh, member loading, and link copying expose scoped progress and persistent outcomes |
+| Deals actions | Save, dismiss, not-relevant, mute, restore, sync, and clipboard failures no longer disappear silently; last-loaded offers remain visible on refresh failure |
+| Household empty-delete handling | Household `DELETE` calls now use the shared empty-response-safe API contract |
+| API unit tests | 20 passed across five files, including new empty/malformed/offline/session/provider/correlation cases |
+| Browser failure isolation | A delayed failed transaction action leaves another transaction operable, preserves the failed row, and displays its support ID |
+| Cross-browser gate | 120 passed across desktop Chromium, mobile Chromium, Firefox, and WebKit |
+| Frontend production build | Passed; existing bundle-size advisory remains tracked |
+| Frontend lint | Zero errors; existing cleanup warnings remain tracked separately |
+
+Phase 2 does not make provider mutations intrinsically safe to retry. Durable financial
+idempotency and recovery remain Phase 4 work; worker-level retry/lease behavior remains Phase 5.

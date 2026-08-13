@@ -4,7 +4,7 @@
 **Inputs:** Visual Aesthetics Audit, UX Launch-Readiness Audit, Backend Launch-Readiness Audit  
 **Release standard:** General availability for all customers  
 **Priority:** Visual aesthetics first, followed by UX integrity, backend correctness, reliability, security, and production operations  
-**Implementation status:** Planning complete; implementation not started
+**Implementation status:** Phases 0–2 complete on `agent/launch-readiness`; Phase 3 next
 
 ## Strategy
 

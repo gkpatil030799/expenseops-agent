@@ -1,5 +1,5 @@
 import * as Dialog from "@radix-ui/react-dialog";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Bookmark,
   Check,
@@ -20,12 +20,13 @@ import { MerchantAvatar } from "@/components/ui/merchant-avatar";
 import { OverflowMenu } from "@/components/ui/overflow-menu";
 import { PageHeader } from "@/components/ui/page-header";
 import { StatusMessage } from "@/components/ui/status-message";
-import { api } from "@/lib/api";
+import { ApiError, api, apiErrorMessage } from "@/lib/api";
 import type { PromotionOffer } from "@/types";
 
 type DealView = "recommended" | "saved" | "expiring" | "all";
 type RemovedDeal = { offer: PromotionOffer; reason: "dismiss" | "not_relevant" };
 type OfferAction = "save" | "dismiss" | "not_relevant" | "mute_merchant";
+type OperationNotice = { tone: "success" | "error"; title: string; detail: string; correlationId?: string };
 
 export function PromotionsPage() {
   const [offers, setOffers] = useState<PromotionOffer[]>([]);
@@ -40,6 +41,8 @@ export function PromotionsPage() {
   const [copied, setCopied] = useState<number | null>(null);
   const [removed, setRemoved] = useState<RemovedDeal | null>(null);
   const [gmailConnected, setGmailConnected] = useState<boolean | null>(null);
+  const [operationNotice, setOperationNotice] = useState<OperationNotice | null>(null);
+  const pendingOfferActions = useRef(new Set<number>());
 
   async function load() {
     setBusy(true);
@@ -51,8 +54,9 @@ export function PromotionsPage() {
       ]);
       setOffers(values);
       setCategories(groups);
-    } catch {
+    } catch (error) {
       setLoadError(true);
+      setOperationNotice(errorNotice(error, "Deals could not be loaded", "Your existing deals are still on this page."));
     } finally {
       setHasLoaded(true);
       setBusy(false);
@@ -88,34 +92,60 @@ export function PromotionsPage() {
   }, [searched, view, expiringIds]);
 
   async function action(offer: PromotionOffer, kind: OfferAction) {
+    if (pendingOfferActions.current.has(offer.id)) return;
+    pendingOfferActions.current.add(offer.id);
     setBusyOfferId(offer.id);
+    setOperationNotice(null);
     try {
       if (kind === "save") {
         const updated = await api<PromotionOffer>(`/api/promotions/${offer.id}/save`, { method: "POST" });
         setOffers((current) => current.map((item) => item.id === offer.id ? updated : item));
+        setOperationNotice({ tone: "success", title: "Deal saved", detail: `${offer.merchant} is now in Saved deals.` });
         return;
       }
       if (kind === "dismiss") await api(`/api/promotions/${offer.id}/dismiss`, { method: "POST" });
       else await api(`/api/promotions/${offer.id}/feedback`, { method: "POST", body: JSON.stringify({ feedback_type: kind, metadata: {} }) });
       setOffers((current) => kind === "mute_merchant" ? current.filter((item) => item.merchant !== offer.merchant) : current.filter((item) => item.id !== offer.id));
       setRemoved(kind === "dismiss" || kind === "not_relevant" ? { offer, reason: kind } : null);
+      setOperationNotice({
+        tone: "success",
+        title: kind === "mute_merchant" ? "Merchant muted" : "Deal removed",
+        detail: kind === "mute_merchant" ? `${offer.merchant} offers will no longer be recommended.` : `${offer.merchant} was removed from active deals.`,
+      });
+    } catch (error) {
+      setOperationNotice(errorNotice(error, "Deal was not changed", "The offer remains available. Try again when you’re ready."));
     } finally {
+      pendingOfferActions.current.delete(offer.id);
       setBusyOfferId(null);
     }
   }
 
   async function undoRemoval() {
     if (!removed) return;
-    const restored = await api<PromotionOffer>(`/api/promotions/${removed.offer.id}/restore`, { method: "POST" });
-    setOffers((current) => [restored, ...current.filter((offer) => offer.id !== restored.id)].sort((a, b) => Number(b.saved) - Number(a.saved) || b.score - a.score));
-    setRemoved(null);
+    setBusyOfferId(removed.offer.id);
+    setOperationNotice(null);
+    try {
+      const restored = await api<PromotionOffer>(`/api/promotions/${removed.offer.id}/restore`, { method: "POST" });
+      setOffers((current) => [restored, ...current.filter((offer) => offer.id !== restored.id)].sort((a, b) => Number(b.saved) - Number(a.saved) || b.score - a.score));
+      setRemoved(null);
+      setOperationNotice({ tone: "success", title: "Deal restored", detail: `${restored.merchant} is active again.` });
+    } catch (error) {
+      setOperationNotice(errorNotice(error, "Deal could not be restored", "The previous removal is still in effect."));
+    } finally {
+      setBusyOfferId(null);
+    }
   }
 
   async function syncPromotions() {
+    if (busy) return;
     setBusy(true);
+    setOperationNotice(null);
     try {
       await api("/api/promotions/sync", { method: "POST", body: JSON.stringify({}) });
       await load();
+      setOperationNotice({ tone: "success", title: "Gmail sync complete", detail: "Your deals are up to date." });
+    } catch (error) {
+      setOperationNotice(errorNotice(error, "Gmail sync did not finish", "Your existing deals were not changed."));
     } finally {
       setBusy(false);
     }
@@ -139,7 +169,8 @@ export function PromotionsPage() {
       actions={<Button className="border-white/15 bg-white/10 text-white hover:bg-white/15 hover:text-white" variant="outline" onClick={load} disabled={busy} aria-label="Refresh deals"><RefreshCw className={`h-4 w-4 ${busy ? "animate-spin" : ""}`} />Refresh</Button>}
     />
 
-    {removed ? <StatusMessage title="Deal removed" actions={<Button size="sm" variant="outline" onClick={undoRemoval}>Undo</Button>}>{removed.offer.merchant} was removed from your active deals.</StatusMessage> : null}
+    {operationNotice ? <StatusMessage tone={operationNotice.tone} title={operationNotice.title} actions={<button type="button" aria-label="Dismiss deal message" onClick={() => setOperationNotice(null)} className="inline-flex size-11 items-center justify-center rounded-control hover:bg-black/5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-600"><X aria-hidden="true" className="size-4" /></button>}>{operationNotice.detail}{operationNotice.correlationId ? <span className="mt-1 block text-xs font-medium">Support ID: {operationNotice.correlationId}</span> : null}</StatusMessage> : null}
+    {removed ? <StatusMessage title="Undo available" actions={<Button size="sm" variant="outline" onClick={undoRemoval} disabled={busyOfferId === removed.offer.id}>Undo</Button>}>{removed.offer.merchant} can be restored.</StatusMessage> : null}
     {loadError ? <StatusMessage tone="error" title="Deals could not be loaded" actions={<Button size="sm" variant="outline" onClick={load}>Try again</Button>}>Your existing deals have not been replaced with an empty state.</StatusMessage> : null}
 
     {hasLoaded && !loadError && offers.length === 0 ? <DealsEmptyState gmailConnected={gmailConnected} busy={busy} onSync={syncPromotions} /> : <>
@@ -159,7 +190,7 @@ export function PromotionsPage() {
       {!hasLoaded && busy ? <DealsSkeleton /> : null}
       {hasLoaded && filteredEmpty ? <FilteredEmptyState view={view} filtered={Boolean(search || category)} onClear={clearFilters} /> : null}
 
-      {featured.length ? <section className="space-y-3" aria-labelledby="deal-section-title"><div className="flex items-end justify-between gap-3"><div><h2 id="deal-section-title" className="text-lg font-semibold text-slate-950">{view === "recommended" ? "Best matches" : view === "saved" ? "Saved for later" : view === "expiring" ? "Ending within seven days" : "Top-ranked deals"}</h2><p className="mt-1 text-sm text-slate-600">Ranked using offer value, relevance, expiry, and your feedback.</p></div>{view === "recommended" && offers.length > 10 ? <Button variant="ghost" size="sm" onClick={() => setView("all")}>See all {offers.length}</Button> : null}</div><div className="grid gap-4 lg:grid-cols-2">{featured.map((offer) => <DealCard key={offer.id} offer={offer} busy={busyOfferId === offer.id} copied={copied === offer.id} onCopy={async () => { if (!offer.promo_code) return; await navigator.clipboard.writeText(offer.promo_code); setCopied(offer.id); window.setTimeout(() => setCopied(null), 2_000); }} onAction={(kind) => action(offer, kind)} />)}</div></section> : null}
+      {featured.length ? <section className="space-y-3" aria-labelledby="deal-section-title"><div className="flex items-end justify-between gap-3"><div><h2 id="deal-section-title" className="text-lg font-semibold text-slate-950">{view === "recommended" ? "Best matches" : view === "saved" ? "Saved for later" : view === "expiring" ? "Ending within seven days" : "Top-ranked deals"}</h2><p className="mt-1 text-sm text-slate-600">Ranked using offer value, relevance, expiry, and your feedback.</p></div>{view === "recommended" && offers.length > 10 ? <Button variant="ghost" size="sm" onClick={() => setView("all")}>See all {offers.length}</Button> : null}</div><div className="grid gap-4 lg:grid-cols-2">{featured.map((offer) => <DealCard key={offer.id} offer={offer} busy={busyOfferId === offer.id} copied={copied === offer.id} onCopy={async () => { if (!offer.promo_code) return; try { await navigator.clipboard.writeText(offer.promo_code); setCopied(offer.id); setOperationNotice({ tone: "success", title: "Code copied", detail: `${offer.promo_code} is ready to paste.` }); window.setTimeout(() => setCopied(null), 2_000); } catch (error) { setOperationNotice(errorNotice(error, "Code could not be copied", "Select the code and copy it manually.")); } }} onAction={(kind) => action(offer, kind)} />)}</div></section> : null}
 
       {overflow.length ? <section className="space-y-3"><div><h2 className="text-lg font-semibold text-slate-950">More active deals</h2><p className="mt-1 text-sm text-slate-600">Lower-ranked offers stay available without competing with the strongest matches.</p></div><div className="divide-y divide-slate-200 overflow-hidden rounded-card border border-slate-200 bg-white shadow-card">{overflow.map((offer) => <CompactDealRow key={offer.id} offer={offer} busy={busyOfferId === offer.id} onAction={(kind) => action(offer, kind)} />)}</div></section> : null}
     </>}
@@ -241,4 +272,13 @@ function expiryPresentation(value: string | null): { label: string; variant: "se
   if (days === 1) return { label: "Expires tomorrow", variant: "destructive" };
   if (days <= 7) return { label: `Expires in ${days} days`, variant: "warning" };
   return { label: `Expires ${date}`, variant: "secondary" };
+}
+
+function errorNotice(error: unknown, title: string, fallback: string): OperationNotice {
+  return {
+    tone: "error",
+    title,
+    detail: apiErrorMessage(error, fallback),
+    correlationId: error instanceof ApiError ? error.correlationId : undefined,
+  };
 }

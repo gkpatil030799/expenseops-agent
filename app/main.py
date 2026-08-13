@@ -46,7 +46,7 @@ app.add_middleware(
     allow_origins=settings.frontend_origin,
     allow_credentials=True,
     allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
-    allow_headers=["Authorization", "Content-Type"],
+    allow_headers=["Authorization", "Content-Type", "X-Request-ID"],
 )
 
 install_dashboard_auth(app, settings)
