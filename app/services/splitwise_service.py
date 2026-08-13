@@ -284,6 +284,15 @@ class SplitwiseService:
             raise SplitwiseAPIError("Splitwise create_expense did not return an expense", data)
         return data
 
+    def update_expense(self, expense_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        data = self._request("POST", f"/update_expense/{expense_id}", json_body=payload)
+        if data.get("errors"):
+            raise SplitwiseAPIError("Splitwise update_expense returned errors", data)
+        expenses = data.get("expenses", [])
+        if not expenses:
+            raise SplitwiseAPIError("Splitwise update_expense did not return an expense", data)
+        return data
+
     def delete_expense(self, expense_id: str) -> dict[str, Any]:
         data = self._request("POST", f"/delete_expense/{expense_id}")
         if data.get("errors"):
@@ -309,6 +318,24 @@ class SplitwiseService:
             raise
         expense = data.get("expense")
         return bool(isinstance(expense, dict) and not expense.get("deleted_at"))
+
+    def expense_matches_payload(self, expense_id: str, payload: dict[str, Any]) -> bool:
+        data = self._request("GET", f"/get_expense/{expense_id}")
+        expense = data.get("expense")
+        if not isinstance(expense, dict) or expense.get("deleted_at"):
+            return False
+        if str(expense.get("cost") or "") != str(payload.get("cost") or ""):
+            return False
+        expected = _payload_user_shares(payload)
+        actual = {
+            str(user.get("user_id")): (
+                str(user.get("paid_share") or ""),
+                str(user.get("owed_share") or ""),
+            )
+            for user in expense.get("users", [])
+            if user.get("user_id") is not None
+        }
+        return expected == actual
 
 
 def _workspace_settings(settings: Settings) -> Settings:
@@ -366,6 +393,18 @@ def _safe_json(response: requests.Response) -> dict[str, Any]:
         return data if isinstance(data, dict) else {"data": data}
     except ValueError:
         return {"text": response.text}
+
+
+def _payload_user_shares(payload: dict[str, Any]) -> dict[str, tuple[str, str]]:
+    shares: dict[str, tuple[str, str]] = {}
+    index = 0
+    while f"users__{index}__user_id" in payload:
+        shares[str(payload[f"users__{index}__user_id"])] = (
+            str(payload.get(f"users__{index}__paid_share") or ""),
+            str(payload.get(f"users__{index}__owed_share") or ""),
+        )
+        index += 1
+    return shares
 
 
 def _parse_oauth_credentials(response_text: str) -> dict[str, str]:

@@ -331,7 +331,7 @@ function DashboardApp() {
   }
 
   async function loadRecoveryTransactions() {
-    const statuses = ["error", "post_ambiguous", "undo_ambiguous", "posting", "undoing"];
+    const statuses = ["error", "post_ambiguous", "undo_ambiguous", "reconciliation_required", "posting", "undoing"];
     const groups = await Promise.all(
       statuses.map((status) => api<Transaction[]>(`/transactions?status=${status}&limit=50`)),
     );
@@ -816,7 +816,7 @@ function DashboardApp() {
               />
             )}
           </section>
-          {recoveryTransactions.length ? <section className="mt-6 space-y-3" aria-labelledby="recovery-title"><div><div className="inline-flex items-center gap-2 text-xs font-semibold uppercase text-amber-700"><RotateCcw className="h-3.5 w-3.5" />Recovery</div><h2 id="recovery-title" className="mt-1 text-xl font-semibold text-slate-950">Financial actions needing attention</h2><p className="mt-1 text-sm text-slate-600">ExpenseOps keeps uncertain or failed Splitwise actions visible until their provider state is confirmed.</p></div>{recoveryTransactions.map((transaction) => <Card key={transaction.id} className="border-amber-200"><CardContent className="flex flex-col gap-4 p-4 sm:flex-row sm:items-center sm:justify-between"><div className="min-w-0"><p className="font-semibold text-slate-950">{transaction.merchant_name || transaction.name} · {formatTransactionAmount(transaction)}</p><p className="mt-1 text-sm text-slate-700">{transaction.last_error || statusDisplay(transaction.status)}</p><p className="mt-1 text-xs text-slate-500">The transaction has not been hidden or marked successful.</p></div><div className="flex shrink-0 flex-wrap gap-2"><Button variant="outline" disabled={Boolean(transactionActionById[transaction.id])} onClick={() => retryFinancialOperation(transaction.id)}><RotateCcw className="h-4 w-4" />{transactionActionById[transaction.id] || "Reconcile and retry"}</Button><Button variant="ghost" onClick={() => setExpandedTransactions((current) => ({ ...current, [transaction.id]: true }))}>Return to review</Button></div>{transactionNoticeById[transaction.id] ? <p role="alert" className="text-sm text-rose-700">{transactionNoticeById[transaction.id].text}</p> : null}</CardContent></Card>)}</section> : null}
+          {recoveryTransactions.length ? <section className="mt-6 space-y-3" aria-labelledby="recovery-title"><div><div className="inline-flex items-center gap-2 text-xs font-semibold uppercase text-amber-700"><RotateCcw className="h-3.5 w-3.5" />Recovery</div><h2 id="recovery-title" className="mt-1 text-xl font-semibold text-slate-950">Financial actions needing attention</h2><p className="mt-1 text-sm text-slate-600">ExpenseOps keeps uncertain or failed Splitwise actions visible until their provider state is confirmed.</p></div>{recoveryTransactions.map((transaction) => <Card key={transaction.id} className="border-amber-200"><CardContent className="flex flex-col gap-4 p-4 sm:flex-row sm:items-center sm:justify-between"><div className="min-w-0"><p className="font-semibold text-slate-950">{transaction.merchant_name || transaction.name} · {formatTransactionAmount(transaction)}</p><p className="mt-1 text-sm text-slate-700">{transaction.last_error || statusDisplay(transaction.status)}</p><p className="mt-1 text-xs text-slate-500">The transaction has not been hidden or marked successful.</p></div><div className="flex shrink-0 flex-wrap gap-2"><Button variant="outline" disabled={Boolean(transactionActionById[transaction.id])} onClick={() => retryFinancialOperation(transaction.id)}><RotateCcw className="h-4 w-4" />{transactionActionById[transaction.id] || "Reconcile and retry"}</Button>{transaction.status === "reconciliation_required" ? <Button variant="ghost" disabled={Boolean(transactionActionById[transaction.id])} onClick={() => undoTransaction(transaction.id)}>Remove old split &amp; review</Button> : null}</div>{transactionNoticeById[transaction.id] ? <p role="alert" className="text-sm text-rose-700">{transactionNoticeById[transaction.id].text}</p> : null}</CardContent></Card>)}</section> : null}
           </div>
           <section aria-labelledby="recently-handled-title"><div className="mb-3 flex items-center justify-between"><h2 id="recently-handled-title" className="text-lg font-semibold text-slate-950">Recently handled</h2><Button variant="ghost" size="sm" onClick={()=>changeExpenseTab("activity")}>View all activity</Button></div>
             <RecentActivity
@@ -945,6 +945,7 @@ function statusDisplay(status: string) {
     personal: "Personal",
     posted: "Posted",
     shared_draft: "Draft split",
+    reconciliation_required: "Reconciliation required",
     removed: "Removed",
   };
   return labels[status] || status.replace(/_/g, " ");
@@ -2463,6 +2464,7 @@ function ActivityIcon({ status }: { status: Transaction["status"] }) {
     personal: "border-emerald-200 text-emerald-700",
     posted: "border-emerald-200 text-emerald-700",
     shared_draft: "border-amber-200 text-amber-700",
+    reconciliation_required: "border-amber-300 text-amber-800",
     ask_user: "border-indigo-200 text-indigo-700",
   };
   const Icon =

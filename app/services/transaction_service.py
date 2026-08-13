@@ -8,7 +8,7 @@ import secrets
 import threading
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
-from decimal import Decimal
+from decimal import ROUND_FLOOR, Decimal
 from typing import Any
 
 from sqlalchemy import func, or_, select, update
@@ -90,6 +90,7 @@ def can_undo_transaction(tx: ExpenseTransaction) -> bool:
         TransactionStatus.PERSONAL.value,
         TransactionStatus.POSTED.value,
         TransactionStatus.SHARED_DRAFT.value,
+        TransactionStatus.RECONCILIATION_REQUIRED.value,
     }
 
 
@@ -114,6 +115,7 @@ class TransactionService:
                 user_id=session_info.get("user_id"),
             )
         self.plaid_service = plaid_service
+        self._splitwise_service_injected = splitwise_service is not None
         self.splitwise_service = splitwise_service or SplitwiseService(self.settings)
         self._notification_service_injected = notification_service is not None
         self.notification_service = notification_service or NotificationService(self.settings)
@@ -128,6 +130,8 @@ class TransactionService:
                 user_id=item.owner_user_id,
             )
             self.notification_service = NotificationService(recipient_settings)
+        if not self._splitwise_service_injected:
+            self.splitwise_service = self._splitwise_service_for_item_owner(item)
         plaid = self.plaid_service or PlaidService(self.settings)
         if item.enabled is False or not item.access_token_encrypted:
             raise TransactionError("Plaid connection is disconnected")
@@ -275,6 +279,7 @@ class TransactionService:
         created = tx is None
         previous_pending = bool(tx.pending) if tx is not None else None
         previous_status = str(tx.status) if tx is not None else None
+        previous_amount_cents = int(tx.amount_cents) if tx is not None else None
         if tx is None:
             tx = ExpenseTransaction(
                 plaid_item_id=item.id,
@@ -314,6 +319,18 @@ class TransactionService:
                 status=tx.status,
                 reason=classification.reason,
                 source="rule",
+            )
+
+        self._link_pending_replacement(item, tx, tx_data)
+        if (
+            not created
+            and previous_amount_cents is not None
+            and previous_amount_cents != tx.amount_cents
+            and tx.splitwise_expense_id
+        ):
+            self._reconcile_posted_amount_change(
+                tx,
+                previous_amount_cents=previous_amount_cents,
             )
 
         notification_eligible = self._should_notify_transaction_needs_review(
@@ -857,10 +874,24 @@ class TransactionService:
                 ExpenseTransaction.plaid_transaction_id == plaid_transaction_id
             )
         ).scalar_one_or_none()
-        if tx:
-            tx.status = TransactionStatus.REMOVED.value
-            tx.updated_at = utc_now()
-            self.db.commit()
+        if not tx:
+            return
+        if tx.splitwise_expense_id:
+            try:
+                self._execute_splitwise_delete(
+                    tx,
+                    action="splitwise_delete_removed",
+                    result_status=TransactionStatus.REMOVED.value,
+                )
+            except (TransactionError, SplitwiseAPIError):
+                # The durable operation remains visible in Recovery. Advancing the
+                # Plaid cursor is safe because retries no longer depend on replaying
+                # the webhook page.
+                return
+            return
+        tx.status = TransactionStatus.REMOVED.value
+        tx.updated_at = utc_now()
+        self.db.commit()
 
     def mark_personal(self, tx_id: int) -> ExpenseTransaction:
         tx = self.get_transaction(tx_id)
@@ -877,6 +908,8 @@ class TransactionService:
         tx = self.get_transaction(tx_id)
         if tx.splitwise_expense_id:
             raise TransactionError("Transaction already posted to Splitwise; cannot draft.")
+        payload = _parse_valid_splitwise_payload(tx.splitwise_payload_json)
+        _validate_splitwise_payload(payload, expected_total_cents=abs(tx.amount_cents))
         tx.status = TransactionStatus.SHARED_DRAFT.value
         tx.last_error = None
         tx.updated_at = utc_now()
@@ -920,6 +953,18 @@ class TransactionService:
             return tx
         if operation.action == "splitwise_delete":
             return self._execute_splitwise_delete(tx, operation=operation)
+        if operation.action == "splitwise_delete_removed":
+            return self._execute_splitwise_delete(
+                tx,
+                operation=operation,
+                action=operation.action,
+                result_status=TransactionStatus.REMOVED.value,
+            )
+        if operation.action == "splitwise_update":
+            payload = dict((operation.request_json or {}).get("payload") or {})
+            if not payload:
+                raise TransactionError("The saved Splitwise update is unavailable for recovery.")
+            return self._execute_splitwise_update(tx, payload, operation=operation)
         raise TransactionError("This financial operation cannot be retried.")
 
     def create_equal_split_expense(
@@ -1097,6 +1142,7 @@ class TransactionService:
     def _draft_or_post(
         self, tx: ExpenseTransaction, payload: dict[str, Any], *, confirm: bool
     ) -> tuple[ExpenseTransaction, dict[str, Any]]:
+        _validate_splitwise_payload(payload, expected_total_cents=abs(tx.amount_cents))
         tx.splitwise_payload_json = json.dumps(payload, default=str)
         if not confirm:
             tx.status = TransactionStatus.SHARED_DRAFT.value
@@ -1184,6 +1230,7 @@ class TransactionService:
         operation.error_message = None
         tx.status = TransactionStatus.POSTED.value
         tx.splitwise_expense_id = expense_id
+        tx.splitwise_amount_cents = abs(tx.amount_cents)
         tx.last_error = None
         tx.updated_at = utc_now()
         record_audit(
@@ -1213,11 +1260,91 @@ class TransactionService:
         )
         return tx, response or {"recovered": recovered, "expenses": [expense]}
 
+    def _execute_splitwise_update(
+        self,
+        tx: ExpenseTransaction,
+        payload: dict[str, Any],
+        *,
+        operation: FinancialOperation | None = None,
+    ) -> ExpenseTransaction:
+        if not self._supports_operation_journal():
+            raise TransactionError("Splitwise reconciliation requires the operation journal.")
+        expense_id = tx.splitwise_expense_id
+        if not expense_id:
+            raise TransactionError("The Splitwise expense is unavailable for reconciliation.")
+        _validate_splitwise_payload(payload, expected_total_cents=abs(tx.amount_cents))
+        operation = operation or self._claim_financial_operation(
+            tx,
+            action="splitwise_update",
+            generation=tx.splitwise_generation,
+            request_json={"provider_object_id": expense_id, "payload": payload},
+        )
+        provider_id = operation.provider_object_id or str(
+            (operation.request_json or {}).get("provider_object_id") or expense_id
+        )
+        if operation.state == "succeeded":
+            return self._complete_splitwise_update(tx, operation, payload)
+        if operation.state == "needs_reconciliation":
+            if self.splitwise_service.expense_matches_payload(provider_id, payload):
+                return self._complete_splitwise_update(tx, operation, payload)
+        operation.provider_object_id = provider_id
+        operation = self._acquire_operation_lease(operation)
+        tx.status = TransactionStatus.RECONCILIATION_REQUIRED.value
+        tx.last_error = "Confirming the finalized bank amount with Splitwise."
+        tx.updated_at = utc_now()
+        self.db.commit()
+        try:
+            self.splitwise_service.update_expense(provider_id, payload)
+            return self._complete_splitwise_update(tx, operation, payload)
+        except SplitwiseAPIError as exc:
+            self._fail_financial_operation(tx, operation, exc, create=False)
+            return tx
+
+    def _complete_splitwise_update(
+        self,
+        tx: ExpenseTransaction,
+        operation: FinancialOperation,
+        payload: dict[str, Any],
+    ) -> ExpenseTransaction:
+        operation.state = "succeeded"
+        operation.completed_at = utc_now()
+        operation.updated_at = operation.completed_at
+        operation.lease_token = None
+        operation.lease_expires_at = None
+        operation.error_code = None
+        operation.error_message = None
+        tx.status = TransactionStatus.POSTED.value
+        tx.splitwise_payload_json = json.dumps(payload, default=str)
+        if tx.splitwise_amount_cents != abs(tx.amount_cents):
+            tx.splitwise_generation += 1
+        tx.splitwise_amount_cents = abs(tx.amount_cents)
+        tx.last_error = None
+        tx.updated_at = utc_now()
+        record_audit(
+            self.db,
+            workspace_id=tx.workspace_id,
+            user_id=self._actor_user_id(),
+            event_type="splitwise_expense_reconciled",
+            resource_type="financial_operation",
+            resource_id=str(operation.id),
+            request_id=get_trace_id(),
+            metadata={
+                "transaction_id": tx.id,
+                "provider_object_id": operation.provider_object_id,
+                "amount_cents": tx.splitwise_amount_cents,
+            },
+        )
+        self.db.commit()
+        self.db.refresh(tx)
+        return tx
+
     def _execute_splitwise_delete(
         self,
         tx: ExpenseTransaction,
         *,
         operation: FinancialOperation | None = None,
+        action: str = "splitwise_delete",
+        result_status: str = TransactionStatus.ASK_USER.value,
     ) -> ExpenseTransaction:
         if not self._supports_operation_journal():
             return self._legacy_splitwise_delete(tx)
@@ -1226,9 +1353,12 @@ class TransactionService:
             raise TransactionError("The Splitwise expense is already absent.")
         operation = operation or self._claim_financial_operation(
             tx,
-            action="splitwise_delete",
+            action=action,
             generation=tx.splitwise_generation,
-            request_json={"provider_object_id": expense_id},
+            request_json={
+                "provider_object_id": expense_id,
+                "result_status": result_status,
+            },
         )
         provider_id = operation.provider_object_id or expense_id
         if operation.state == "succeeded":
@@ -1266,10 +1396,24 @@ class TransactionService:
         operation.error_code = None
         operation.error_message = None
         tx.splitwise_expense_id = None
+        tx.splitwise_amount_cents = None
         tx.splitwise_generation += 1
-        tx.status = TransactionStatus.ASK_USER.value
+        tx.status = str(
+            (operation.request_json or {}).get(
+                "result_status", TransactionStatus.ASK_USER.value
+            )
+        )
         tx.last_error = None
         tx.updated_at = utc_now()
+        if tx.replaced_by_transaction_id:
+            replacement = self.db.get(ExpenseTransaction, tx.replaced_by_transaction_id)
+            if (
+                replacement is not None
+                and replacement.status == TransactionStatus.RECONCILIATION_REQUIRED.value
+            ):
+                replacement.status = TransactionStatus.ASK_USER.value
+                replacement.last_error = None
+                replacement.updated_at = utc_now()
         record_audit(
             self.db,
             workspace_id=tx.workspace_id,
@@ -1380,13 +1524,20 @@ class TransactionService:
         operation.updated_at = utc_now()
         operation.lease_token = None
         operation.lease_expires_at = None
-        tx.status = (
-            TransactionStatus.POST_AMBIGUOUS.value
-            if ambiguous and create
-            else TransactionStatus.UNDO_AMBIGUOUS.value
-            if ambiguous
-            else TransactionStatus.ERROR.value
-        )
+        if operation.action == "splitwise_update":
+            tx.status = (
+                TransactionStatus.POST_AMBIGUOUS.value
+                if ambiguous
+                else TransactionStatus.RECONCILIATION_REQUIRED.value
+            )
+        else:
+            tx.status = (
+                TransactionStatus.POST_AMBIGUOUS.value
+                if ambiguous and create
+                else TransactionStatus.UNDO_AMBIGUOUS.value
+                if ambiguous
+                else TransactionStatus.ERROR.value
+            )
         tx.last_error = str(error)
         tx.updated_at = utc_now()
         record_audit(
@@ -1424,6 +1575,94 @@ class TransactionService:
         value = getattr(self.db, "info", {}).get("user_id")
         return int(value) if value is not None else None
 
+    def _splitwise_service_for_item_owner(self, item: PlaidItem) -> SplitwiseService:
+        if item.owner_user_id is None:
+            return SplitwiseService(self.settings)
+        integration = self.db.scalar(
+            select(SplitwiseIntegration).where(
+                SplitwiseIntegration.workspace_id == item.workspace_id,
+                SplitwiseIntegration.user_id == item.owner_user_id,
+                SplitwiseIntegration.enabled.is_(True),
+            )
+        )
+        if integration is None:
+            return SplitwiseService(self.settings)
+        try:
+            credentials = json.loads(decrypt_secret(integration.credentials_encrypted))
+        except (TypeError, ValueError):
+            return SplitwiseService(self.settings)
+        return SplitwiseService(
+            self.settings.model_copy(update=credentials),
+            resolve_workspace_credentials=False,
+        )
+
+    def _link_pending_replacement(
+        self,
+        item: PlaidItem,
+        tx: ExpenseTransaction,
+        tx_data: dict[str, Any],
+    ) -> None:
+        pending_plaid_id = str(tx_data.get("pending_transaction_id") or "").strip()
+        if not pending_plaid_id or pending_plaid_id == tx.plaid_transaction_id:
+            return
+        prior = self._get_transaction_by_plaid_id(pending_plaid_id)
+        if prior is None or prior.id == tx.id:
+            return
+        tx.replaces_transaction_id = prior.id
+        prior.replaced_by_transaction_id = tx.id
+        if prior.splitwise_expense_id:
+            try:
+                self._execute_splitwise_delete(
+                    prior,
+                    action="splitwise_delete_removed",
+                    result_status=TransactionStatus.REMOVED.value,
+                )
+            except (TransactionError, SplitwiseAPIError):
+                tx.status = TransactionStatus.RECONCILIATION_REQUIRED.value
+                tx.last_error = (
+                    "The pending bank transaction was replaced, but its earlier Splitwise "
+                    "expense still needs reconciliation."
+                )
+                self.db.commit()
+                return
+        else:
+            prior.status = TransactionStatus.REMOVED.value
+            prior.updated_at = utc_now()
+        record_audit(
+            self.db,
+            workspace_id=item.workspace_id,
+            user_id=item.owner_user_id,
+            event_type="plaid_pending_transaction_replaced",
+            resource_type="expense_transaction",
+            resource_id=str(tx.id),
+            request_id=get_trace_id(),
+            metadata={
+                "pending_transaction_id": prior.id,
+                "posted_transaction_id": tx.id,
+            },
+        )
+
+    def _reconcile_posted_amount_change(
+        self,
+        tx: ExpenseTransaction,
+        *,
+        previous_amount_cents: int,
+    ) -> None:
+        try:
+            existing_payload = _parse_valid_splitwise_payload(tx.splitwise_payload_json)
+            payload = _rescale_splitwise_payload(existing_payload, abs(tx.amount_cents))
+        except (TransactionError, ValueError, ArithmeticError):
+            tx.status = TransactionStatus.RECONCILIATION_REQUIRED.value
+            tx.last_error = (
+                f"Bank finalized this transaction from "
+                f"{cents_to_decimal_string(abs(previous_amount_cents))} to "
+                f"{cents_to_decimal_string(abs(tx.amount_cents))}. Review the split allocation."
+            )
+            tx.updated_at = utc_now()
+            self.db.commit()
+            return
+        self._execute_splitwise_update(tx, payload)
+
     def _supports_operation_journal(self) -> bool:
         return all(hasattr(self.db, name) for name in ("scalar", "execute", "add", "flush"))
 
@@ -1435,6 +1674,7 @@ class TransactionService:
             expense_id = str(response.get("expenses", [{}])[0].get("id", "")) or None
             tx.status = TransactionStatus.POSTED.value
             tx.splitwise_expense_id = expense_id
+            tx.splitwise_amount_cents = abs(tx.amount_cents)
             tx.last_error = None
             tx.updated_at = utc_now()
             self.db.commit()
@@ -1456,6 +1696,7 @@ class TransactionService:
                 "Could not delete the Splitwise expense. Transaction was not reverted."
             ) from exc
         tx.splitwise_expense_id = None
+        tx.splitwise_amount_cents = None
         tx.status = TransactionStatus.ASK_USER.value
         tx.last_error = None
         tx.updated_at = utc_now()
@@ -1486,6 +1727,106 @@ def _parse_date(value: Any) -> date | None:
     if isinstance(value, date):
         return value
     return datetime.fromisoformat(str(value)).date()
+
+
+def _parse_valid_splitwise_payload(value: str | None) -> dict[str, Any]:
+    if not value:
+        raise TransactionError(
+            "Choose at least one participant and a valid allocation before saving a draft."
+        )
+    try:
+        payload = json.loads(value)
+    except (TypeError, json.JSONDecodeError) as exc:
+        raise TransactionError("The saved split allocation is invalid.") from exc
+    if not isinstance(payload, dict) or not payload:
+        raise TransactionError(
+            "Choose at least one participant and a valid allocation before saving a draft."
+        )
+    return payload
+
+
+def _validate_splitwise_payload(
+    payload: dict[str, Any], *, expected_total_cents: int
+) -> None:
+    try:
+        cost_cents = decimal_to_cents(Decimal(str(payload.get("cost"))))
+    except (TypeError, ValueError, ArithmeticError) as exc:
+        raise TransactionError("The split total is invalid.") from exc
+    if cost_cents != expected_total_cents:
+        raise TransactionError("The split total must match the bank transaction amount.")
+    indexes = _splitwise_payload_indexes(payload)
+    if not indexes:
+        raise TransactionError("Choose at least one participant before saving the split.")
+    paid_total = 0
+    owed_total = 0
+    seen_user_ids: set[int] = set()
+    for index in indexes:
+        try:
+            user_id = int(payload[f"users__{index}__user_id"])
+            paid = decimal_to_cents(Decimal(str(payload[f"users__{index}__paid_share"])))
+            owed = decimal_to_cents(Decimal(str(payload[f"users__{index}__owed_share"])))
+        except (KeyError, TypeError, ValueError, ArithmeticError) as exc:
+            raise TransactionError(
+                "Every split participant needs valid paid and owed shares."
+            ) from exc
+        if user_id <= 0 or user_id in seen_user_ids or paid < 0 or owed < 0:
+            raise TransactionError("The split participant allocation is invalid.")
+        seen_user_ids.add(user_id)
+        paid_total += paid
+        owed_total += owed
+    if paid_total != expected_total_cents or owed_total != expected_total_cents:
+        raise TransactionError("Paid and owed shares must each match the transaction total.")
+
+
+def _splitwise_payload_indexes(payload: dict[str, Any]) -> list[int]:
+    indexes: list[int] = []
+    index = 0
+    while f"users__{index}__user_id" in payload:
+        indexes.append(index)
+        index += 1
+    return indexes
+
+
+def _rescale_splitwise_payload(
+    payload: dict[str, Any], new_total_cents: int
+) -> dict[str, Any]:
+    indexes = _splitwise_payload_indexes(payload)
+    if not indexes or new_total_cents <= 0:
+        raise TransactionError("The saved split cannot be rescaled safely.")
+    paid_weights = [
+        Decimal(str(payload.get(f"users__{index}__paid_share") or "0"))
+        for index in indexes
+    ]
+    owed_weights = [
+        Decimal(str(payload.get(f"users__{index}__owed_share") or "0"))
+        for index in indexes
+    ]
+    paid_cents = _allocate_cents_by_weights(new_total_cents, paid_weights)
+    owed_cents = _allocate_cents_by_weights(new_total_cents, owed_weights)
+    result = dict(payload)
+    result["cost"] = cents_to_decimal_string(new_total_cents)
+    for offset, index in enumerate(indexes):
+        result[f"users__{index}__paid_share"] = cents_to_decimal_string(paid_cents[offset])
+        result[f"users__{index}__owed_share"] = cents_to_decimal_string(owed_cents[offset])
+    _validate_splitwise_payload(result, expected_total_cents=new_total_cents)
+    return result
+
+
+def _allocate_cents_by_weights(total_cents: int, weights: list[Decimal]) -> list[int]:
+    weight_total = sum(weights, Decimal("0"))
+    if weight_total <= 0:
+        raise TransactionError("The saved split allocation has no positive shares.")
+    raw = [Decimal(total_cents) * weight / weight_total for weight in weights]
+    values = [int(value.to_integral_value(rounding=ROUND_FLOOR)) for value in raw]
+    remainder = total_cents - sum(values)
+    order = sorted(
+        range(len(raw)),
+        key=lambda index: raw[index] - Decimal(values[index]),
+        reverse=True,
+    )
+    for index in order[:remainder]:
+        values[index] += 1
+    return values
 
 
 def _date_to_splitwise_iso(value: date | None) -> str | None:

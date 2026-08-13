@@ -42,6 +42,9 @@ class TransactionOut(BaseModel):
     agent_question: str | None
     splitwise_expense_id: str | None
     splitwise_payload_json: str | None
+    splitwise_amount_cents: int | None = None
+    replaces_transaction_id: int | None = None
+    replaced_by_transaction_id: int | None = None
     last_error: str | None
     classification_suggestion: Literal["likely_personal", "likely_shared", "unsure"] | None = None
     classification_reason: str | None = None

@@ -526,10 +526,6 @@ def build_button_mode_keyboard(transaction_id: int) -> dict[str, Any]:
                     "text": "Personal",
                     "callback_data": build_review_callback_data("personal", transaction_id),
                 },
-                {
-                    "text": "Draft",
-                    "callback_data": build_review_callback_data("draft", transaction_id),
-                },
             ],
             [
                 {

@@ -37,7 +37,7 @@ visual-foundation changes began.
 | V8 — visual/accessibility validation | Complete (automated gate) | Six-width responsive matrix, 44px touch-target audit across primary and expanded flows, keyboard skip/focus restoration, reduced motion, 200%-zoom-equivalent layout, mobile-nav clearance, edge-state fixtures, and four-project Playwright coverage |
 | Phase 2 — UX action integrity | Complete | Structured API client; global resilience surfaces; scoped Expense, Deals, Settings, and Splitwise actions; cross-browser failure-isolation gate; checkpoint on `agent/launch-readiness` |
 | Phase 3 — identity and tenancy | In progress | Tenant-safe uniqueness and schema parity; verified OIDC email; atomic OAuth state claims; invite return/switch/wrong-account recovery; owner/member API matrix; removal/transfer; per-user Telegram and Splitwise; explicit Plaid ownership; exact connected identities. PostgreSQL RLS/request-worker role rollout remains an open exit-gate item. |
-| Phase 4 — financial correctness | In progress | Durable Splitwise create/delete journal, deterministic idempotency marker, atomic operation leases, explicit submitting/ambiguous states, reconciliation API, append-only audit events, and visible Recovery UI implemented; Plaid replacement/reversal reconciliation and transactional outbox remain open |
+| Phase 4 — financial correctness | In progress | Durable Splitwise create/update/delete journal, deterministic idempotency marker, atomic leases, pending-to-posted relationships, finalized-amount and removal reconciliation, valid-draft database invariant, append-only audit events, and visible Recovery UI implemented; transactional outbox moves into Phase 5 |
 | Phase 5 — durable workers | Not started | — |
 | Phase 6 — product-domain correctness | Not started | — |
 | Phase 7 — security and operations | Not started | — |
@@ -75,13 +75,17 @@ intentionally not represented as complete by the ORM isolation tests.
 | Duplicate protection | A successful create replays its stored result without a second provider call; an active lease rejects a concurrent submit |
 | Ambiguous create recovery | Timeout-after-send moves the transaction to `post_ambiguous`; retry searches the deterministic Splitwise marker before any new create |
 | Ambiguous delete recovery | Timeout-after-delete moves the transaction to `undo_ambiguous`; retry verifies provider absence before clearing local posted state |
-| Customer recovery | Error and ambiguous transactions remain visible in a dedicated Recovery section with Reconcile and retry and Return to review actions |
+| Finalized amount reconciliation | A changed Plaid amount proportionally rescales the saved paid/owed allocation and updates the existing Splitwise expense through the durable journal; ambiguous updates verify provider state before retry |
+| Replacement and removal reconciliation | Plaid `pending_transaction_id` links pending and posted rows; replaced/removed rows delete any existing Splitwise expense before becoming removed |
+| Draft integrity | `shared_draft` requires a non-empty participant/allocation payload in both service validation and a database check constraint; the unsafe one-click Telegram Draft action is no longer offered |
+| Customer recovery | Error and ambiguous transactions remain visible in a dedicated Recovery section; confirmed failures can either retry or remove the old split and return to review |
 | Auditability | Success, failure, ambiguity, recovery, actor, provider object, correlation, and idempotency identifiers emit append-only audit events |
-| Regression gate | Backend 533 passed; frontend unit 20 passed; lint had zero errors; production build passed |
+| Migration parity | Clean `alembic upgrade head` followed by `alembic check` passes with the reconciliation fields and draft constraint |
+| Focused regression gate | Backend 140 passed; Ruff passed; frontend unit 20 passed; lint had zero errors; production build passed |
 
-Phase 4 is not complete until Plaid pending-to-posted replacement, amount modification, reversal and
-removal reconciliation are implemented, valid-draft invariants are database-enforced, and post-commit
-notifications/events use the transactional outbox introduced in Phase 5.
+Phase 4 remains in progress only because post-commit provider notifications/events must move to the
+transactional outbox introduced in Phase 5. The direct financial mutation paths, Plaid replacement,
+amount modification, reversal/removal handling, and valid-draft invariant are implemented and covered.
 
 ## V1 validation evidence
 

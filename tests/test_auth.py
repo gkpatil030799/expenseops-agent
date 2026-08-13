@@ -110,13 +110,12 @@ def test_public_webhook_paths_are_not_auth_protected():
         assert auth._is_public_request(request)
 
 
-def test_button_mode_routes_are_not_changed_by_auth_helpers():
+def test_button_mode_routes_keep_valid_financial_actions_with_auth_helpers():
     from app.services.telegram_service import build_button_mode_keyboard
 
     keyboard = build_button_mode_keyboard(12)
 
     assert keyboard["inline_keyboard"][0][0]["text"] == "Personal"
-    assert keyboard["inline_keyboard"][0][1]["text"] == "Draft"
     assert keyboard["inline_keyboard"][1][0]["text"] == "Split"
 
 

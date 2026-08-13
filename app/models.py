@@ -6,6 +6,7 @@ from enum import StrEnum
 from sqlalchemy import (
     JSON,
     Boolean,
+    CheckConstraint,
     Date,
     DateTime,
     Float,
@@ -246,6 +247,7 @@ class TransactionStatus(StrEnum):
     POST_AMBIGUOUS = "post_ambiguous"
     UNDOING = "undoing"
     UNDO_AMBIGUOUS = "undo_ambiguous"
+    RECONCILIATION_REQUIRED = "reconciliation_required"
     ERROR = "error"
     REMOVED = "removed"
 
@@ -383,7 +385,15 @@ class PlaidWebhookEvent(Base):
 
 class ExpenseTransaction(TenantScoped, Base):
     __tablename__ = "expense_transactions"
-    __table_args__ = (UniqueConstraint("plaid_transaction_id", name="uq_plaid_transaction_id"),)
+    __table_args__ = (
+        UniqueConstraint("plaid_transaction_id", name="uq_plaid_transaction_id"),
+        CheckConstraint(
+            "status != 'shared_draft' OR "
+            "(splitwise_payload_json IS NOT NULL "
+            "AND trim(splitwise_payload_json) NOT IN ('', '{}'))",
+            name="ck_expense_transactions_valid_shared_draft",
+        ),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     plaid_transaction_id: Mapped[str] = mapped_column(String(128), index=True)
@@ -409,7 +419,14 @@ class ExpenseTransaction(TenantScoped, Base):
     )
     splitwise_expense_id: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
     splitwise_payload_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    splitwise_amount_cents: Mapped[int | None] = mapped_column(Integer, nullable=True)
     splitwise_generation: Mapped[int] = mapped_column(Integer, default=0)
+    replaces_transaction_id: Mapped[int | None] = mapped_column(
+        ForeignKey("expense_transactions.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    replaced_by_transaction_id: Mapped[int | None] = mapped_column(
+        ForeignKey("expense_transactions.id", ondelete="SET NULL"), nullable=True, index=True
+    )
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)

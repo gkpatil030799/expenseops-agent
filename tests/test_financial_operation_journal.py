@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import pytest
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import sessionmaker
 
@@ -21,6 +22,9 @@ from app.tenancy import TenantContext, set_session_tenant
 
 
 class NoopNotification:
+    def notify_transaction_needs_review(self, _tx):
+        return True
+
     def notify_splitwise_posted(self, _tx, _expense_id):
         return None
 
@@ -221,4 +225,130 @@ def test_active_lease_prevents_concurrent_second_submission(tmp_path):
             assert "already being processed" in str(exc)
         else:
             raise AssertionError("concurrent submission should have been blocked")
+    engine.dispose()
+
+
+def test_final_bank_amount_updates_existing_splitwise_expense(tmp_path):
+    engine, factory, context, tx_id = _database(tmp_path)
+
+    class Splitwise:
+        updated_payload = None
+
+        def create_expense(self, _payload):
+            return {"expenses": [{"id": "expense-1"}]}
+
+        def update_expense(self, expense_id, payload):
+            assert expense_id == "expense-1"
+            self.updated_payload = payload
+            return {"expenses": [{"id": expense_id}]}
+
+    splitwise = Splitwise()
+    with factory() as db:
+        set_session_tenant(db, context)
+        service = _service(db, splitwise)
+        posted, _ = _post(service, tx_id)
+        posted.amount_cents = 2151
+        db.commit()
+
+        service._reconcile_posted_amount_change(  # noqa: SLF001
+            posted,
+            previous_amount_cents=2000,
+        )
+
+        assert posted.status == TransactionStatus.POSTED.value
+        assert posted.splitwise_amount_cents == 2151
+        assert splitwise.updated_payload["cost"] == "21.51"
+        owed = sum(
+            int(round(float(value) * 100))
+            for key, value in splitwise.updated_payload.items()
+            if key.endswith("__owed_share")
+        )
+        assert owed == 2151
+        operations = list(db.scalars(select(FinancialOperation).order_by(FinancialOperation.id)))
+        assert [operation.action for operation in operations] == [
+            "splitwise_create",
+            "splitwise_update",
+        ]
+        assert operations[-1].state == "succeeded"
+    engine.dispose()
+
+
+def test_removed_bank_transaction_deletes_splitwise_before_marking_removed(tmp_path):
+    engine, factory, context, tx_id = _database(tmp_path)
+
+    class Splitwise:
+        deleted = []
+
+        def create_expense(self, _payload):
+            return {"expenses": [{"id": "expense-1"}]}
+
+        def delete_expense(self, expense_id):
+            self.deleted.append(expense_id)
+            return {"success": True}
+
+    splitwise = Splitwise()
+    with factory() as db:
+        set_session_tenant(db, context)
+        service = _service(db, splitwise)
+        posted, _ = _post(service, tx_id)
+
+        service.mark_removed(posted.plaid_transaction_id)
+
+        assert posted.status == TransactionStatus.REMOVED.value
+        assert posted.splitwise_expense_id is None
+        assert splitwise.deleted == ["expense-1"]
+        operation = db.scalar(
+            select(FinancialOperation).where(
+                FinancialOperation.action == "splitwise_delete_removed"
+            )
+        )
+        assert operation is not None
+        assert operation.state == "succeeded"
+    engine.dispose()
+
+
+def test_invalid_shared_draft_without_allocation_is_rejected(tmp_path):
+    engine, factory, context, tx_id = _database(tmp_path)
+    with factory() as db:
+        set_session_tenant(db, context)
+        with pytest.raises(TransactionError, match="participant"):
+            _service(db, object()).mark_shared_draft(tx_id)
+    engine.dispose()
+
+
+def test_pending_to_posted_replacement_is_linked_and_old_row_removed(tmp_path):
+    engine, factory, context, tx_id = _database(tmp_path)
+    with factory() as db:
+        set_session_tenant(db, context)
+        old = db.get(ExpenseTransaction, tx_id)
+        old.pending = True
+        old.plaid_transaction_id = "pending-transaction"
+        db.commit()
+        item = db.get(PlaidItem, old.plaid_item_id)
+        service = _service(db, object())
+
+        service.upsert_transaction(
+            item,
+            {
+                "transaction_id": "posted-transaction",
+                "pending_transaction_id": "pending-transaction",
+                "account_id": "account-1",
+                "name": "Aldi",
+                "merchant_name": "Aldi",
+                "amount": "20.50",
+                "iso_currency_code": "USD",
+                "date": "2026-08-12",
+                "pending": False,
+            },
+        )
+
+        posted = db.scalar(
+            select(ExpenseTransaction).where(
+                ExpenseTransaction.plaid_transaction_id == "posted-transaction"
+            )
+        )
+        db.refresh(old)
+        assert posted.replaces_transaction_id == old.id
+        assert old.replaced_by_transaction_id == posted.id
+        assert old.status == TransactionStatus.REMOVED.value
     engine.dispose()

@@ -103,7 +103,7 @@ def test_button_mode_keyboard_shows_initial_action_hierarchy():
     keyboard = build_button_mode_keyboard(12)
     labels = [button["text"] for row in keyboard["inline_keyboard"] for button in row]
 
-    assert labels == ["Personal", "Draft", "Split"]
+    assert labels == ["Personal", "Split"]
 
 
 def test_split_target_keyboard_shows_people_and_group():

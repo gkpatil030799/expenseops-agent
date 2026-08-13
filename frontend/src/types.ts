@@ -16,6 +16,9 @@ export type Transaction = {
   agent_question: string | null;
   splitwise_expense_id: string | null;
   splitwise_payload_json: string | null;
+  splitwise_amount_cents?: number | null;
+  replaces_transaction_id?: number | null;
+  replaced_by_transaction_id?: number | null;
   last_error: string | null;
   classification_suggestion: "likely_personal" | "likely_shared" | "unsure" | null;
   classification_reason: string | null;

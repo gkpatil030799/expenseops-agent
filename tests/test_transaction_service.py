@@ -385,7 +385,7 @@ def test_personal_transaction_is_not_notified_again_after_plaid_modified_sync(
         plaid_transaction_id="tx-personal-modified",
         plaid_item_id=item.id,
         name="Old merchant",
-        amount_cents=1200,
+        amount_cents=5387,
         pending=False,
         status=TransactionStatus.PERSONAL.value,
     )
@@ -443,7 +443,7 @@ def test_posted_transaction_is_not_notified_again_after_plaid_modified_sync(
         plaid_transaction_id="tx-posted-modified",
         plaid_item_id=item.id,
         name="Old posted",
-        amount_cents=1200,
+        amount_cents=5387,
         pending=False,
         status=TransactionStatus.POSTED.value,
         splitwise_expense_id="splitwise-expense-1",
@@ -530,7 +530,10 @@ def test_shared_draft_ready_transaction_can_notify_once(tmp_path):
         amount_cents=2200,
         pending=False,
         status=TransactionStatus.SHARED_DRAFT.value,
-        splitwise_payload_json="{}",
+        splitwise_payload_json=(
+            '{"cost":"22.00","users__0__user_id":111,'
+            '"users__0__paid_share":"22.00","users__0__owed_share":"22.00"}'
+        ),
     )
     db.add(tx)
     db.commit()
@@ -559,7 +562,7 @@ def test_duplicate_webhook_does_not_renotify_resolved_transaction(tmp_path, monk
         plaid_transaction_id="tx-resolved-repeat",
         plaid_item_id=item.id,
         name="Resolved merchant",
-        amount_cents=3300,
+        amount_cents=5387,
         pending=False,
         status=TransactionStatus.POSTED.value,
         splitwise_expense_id="expense-repeat",

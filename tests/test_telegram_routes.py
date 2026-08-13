@@ -701,7 +701,6 @@ def test_button_mode_unaffected_by_ai_guardrails():
     keyboard = telegram_routes.build_button_mode_keyboard(12)
 
     assert keyboard["inline_keyboard"][0][0]["text"] == "Personal"
-    assert keyboard["inline_keyboard"][0][1]["text"] == "Draft"
     assert keyboard["inline_keyboard"][1][0]["text"] == "Split"
 
 
