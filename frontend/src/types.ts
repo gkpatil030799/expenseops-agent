@@ -336,8 +336,10 @@ export type PromotionOffer = {
   expires_at: string | null;
   expiry_precision: string;
   destination_url: string | null;
+  destination_domain: string | null;
   terms_summary: string | null;
   trust_status: string;
+  trust_reason: string;
   status: string;
   score: number;
   saved: boolean;

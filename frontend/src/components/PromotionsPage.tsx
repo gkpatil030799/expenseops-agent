@@ -27,6 +27,14 @@ type DealView = "recommended" | "saved" | "expiring" | "all";
 type RemovedDeal = { offer: PromotionOffer; reason: "dismiss" | "not_relevant" };
 type OfferAction = "save" | "dismiss" | "not_relevant" | "mute_merchant";
 type OperationNotice = { tone: "success" | "error"; title: string; detail: string; correlationId?: string };
+type PromotionPage = {
+  items: PromotionOffer[];
+  total: number;
+  saved_total: number;
+  limit: number;
+  offset: number;
+  has_more: boolean;
+};
 
 export function PromotionsPage() {
   const [offers, setOffers] = useState<PromotionOffer[]>([]);
@@ -42,17 +50,26 @@ export function PromotionsPage() {
   const [removed, setRemoved] = useState<RemovedDeal | null>(null);
   const [gmailConnected, setGmailConnected] = useState<boolean | null>(null);
   const [operationNotice, setOperationNotice] = useState<OperationNotice | null>(null);
+  const [totalOffers, setTotalOffers] = useState(0);
+  const [savedTotal, setSavedTotal] = useState(0);
+  const [hasMore, setHasMore] = useState(false);
+  const [mutedMerchant, setMutedMerchant] = useState<string | null>(null);
   const pendingOfferActions = useRef(new Set<number>());
 
-  async function load() {
+  async function load(offset = 0) {
     setBusy(true);
     setLoadError(false);
     try {
-      const [values, groups] = await Promise.all([
-        api<PromotionOffer[]>("/api/promotions?limit=100"),
+      const [page, groups] = await Promise.all([
+        api<PromotionPage>(`/api/promotions?limit=100&offset=${offset}&include_meta=true`),
         api<string[]>("/api/promotions/categories"),
       ]);
-      setOffers(values);
+      setOffers((current) => offset
+        ? [...current, ...page.items.filter((item) => !current.some((existing) => existing.id === item.id))]
+        : page.items);
+      setTotalOffers(page.total);
+      setSavedTotal(page.saved_total);
+      setHasMore(page.has_more);
       setCategories(groups);
     } catch (error) {
       setLoadError(true);
@@ -98,15 +115,22 @@ export function PromotionsPage() {
     setOperationNotice(null);
     try {
       if (kind === "save") {
-        const updated = await api<PromotionOffer>(`/api/promotions/${offer.id}/save`, { method: "POST" });
+        const updated = await api<PromotionOffer>(`/api/promotions/${offer.id}/${offer.saved ? "unsave" : "save"}`, { method: "POST" });
         setOffers((current) => current.map((item) => item.id === offer.id ? updated : item));
-        setOperationNotice({ tone: "success", title: "Deal saved", detail: `${offer.merchant} is now in Saved deals.` });
+        setSavedTotal((current) => Math.max(0, current + (updated.saved ? 1 : -1)));
+        setOperationNotice({
+          tone: "success",
+          title: updated.saved ? "Deal saved" : "Deal unsaved",
+          detail: updated.saved ? `${offer.merchant} is now in Saved deals.` : `${offer.merchant} was removed from Saved deals.`,
+        });
         return;
       }
+      if (kind === "mute_merchant" && !window.confirm(`Mute ${offer.merchant}? Offers from this merchant will stop appearing until you unmute it.`)) return;
       if (kind === "dismiss") await api(`/api/promotions/${offer.id}/dismiss`, { method: "POST" });
       else await api(`/api/promotions/${offer.id}/feedback`, { method: "POST", body: JSON.stringify({ feedback_type: kind, metadata: {} }) });
       setOffers((current) => kind === "mute_merchant" ? current.filter((item) => item.merchant !== offer.merchant) : current.filter((item) => item.id !== offer.id));
       setRemoved(kind === "dismiss" || kind === "not_relevant" ? { offer, reason: kind } : null);
+      setMutedMerchant(kind === "mute_merchant" ? offer.merchant : null);
       setOperationNotice({
         tone: "success",
         title: kind === "mute_merchant" ? "Merchant muted" : "Deal removed",
@@ -117,6 +141,23 @@ export function PromotionsPage() {
     } finally {
       pendingOfferActions.current.delete(offer.id);
       setBusyOfferId(null);
+    }
+  }
+
+  async function undoMute() {
+    if (!mutedMerchant) return;
+    setBusy(true);
+    setOperationNotice(null);
+    try {
+      await api(`/api/promotions/muted-merchants/${encodeURIComponent(mutedMerchant)}`, { method: "DELETE" });
+      const merchant = mutedMerchant;
+      setMutedMerchant(null);
+      await load();
+      setOperationNotice({ tone: "success", title: "Merchant unmuted", detail: `${merchant} offers can appear again.` });
+    } catch (error) {
+      setOperationNotice(errorNotice(error, "Merchant could not be unmuted", "The mute is still in effect."));
+    } finally {
+      setBusy(false);
     }
   }
 
@@ -166,20 +207,21 @@ export function PromotionsPage() {
       eyebrow={<span className="inline-flex items-center gap-2"><Tag className="h-4 w-4" aria-hidden="true" />Deals</span>}
       title="Deals worth your attention"
       description="See the strongest offers first, understand where each link goes, and teach ExpenseOps what matters."
-      actions={<Button className="border-white/15 bg-white/10 text-white hover:bg-white/15 hover:text-white" variant="outline" onClick={load} disabled={busy} aria-label="Refresh deals"><RefreshCw className={`h-4 w-4 ${busy ? "animate-spin" : ""}`} />Refresh</Button>}
+      actions={<Button className="border-white/15 bg-white/10 text-white hover:bg-white/15 hover:text-white" variant="outline" onClick={() => load()} disabled={busy} aria-label="Refresh deals"><RefreshCw className={`h-4 w-4 ${busy ? "animate-spin" : ""}`} />Refresh</Button>}
     />
 
     {operationNotice ? <StatusMessage tone={operationNotice.tone} title={operationNotice.title} actions={<button type="button" aria-label="Dismiss deal message" onClick={() => setOperationNotice(null)} className="inline-flex size-11 items-center justify-center rounded-control hover:bg-black/5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-600"><X aria-hidden="true" className="size-4" /></button>}>{operationNotice.detail}{operationNotice.correlationId ? <span className="mt-1 block text-xs font-medium">Support ID: {operationNotice.correlationId}</span> : null}</StatusMessage> : null}
     {removed ? <StatusMessage title="Undo available" actions={<Button size="sm" variant="outline" onClick={undoRemoval} disabled={busyOfferId === removed.offer.id}>Undo</Button>}>{removed.offer.merchant} can be restored.</StatusMessage> : null}
-    {loadError ? <StatusMessage tone="error" title="Deals could not be loaded" actions={<Button size="sm" variant="outline" onClick={load}>Try again</Button>}>Your existing deals have not been replaced with an empty state.</StatusMessage> : null}
+    {mutedMerchant ? <StatusMessage title="Merchant muted" actions={<Button size="sm" variant="outline" onClick={undoMute} disabled={busy}>Undo mute</Button>}>{mutedMerchant} offers are hidden. You can reverse this now or later in preferences.</StatusMessage> : null}
+    {loadError ? <StatusMessage tone="error" title="Deals could not be loaded" actions={<Button size="sm" variant="outline" onClick={() => load()}>Try again</Button>}>Your existing deals have not been replaced with an empty state.</StatusMessage> : null}
 
     {hasLoaded && !loadError && offers.length === 0 ? <DealsEmptyState gmailConnected={gmailConnected} busy={busy} onSync={syncPromotions} /> : <>
       <Card variant="secondary"><CardContent className="space-y-4 p-4 sm:p-4">
         <nav className="flex gap-1 overflow-x-auto pb-1" aria-label="Deal views">
-          <DealViewButton active={view === "recommended"} onClick={() => setView("recommended")} label="Best for you" count={Math.min(offers.length, 10)} />
-          <DealViewButton active={view === "saved"} onClick={() => setView("saved")} label="Saved" count={offers.filter((offer) => offer.saved).length} />
+          <DealViewButton active={view === "recommended"} onClick={() => setView("recommended")} label="Best for you" count={Math.min(totalOffers, 10)} />
+          <DealViewButton active={view === "saved"} onClick={() => setView("saved")} label="Saved" count={savedTotal} />
           <DealViewButton active={view === "expiring"} onClick={() => setView("expiring")} label="Expiring soon" count={expiringIds.size} />
-          <DealViewButton active={view === "all"} onClick={() => setView("all")} label="All deals" count={offers.length} />
+          <DealViewButton active={view === "all"} onClick={() => setView("all")} label="All deals" count={totalOffers} />
         </nav>
         <div className="grid gap-3 sm:grid-cols-[1fr_14rem]">
           <div className="relative"><Search className="absolute left-3 top-3 h-4 w-4 text-slate-500" aria-hidden="true"/><Input className="pl-9" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search merchant or offer" aria-label="Search deals"/></div>
@@ -193,6 +235,7 @@ export function PromotionsPage() {
       {featured.length ? <section className="space-y-3" aria-labelledby="deal-section-title"><div className="flex items-end justify-between gap-3"><div><h2 id="deal-section-title" className="text-lg font-semibold text-slate-950">{view === "recommended" ? "Best matches" : view === "saved" ? "Saved for later" : view === "expiring" ? "Ending within seven days" : "Top-ranked deals"}</h2><p className="mt-1 text-sm text-slate-600">Ranked using offer value, relevance, expiry, and your feedback.</p></div>{view === "recommended" && offers.length > 10 ? <Button variant="ghost" size="sm" onClick={() => setView("all")}>See all {offers.length}</Button> : null}</div><div className="grid gap-4 lg:grid-cols-2">{featured.map((offer) => <DealCard key={offer.id} offer={offer} busy={busyOfferId === offer.id} copied={copied === offer.id} onCopy={async () => { if (!offer.promo_code) return; try { await navigator.clipboard.writeText(offer.promo_code); setCopied(offer.id); setOperationNotice({ tone: "success", title: "Code copied", detail: `${offer.promo_code} is ready to paste.` }); window.setTimeout(() => setCopied(null), 2_000); } catch (error) { setOperationNotice(errorNotice(error, "Code could not be copied", "Select the code and copy it manually.")); } }} onAction={(kind) => action(offer, kind)} />)}</div></section> : null}
 
       {overflow.length ? <section className="space-y-3"><div><h2 className="text-lg font-semibold text-slate-950">More active deals</h2><p className="mt-1 text-sm text-slate-600">Lower-ranked offers stay available without competing with the strongest matches.</p></div><div className="divide-y divide-slate-200 overflow-hidden rounded-card border border-slate-200 bg-white shadow-card">{overflow.map((offer) => <CompactDealRow key={offer.id} offer={offer} busy={busyOfferId === offer.id} onAction={(kind) => action(offer, kind)} />)}</div></section> : null}
+      {hasMore && view === "all" ? <div className="flex justify-center"><Button variant="outline" onClick={() => load(offers.length)} disabled={busy}>{busy ? "Loading…" : `Load more (${offers.length} of ${totalOffers})`}</Button></div> : null}
     </>}
 
     <details className="rounded-card border border-ui-border bg-white p-4 shadow-card"><summary className="min-h-11 cursor-pointer py-2 text-sm font-semibold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500">Import and sync details</summary><p className="mt-2 max-w-2xl text-sm leading-6 text-slate-600">Deals import automatically on the configured schedule. Manual sync is available when you want to check Gmail immediately.</p><Button className="mt-3" variant="outline" disabled={gmailConnected === false || busy} onClick={syncPromotions}>Sync Gmail promotions</Button></details>
@@ -230,19 +273,19 @@ function DealDetails({ offer }: { offer: PromotionOffer }) {
 }
 
 function DealActions({ offer, busy, onAction }: { offer: PromotionOffer; busy: boolean; onAction: (kind: OfferAction) => void }) {
-  return <div className="mt-5 flex flex-wrap items-start gap-2 border-t border-slate-200 pt-4"><DestinationAction offer={offer}/><Button className="min-w-24" variant="outline" onClick={() => onAction("save")} disabled={busy || offer.saved}><Bookmark className="h-4 w-4" aria-hidden="true"/>{offer.saved ? "Saved" : "Save"}</Button><div className="ml-auto"><OverflowMenu label={`More actions for ${offer.merchant}`} items={[{ label: "Dismiss", icon: X, disabled: busy, onSelect: () => onAction("dismiss") }, { label: "Not relevant", disabled: busy, onSelect: () => onAction("not_relevant") }, { label: `Mute ${offer.merchant}`, destructive: true, disabled: busy, onSelect: () => onAction("mute_merchant") }]} /></div></div>;
+  return <div className="mt-5 flex flex-wrap items-start gap-2 border-t border-slate-200 pt-4"><DestinationAction offer={offer}/><Button className="min-w-24" variant="outline" onClick={() => onAction("save")} disabled={busy}><Bookmark className={`h-4 w-4 ${offer.saved ? "fill-current" : ""}`} aria-hidden="true"/>{offer.saved ? "Unsave" : "Save"}</Button><div className="ml-auto"><OverflowMenu label={`More actions for ${offer.merchant}`} items={[{ label: "Dismiss", icon: X, disabled: busy, onSelect: () => onAction("dismiss") }, { label: "Not relevant", disabled: busy, onSelect: () => onAction("not_relevant") }, { label: `Mute ${offer.merchant}`, destructive: true, disabled: busy, onSelect: () => onAction("mute_merchant") }]} /></div></div>;
 }
 
 function DestinationAction({ offer, compact = false }: { offer: PromotionOffer; compact?: boolean }) {
-  const domain = destinationDomain(offer.destination_url);
+  const domain = offer.destination_domain || destinationDomain(offer.destination_url);
   if (!offer.destination_url || !domain) return <span className="text-xs text-slate-500">No destination link</span>;
   if (offer.trust_status === "trusted") return <div className="min-w-0"><Button size={compact ? "sm" : "default"} asChild><a href={offer.destination_url} target="_blank" rel="noopener noreferrer">Open deal<ExternalLink className="h-4 w-4" aria-hidden="true"/></a></Button><p className="mt-1 max-w-40 truncate text-xs text-slate-500" title={domain}>Opens {domain}</p></div>;
-  return <Dialog.Root><div className="min-w-0"><Dialog.Trigger asChild><Button size={compact ? "sm" : "default"} variant="outline">Review link<ExternalLink className="h-4 w-4" aria-hidden="true"/></Button></Dialog.Trigger><p className="mt-1 max-w-40 truncate text-xs text-amber-700" title={domain}>Unverified · {domain}</p></div><Dialog.Portal><Dialog.Overlay className="fixed inset-0 z-40 bg-slate-950/45 backdrop-blur-[1px]"/><Dialog.Content className="fixed left-1/2 top-1/2 z-50 w-[calc(100%-2rem)] max-w-md -translate-x-1/2 -translate-y-1/2 rounded-card border border-ui-border bg-white p-6 shadow-primary focus:outline-none"><Dialog.Title className="text-lg font-semibold text-slate-950">Review this destination</Dialog.Title><Dialog.Description className="mt-2 text-sm leading-6 text-slate-600">ExpenseOps could not verify this link against the sender or merchant. Continue only if you recognize the destination.</Dialog.Description><div className="mt-4 rounded-control border border-amber-200 bg-amber-50 p-3"><p className="text-xs font-semibold uppercase tracking-wide text-amber-800">Destination domain</p><p className="mt-1 break-all text-sm font-medium text-amber-950">{domain}</p></div><div className="mt-6 flex flex-col-reverse gap-2 sm:flex-row sm:justify-end"><Dialog.Close asChild><Button variant="outline">Cancel</Button></Dialog.Close><Button asChild><a href={offer.destination_url} target="_blank" rel="noopener noreferrer">Continue to {domain}<ExternalLink className="h-4 w-4" aria-hidden="true"/></a></Button></div><Dialog.Close aria-label="Close destination review" className="absolute right-3 top-3 flex h-11 w-11 items-center justify-center rounded-control text-slate-600 hover:bg-slate-100"><X className="h-5 w-5" aria-hidden="true"/></Dialog.Close></Dialog.Content></Dialog.Portal></Dialog.Root>;
+  return <Dialog.Root><div className="min-w-0"><Dialog.Trigger asChild><Button size={compact ? "sm" : "default"} variant="outline">Review link<ExternalLink className="h-4 w-4" aria-hidden="true"/></Button></Dialog.Trigger><p className="mt-1 max-w-40 truncate text-xs text-amber-700" title={domain}>Unverified · {domain}</p></div><Dialog.Portal><Dialog.Overlay className="fixed inset-0 z-40 bg-slate-950/45 backdrop-blur-[1px]"/><Dialog.Content className="fixed left-1/2 top-1/2 z-50 w-[calc(100%-2rem)] max-w-md -translate-x-1/2 -translate-y-1/2 rounded-card border border-ui-border bg-white p-6 shadow-primary focus:outline-none"><Dialog.Title className="text-lg font-semibold text-slate-950">Review this destination</Dialog.Title><Dialog.Description className="mt-2 text-sm leading-6 text-slate-600">{offer.trust_reason} Continue only if you recognize the destination.</Dialog.Description><div className="mt-4 rounded-control border border-amber-200 bg-amber-50 p-3"><p className="text-xs font-semibold uppercase tracking-wide text-amber-800">Destination domain</p><p className="mt-1 break-all text-sm font-medium text-amber-950">{domain}</p></div><div className="mt-6 flex flex-col-reverse gap-2 sm:flex-row sm:justify-end"><Dialog.Close asChild><Button variant="outline">Cancel</Button></Dialog.Close><Button asChild><a href={offer.destination_url} target="_blank" rel="noopener noreferrer">Continue to {domain}<ExternalLink className="h-4 w-4" aria-hidden="true"/></a></Button></div><Dialog.Close aria-label="Close destination review" className="absolute right-3 top-3 flex h-11 w-11 items-center justify-center rounded-control text-slate-600 hover:bg-slate-100"><X className="h-5 w-5" aria-hidden="true"/></Dialog.Close></Dialog.Content></Dialog.Portal></Dialog.Root>;
 }
 
 function CompactDealRow({ offer, busy, onAction }: { offer: PromotionOffer; busy: boolean; onAction: (kind: OfferAction) => void }) {
   const expiry = expiryPresentation(offer.expires_at);
-  return <div className="flex flex-col gap-4 p-4 sm:flex-row sm:items-center sm:justify-between"><div className="flex min-w-0 items-start gap-3"><MerchantAvatar name={offer.merchant}/><div className="min-w-0"><div className="flex flex-wrap items-center gap-2"><p className="text-sm font-semibold text-slate-800">{offer.merchant}</p><Badge variant={expiry.variant}>{expiry.label}</Badge></div><p className="mt-1 text-lg font-semibold text-slate-950">{offerValue(offer)}</p><p className="mt-1 truncate text-sm text-slate-600">{offer.headline}</p></div></div><div className="flex min-w-0 flex-wrap items-start gap-2 sm:shrink-0"><DestinationAction offer={offer} compact/><Button size="sm" variant="outline" onClick={() => onAction("save")} disabled={busy || offer.saved}>{offer.saved ? "Saved" : "Save"}</Button><OverflowMenu label={`More actions for ${offer.merchant}`} items={[{ label: "Dismiss", icon: X, disabled: busy, onSelect: () => onAction("dismiss") }, { label: "Not relevant", disabled: busy, onSelect: () => onAction("not_relevant") }, { label: `Mute ${offer.merchant}`, destructive: true, disabled: busy, onSelect: () => onAction("mute_merchant") }]} /></div></div>;
+  return <div className="flex flex-col gap-4 p-4 sm:flex-row sm:items-center sm:justify-between"><div className="flex min-w-0 items-start gap-3"><MerchantAvatar name={offer.merchant}/><div className="min-w-0"><div className="flex flex-wrap items-center gap-2"><p className="text-sm font-semibold text-slate-800">{offer.merchant}</p><Badge variant={expiry.variant}>{expiry.label}</Badge></div><p className="mt-1 text-lg font-semibold text-slate-950">{offerValue(offer)}</p><p className="mt-1 truncate text-sm text-slate-600">{offer.headline}</p></div></div><div className="flex min-w-0 flex-wrap items-start gap-2 sm:shrink-0"><DestinationAction offer={offer} compact/><Button size="sm" variant="outline" onClick={() => onAction("save")} disabled={busy}>{offer.saved ? "Unsave" : "Save"}</Button><OverflowMenu label={`More actions for ${offer.merchant}`} items={[{ label: "Dismiss", icon: X, disabled: busy, onSelect: () => onAction("dismiss") }, { label: "Not relevant", disabled: busy, onSelect: () => onAction("not_relevant") }, { label: `Mute ${offer.merchant}`, destructive: true, disabled: busy, onSelect: () => onAction("mute_merchant") }]} /></div></div>;
 }
 
 function offerValue(offer: PromotionOffer) {

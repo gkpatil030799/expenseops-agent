@@ -7,7 +7,15 @@ import pytest
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import sessionmaker
 
-from app.api.promotion_routes import dismiss, list_promotions, restore
+from app.api.promotion_routes import (
+    dismiss,
+    feedback,
+    list_promotions,
+    restore,
+    save,
+    unmute_merchant,
+    unsave,
+)
 from app.config import Settings
 from app.db import Base
 from app.models import (
@@ -19,6 +27,7 @@ from app.models import (
     PromotionOffer,
     PurchaseReceipt,
 )
+from app.promotion_schemas import PromotionFeedbackRequest
 from app.services.gmail_promotion_ingestion_service import GmailPromotionIngestionService
 from app.services.promotion_digest_service import PromotionDigestService
 from app.services.promotion_extraction_service import ExtractedOffer, PromotionExtractionService
@@ -423,6 +432,43 @@ def test_dismissed_offer_can_be_restored_to_active_feed(db):
     restored = restore(offer.id, db)
     assert restored["status"] == "active"
     assert [value["id"] for value in list_promotions(db, status="active", limit=50)] == [offer.id]
+
+
+def test_promotion_page_reports_truthful_total_and_cursor(db):
+    service = GmailPromotionIngestionService(db, config(promotions_min_score=0))
+    for index in range(3):
+        service.process_message(message(f"page-{index}", f"{20 + index}% off", ""))
+
+    page = list_promotions(
+        db,
+        status="active",
+        limit=2,
+        offset=0,
+        include_meta=True,
+    )
+
+    assert isinstance(page, dict)
+    assert page["total"] == 3
+    assert len(page["items"]) == 2
+    assert page["has_more"] is True
+
+
+def test_save_can_be_reversed_and_merchant_can_be_unmuted(db):
+    service = GmailPromotionIngestionService(db, config(promotions_min_score=0))
+    service.process_message(message("controls", "20% off laundry", ""))
+    offer = db.query(PromotionOffer).one()
+
+    assert save(offer.id, db)["saved"] is True
+    assert unsave(offer.id, db)["saved"] is False
+
+    feedback(
+        offer.id,
+        PromotionFeedbackRequest(feedback_type="mute_merchant"),
+        db,
+    )
+    assert offer.merchant_normalized in PromotionRankingService(db).settings().muted_merchants
+    unmute_merchant(offer.merchant_normalized, db)
+    assert offer.merchant_normalized not in PromotionRankingService(db).settings().muted_merchants
 
 
 def test_replenishment_need_beats_irrelevant_large_discount(db):

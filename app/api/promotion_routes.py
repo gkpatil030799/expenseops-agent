@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException, Query
-from sqlalchemy import or_, select
+from sqlalchemy import func, or_, select
 
 from app.api.deps import DbSession
 from app.models import PromotionFeedback, PromotionOffer, PromotionSettings, utc_now
@@ -25,7 +25,9 @@ def list_promotions(
     search: str | None = None,
     status: str = "active",
     limit: int = Query(50, ge=1, le=200),
-) -> list[dict]:
+    offset: int = 0,
+    include_meta: bool = False,
+) -> list[dict] | dict:
     ranking = PromotionRankingService(db)
     ranking.rescore_all()
     stmt = select(PromotionOffer).where(PromotionOffer.status == status)
@@ -42,10 +44,28 @@ def list_promotions(
             PromotionOffer.merchant_normalized.ilike(pattern)
             | PromotionOffer.headline.ilike(pattern)
         )
-    values = db.execute(
-        stmt.order_by(PromotionOffer.saved.desc(), PromotionOffer.score.desc()).limit(limit)
-    ).scalars()
-    return [_offer(v) for v in values]
+    total = db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
+    saved_total = db.scalar(
+        select(func.count()).select_from(stmt.where(PromotionOffer.saved.is_(True)).subquery())
+    ) or 0
+    values = list(
+        db.execute(
+            stmt.order_by(PromotionOffer.saved.desc(), PromotionOffer.score.desc())
+            .offset(offset)
+            .limit(limit)
+        ).scalars()
+    )
+    items = [_offer(v) for v in values]
+    if not include_meta:
+        return items
+    return {
+        "items": items,
+        "total": total,
+        "saved_total": saved_total,
+        "limit": limit,
+        "offset": offset,
+        "has_more": offset + len(items) < total,
+    }
 
 
 @router.get("/categories")
@@ -93,6 +113,16 @@ def save(offer_id: int, db: DbSession) -> dict:
     return _offer(offer)
 
 
+@router.post("/{offer_id}/unsave")
+def unsave(offer_id: int, db: DbSession) -> dict:
+    offer = _get(db, offer_id)
+    offer.saved = False
+    db.add(PromotionFeedback(promotion_offer_id=offer.id, feedback_type="unsaved"))
+    db.commit()
+    PromotionRankingService(db).rescore_all()
+    return _offer(offer)
+
+
 @router.post("/{offer_id}/dismiss")
 def dismiss(offer_id: int, db: DbSession) -> dict:
     offer = _get(db, offer_id)
@@ -132,6 +162,19 @@ def feedback(offer_id: int, payload: PromotionFeedbackRequest, db: DbSession) ->
     db.commit()
     PromotionRankingService(db).rescore_all()
     return _offer(offer)
+
+
+@router.delete("/muted-merchants/{merchant}")
+def unmute_merchant(merchant: str, db: DbSession) -> dict:
+    settings = PromotionRankingService(db).settings()
+    normalized = merchant.casefold().strip()
+    settings.muted_merchants = [
+        value for value in settings.muted_merchants if value.casefold().strip() != normalized
+    ]
+    settings.updated_at = utc_now()
+    db.commit()
+    PromotionRankingService(db).rescore_all()
+    return _settings(settings)
 
 
 @router.post("/digest/preview")
@@ -177,14 +220,24 @@ def _offer(v: PromotionOffer) -> dict:
         "expires_at": v.expires_at,
         "expiry_precision": v.expiry_precision,
         "destination_url": v.destination_url,
+        "destination_domain": v.destination_domain,
         "terms_summary": v.terms_summary,
         "trust_status": v.trust_status,
+        "trust_reason": _trust_reason(v),
         "status": v.status,
         "score": v.score,
         "saved": v.saved,
         "why": v.score_breakdown_json.get("reasons", []),
         "source_count": len(v.source_message_ids),
     }
+
+
+def _trust_reason(offer: PromotionOffer) -> str:
+    if offer.trust_status == "trusted":
+        return "Destination domain matched the promotion sender or merchant."
+    if offer.trust_status == "suppressed":
+        return "Destination was blocked because it was unsafe or high risk."
+    return "Destination domain could not be verified against the sender or merchant."
 
 
 def _settings(v: PromotionSettings) -> dict:

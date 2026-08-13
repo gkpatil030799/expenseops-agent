@@ -39,7 +39,7 @@ visual-foundation changes began.
 | Phase 3 — identity and tenancy | In progress | Tenant-safe uniqueness and schema parity; verified OIDC email; atomic OAuth state claims; invite return/switch/wrong-account recovery; owner/member API matrix; removal/transfer; per-user Telegram and Splitwise; explicit Plaid ownership; exact connected identities. PostgreSQL RLS/request-worker role rollout remains an open exit-gate item. |
 | Phase 4 — financial correctness | In progress | Durable Splitwise create/update/delete journal, deterministic idempotency marker, atomic leases, pending-to-posted relationships, finalized-amount and removal reconciliation, valid-draft database invariant, append-only audit events, and visible Recovery UI implemented; transactional outbox moves into Phase 5 |
 | Phase 5 — durable workers | In progress | Transactional outbox schema/service, leased retry/dead-letter worker, durable production Plaid webhook acknowledgement, post-delivery Telegram sent markers, Telegram `update_id` dedupe/retry, resumable Gmail receipt/history pagination, scheduler overlap leases, and truthful cron failures implemented; Splitwise worker, inbound Telegram queue, provider Retry-After, and Railway worker rollout remain open |
-| Phase 6 — product-domain correctness | In progress | Insights financial truth and Household verified-route freshness are implemented; receipt scale/batch decisions, Deals trust/reversibility, and the combined browser gate remain open |
+| Phase 6 — product-domain correctness | In progress | Insights financial truth, Household verified-route freshness, and Deals trust/reversibility are implemented; receipt scale/batch decisions and the combined product-domain browser gate remain open |
 | Phase 7 — security and operations | Not started | — |
 | Phase 8 — GA validation and re-audit | Not started | — |
 
@@ -119,7 +119,10 @@ provider `Retry-After` is honored, and the dedicated Railway worker service is c
 | Route input fingerprint | Each plan snapshots endpoints, available time, included errands, resolved businesses, referenced saved locations, and applicable replenishment inputs in a canonical SHA-256 fingerprint |
 | Stale route prevention | Current server state is compared on every plan read; changed or legacy-unversioned plans return `is_stale`, a recovery reason, and no route URL; client-side endpoint edits invalidate the displayed route immediately |
 | Route recovery UX | Today and route detail surfaces explain that recalculation is required; Start Route is unavailable while stale |
-| Regression gate | Backend 548 passed before Household slice; focused Household/migration 35 passed; Ruff passed; frontend unit 21 passed; production build passed; lint had zero errors |
+| Deals pagination truth | The API returns total, saved total, limit, offset, and `has_more`; All deals exposes the complete count and a real Load more path instead of presenting the first 100 as complete |
+| Reversible deal controls | Save toggles to Unsave; merchant mute requires confirmation, exposes Undo, and has a durable unmute endpoint; dismissed deals retain their existing restore path |
+| Destination trust | Offer responses expose the canonical ingestion-time destination domain, trust state, and reason; unverified links remain behind a domain-specific review interstitial |
+| Regression gate | Backend 550 passed before Deals slice; focused Household/migration 35 and Deals 34 passed; Ruff passed; frontend unit 21 passed; production build passed; lint had zero errors |
 
 Phase 6 remains in progress until Household route verification/freshness and Deals trust/reversibility
 contracts pass their domain exit gates, followed by the complete product-domain browser matrix.
