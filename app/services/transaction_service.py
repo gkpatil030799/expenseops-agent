@@ -1,23 +1,26 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import re
+import secrets
 import threading
 from dataclasses import dataclass
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
-from sqlalchemy import func, select, update
+from sqlalchemy import func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.config import Settings, get_settings
 from app.job_tenancy import telegram_settings_for_workspace
-from app.logging_config import log_event
+from app.logging_config import get_trace_id, log_event
 from app.models import (
     ExpenseTransaction,
+    FinancialOperation,
     PlaidItem,
     SplitwiseIntegration,
     TransactionStatus,
@@ -30,6 +33,7 @@ from app.services.agent_service import (
     friend_display_name,
     transaction_display_name,
 )
+from app.services.managed_auth_service import record_audit
 from app.services.notification_service import NotificationService
 from app.services.plaid_service import PlaidService
 from app.services.share_calculator import (
@@ -886,13 +890,7 @@ class TransactionService:
             raise TransactionError("This transaction cannot be undone.")
 
         if tx.splitwise_expense_id:
-            try:
-                self.splitwise_service.delete_expense(tx.splitwise_expense_id)
-            except SplitwiseAPIError as exc:
-                raise TransactionError(
-                    "Could not delete the Splitwise expense. Transaction was not reverted."
-                ) from exc
-            tx.splitwise_expense_id = None
+            return self._execute_splitwise_delete(tx)
 
         tx.status = TransactionStatus.ASK_USER.value
         tx.last_error = None
@@ -900,6 +898,29 @@ class TransactionService:
         self.db.commit()
         self.db.refresh(tx)
         return tx
+
+    def retry_financial_operation(self, tx_id: int) -> ExpenseTransaction:
+        tx = self.get_transaction(tx_id)
+        operation = self.db.scalar(
+            select(FinancialOperation)
+            .where(FinancialOperation.transaction_id == tx.id)
+            .order_by(FinancialOperation.created_at.desc(), FinancialOperation.id.desc())
+        )
+        if operation is None or operation.state not in {
+            "failed",
+            "needs_reconciliation",
+            "in_flight",
+        }:
+            raise TransactionError("This transaction has no recoverable financial operation.")
+        if operation.action == "splitwise_create":
+            payload = dict(operation.request_json or {})
+            if not payload:
+                raise TransactionError("The saved Splitwise request is unavailable for recovery.")
+            self._execute_splitwise_create(tx, payload, operation=operation)
+            return tx
+        if operation.action == "splitwise_delete":
+            return self._execute_splitwise_delete(tx, operation=operation)
+        raise TransactionError("This financial operation cannot be retried.")
 
     def create_equal_split_expense(
         self,
@@ -1089,7 +1110,326 @@ class TransactionService:
             raise TransactionError(
                 f"Transaction already posted to Splitwise expense {tx.splitwise_expense_id}."
             )
+        return self._execute_splitwise_create(tx, payload)
 
+    def _execute_splitwise_create(
+        self,
+        tx: ExpenseTransaction,
+        payload: dict[str, Any],
+        *,
+        operation: FinancialOperation | None = None,
+    ) -> tuple[ExpenseTransaction, dict[str, Any]]:
+        if not self._supports_operation_journal():
+            return self._legacy_splitwise_create(tx, payload)
+        operation = operation or self._claim_financial_operation(
+            tx,
+            action="splitwise_create",
+            generation=tx.splitwise_generation,
+            request_json=payload,
+        )
+        if operation.state == "succeeded" and operation.provider_object_id:
+            tx.status = TransactionStatus.POSTED.value
+            tx.splitwise_expense_id = operation.provider_object_id
+            tx.last_error = None
+            self.db.commit()
+            return tx, {"replayed": True, "expenses": [{"id": operation.provider_object_id}]}
+        if operation.state == "needs_reconciliation":
+            recovered = self.splitwise_service.find_expense_by_idempotency_key(
+                operation.idempotency_key
+            )
+            if recovered is not None:
+                return self._complete_splitwise_create(tx, operation, recovered, recovered=True)
+        operation = self._acquire_operation_lease(operation)
+        payload = dict(payload)
+        marker = f"ExpenseOps ref: {operation.idempotency_key}"
+        details = str(payload.get("details") or "").strip()
+        payload["details"] = f"{details}\n{marker}".strip()
+        operation.request_json = payload
+        tx.status = TransactionStatus.POSTING.value
+        tx.last_error = None
+        tx.updated_at = utc_now()
+        self.db.commit()
+        try:
+            response = self.splitwise_service.create_expense(payload)
+            expense = response.get("expenses", [{}])[0]
+            return self._complete_splitwise_create(tx, operation, expense, response=response)
+        except SplitwiseAPIError as exc:
+            self._fail_financial_operation(tx, operation, exc, create=True)
+            raise
+
+    def _complete_splitwise_create(
+        self,
+        tx: ExpenseTransaction,
+        operation: FinancialOperation,
+        expense: dict[str, Any],
+        *,
+        response: dict[str, Any] | None = None,
+        recovered: bool = False,
+    ) -> tuple[ExpenseTransaction, dict[str, Any]]:
+        expense_id = str(expense.get("id") or "") or None
+        if not expense_id:
+            error = SplitwiseAPIError(
+                "Splitwise create succeeded without a provider expense id",
+                ambiguous=True,
+            )
+            self._fail_financial_operation(tx, operation, error, create=True)
+            raise error
+        operation.state = "succeeded"
+        operation.provider_object_id = expense_id
+        operation.completed_at = utc_now()
+        operation.updated_at = operation.completed_at
+        operation.lease_token = None
+        operation.lease_expires_at = None
+        operation.error_code = None
+        operation.error_message = None
+        tx.status = TransactionStatus.POSTED.value
+        tx.splitwise_expense_id = expense_id
+        tx.last_error = None
+        tx.updated_at = utc_now()
+        record_audit(
+            self.db,
+            workspace_id=tx.workspace_id,
+            user_id=self._actor_user_id(),
+            event_type="splitwise_expense_posted",
+            resource_type="financial_operation",
+            resource_id=str(operation.id),
+            request_id=get_trace_id(),
+            metadata={
+                "transaction_id": tx.id,
+                "provider_object_id": expense_id,
+                "idempotency_key": operation.idempotency_key,
+                "recovered": recovered,
+            },
+        )
+        self.db.commit()
+        self.db.refresh(tx)
+        self.notification_service.notify_splitwise_posted(tx, expense_id)
+        log_event(
+            logger,
+            "splitwise_expense_posted",
+            tx_id=tx.id,
+            splitwise_expense_id=expense_id,
+            recovered=recovered,
+        )
+        return tx, response or {"recovered": recovered, "expenses": [expense]}
+
+    def _execute_splitwise_delete(
+        self,
+        tx: ExpenseTransaction,
+        *,
+        operation: FinancialOperation | None = None,
+    ) -> ExpenseTransaction:
+        if not self._supports_operation_journal():
+            return self._legacy_splitwise_delete(tx)
+        expense_id = tx.splitwise_expense_id
+        if not expense_id and operation is None:
+            raise TransactionError("The Splitwise expense is already absent.")
+        operation = operation or self._claim_financial_operation(
+            tx,
+            action="splitwise_delete",
+            generation=tx.splitwise_generation,
+            request_json={"provider_object_id": expense_id},
+        )
+        provider_id = operation.provider_object_id or expense_id
+        if operation.state == "succeeded":
+            return self._complete_splitwise_delete(tx, operation)
+        if operation.state == "needs_reconciliation" and provider_id:
+            if not self.splitwise_service.expense_exists(provider_id):
+                return self._complete_splitwise_delete(tx, operation)
+        if not provider_id:
+            return self._complete_splitwise_delete(tx, operation)
+        operation.provider_object_id = provider_id
+        operation = self._acquire_operation_lease(operation)
+        tx.status = TransactionStatus.UNDOING.value
+        tx.last_error = None
+        tx.updated_at = utc_now()
+        self.db.commit()
+        try:
+            self.splitwise_service.delete_expense(provider_id)
+            return self._complete_splitwise_delete(tx, operation)
+        except SplitwiseAPIError as exc:
+            self._fail_financial_operation(tx, operation, exc, create=False)
+            raise TransactionError(
+                "Could not confirm deletion of the Splitwise expense. It remains in Recovery."
+            ) from exc
+
+    def _complete_splitwise_delete(
+        self,
+        tx: ExpenseTransaction,
+        operation: FinancialOperation,
+    ) -> ExpenseTransaction:
+        operation.state = "succeeded"
+        operation.completed_at = utc_now()
+        operation.updated_at = operation.completed_at
+        operation.lease_token = None
+        operation.lease_expires_at = None
+        operation.error_code = None
+        operation.error_message = None
+        tx.splitwise_expense_id = None
+        tx.splitwise_generation += 1
+        tx.status = TransactionStatus.ASK_USER.value
+        tx.last_error = None
+        tx.updated_at = utc_now()
+        record_audit(
+            self.db,
+            workspace_id=tx.workspace_id,
+            user_id=self._actor_user_id(),
+            event_type="splitwise_expense_deleted",
+            resource_type="financial_operation",
+            resource_id=str(operation.id),
+            request_id=get_trace_id(),
+            metadata={
+                "transaction_id": tx.id,
+                "provider_object_id": operation.provider_object_id,
+                "idempotency_key": operation.idempotency_key,
+            },
+        )
+        self.db.commit()
+        self.db.refresh(tx)
+        return tx
+
+    def _claim_financial_operation(
+        self,
+        tx: ExpenseTransaction,
+        *,
+        action: str,
+        generation: int,
+        request_json: dict[str, Any],
+    ) -> FinancialOperation:
+        key_material = f"{tx.workspace_id}:{tx.id}:{action}:{generation}"
+        idempotency_key = hashlib.sha256(key_material.encode()).hexdigest()
+        operation = self.db.scalar(
+            select(FinancialOperation).where(
+                FinancialOperation.transaction_id == tx.id,
+                FinancialOperation.action == action,
+                FinancialOperation.generation == generation,
+            )
+        )
+        if operation is None:
+            operation = FinancialOperation(
+                transaction_id=tx.id,
+                actor_user_id=self._actor_user_id(),
+                action=action,
+                generation=generation,
+                idempotency_key=idempotency_key,
+                request_json=request_json,
+                correlation_id=get_trace_id(),
+            )
+            self.db.add(operation)
+            try:
+                self.db.commit()
+            except IntegrityError:
+                self.db.rollback()
+                operation = self.db.scalar(
+                    select(FinancialOperation).where(
+                        FinancialOperation.transaction_id == tx.id,
+                        FinancialOperation.action == action,
+                        FinancialOperation.generation == generation,
+                    )
+                )
+                if operation is None:
+                    raise
+        return operation
+
+    def _acquire_operation_lease(
+        self, operation: FinancialOperation
+    ) -> FinancialOperation:
+        if operation.state == "succeeded":
+            return operation
+        now = utc_now()
+        lease_token = secrets.token_hex(16)
+        result = self.db.execute(
+            update(FinancialOperation)
+            .where(
+                FinancialOperation.id == operation.id,
+                FinancialOperation.state != "succeeded",
+                or_(
+                    FinancialOperation.lease_expires_at.is_(None),
+                    FinancialOperation.lease_expires_at <= now,
+                ),
+            )
+            .values(
+                state="in_flight",
+                lease_token=lease_token,
+                lease_expires_at=now + timedelta(seconds=60),
+                attempt_count=FinancialOperation.attempt_count + 1,
+                updated_at=now,
+            )
+            .execution_options(synchronize_session=False)
+        )
+        if result.rowcount != 1:
+            self.db.rollback()
+            raise TransactionError(
+                "This financial action is already being processed. Check Recovery before retrying."
+            )
+        self.db.commit()
+        return self.db.get(FinancialOperation, operation.id)
+
+    def _fail_financial_operation(
+        self,
+        tx: ExpenseTransaction,
+        operation: FinancialOperation,
+        error: SplitwiseAPIError,
+        *,
+        create: bool,
+    ) -> None:
+        ambiguous = error.ambiguous
+        operation.state = "needs_reconciliation" if ambiguous else "failed"
+        operation.error_code = "ambiguous_provider_outcome" if ambiguous else "provider_rejected"
+        operation.error_message = str(error)
+        operation.updated_at = utc_now()
+        operation.lease_token = None
+        operation.lease_expires_at = None
+        tx.status = (
+            TransactionStatus.POST_AMBIGUOUS.value
+            if ambiguous and create
+            else TransactionStatus.UNDO_AMBIGUOUS.value
+            if ambiguous
+            else TransactionStatus.ERROR.value
+        )
+        tx.last_error = str(error)
+        tx.updated_at = utc_now()
+        record_audit(
+            self.db,
+            workspace_id=tx.workspace_id,
+            user_id=self._actor_user_id(),
+            event_type="financial_operation_needs_reconciliation"
+            if ambiguous
+            else "financial_operation_failed",
+            resource_type="financial_operation",
+            resource_id=str(operation.id),
+            request_id=get_trace_id(),
+            metadata={
+                "transaction_id": tx.id,
+                "action": operation.action,
+                "idempotency_key": operation.idempotency_key,
+                "error_code": operation.error_code,
+            },
+        )
+        self.db.commit()
+        log_event(
+            logger,
+            (
+                "financial_operation_needs_reconciliation"
+                if ambiguous
+                else "financial_operation_failed"
+            ),
+            level=logging.WARNING,
+            tx_id=tx.id,
+            operation_id=operation.id,
+            action=operation.action,
+        )
+
+    def _actor_user_id(self) -> int | None:
+        value = getattr(self.db, "info", {}).get("user_id")
+        return int(value) if value is not None else None
+
+    def _supports_operation_journal(self) -> bool:
+        return all(hasattr(self.db, name) for name in ("scalar", "execute", "add", "flush"))
+
+    def _legacy_splitwise_create(
+        self, tx: ExpenseTransaction, payload: dict[str, Any]
+    ) -> tuple[ExpenseTransaction, dict[str, Any]]:
         try:
             response = self.splitwise_service.create_expense(payload)
             expense_id = str(response.get("expenses", [{}])[0].get("id", "")) or None
@@ -1100,26 +1440,28 @@ class TransactionService:
             self.db.commit()
             self.db.refresh(tx)
             self.notification_service.notify_splitwise_posted(tx, expense_id)
-            log_event(
-                logger,
-                "splitwise_expense_posted",
-                tx_id=tx.id,
-                splitwise_expense_id=expense_id,
-            )
             return tx, response
         except SplitwiseAPIError as exc:
-            log_event(
-                logger,
-                "splitwise_expense_post_failed",
-                level=logging.WARNING,
-                tx_id=tx.id,
-                reason="splitwise_api_error",
-            )
             tx.status = TransactionStatus.ERROR.value
             tx.last_error = str(exc)
             tx.updated_at = utc_now()
             self.db.commit()
             raise
+
+    def _legacy_splitwise_delete(self, tx: ExpenseTransaction) -> ExpenseTransaction:
+        try:
+            self.splitwise_service.delete_expense(str(tx.splitwise_expense_id))
+        except SplitwiseAPIError as exc:
+            raise TransactionError(
+                "Could not delete the Splitwise expense. Transaction was not reverted."
+            ) from exc
+        tx.splitwise_expense_id = None
+        tx.status = TransactionStatus.ASK_USER.value
+        tx.last_error = None
+        tx.updated_at = utc_now()
+        self.db.commit()
+        self.db.refresh(tx)
+        return tx
 
     def _ensure_can_post(self, tx: ExpenseTransaction, *, post_pending: bool) -> None:
         if tx.splitwise_expense_id:

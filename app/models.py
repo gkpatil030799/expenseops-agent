@@ -242,6 +242,10 @@ class TransactionStatus(StrEnum):
     SHARED_DRAFT = "shared_draft"
     APPROVED = "approved"
     POSTED = "posted"
+    POSTING = "posting"
+    POST_AMBIGUOUS = "post_ambiguous"
+    UNDOING = "undoing"
+    UNDO_AMBIGUOUS = "undo_ambiguous"
     ERROR = "error"
     REMOVED = "removed"
 
@@ -405,12 +409,57 @@ class ExpenseTransaction(TenantScoped, Base):
     )
     splitwise_expense_id: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
     splitwise_payload_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    splitwise_generation: Mapped[int] = mapped_column(Integer, default=0)
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
     plaid_item: Mapped[PlaidItem] = relationship(back_populates="transactions")
+
+
+class FinancialOperation(TenantScoped, Base):
+    __tablename__ = "financial_operations"
+    __table_args__ = (
+        UniqueConstraint(
+            "workspace_id",
+            "transaction_id",
+            "action",
+            "generation",
+            name="uq_financial_operation_transaction_action_generation",
+        ),
+        UniqueConstraint(
+            "workspace_id", "idempotency_key", name="uq_financial_operation_idempotency"
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    workspace_id: Mapped[int] = mapped_column(
+        ForeignKey("workspaces.id", ondelete="CASCADE"), nullable=False, default=1, index=True
+    )
+    transaction_id: Mapped[int] = mapped_column(
+        ForeignKey("expense_transactions.id", ondelete="CASCADE"), index=True
+    )
+    actor_user_id: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    action: Mapped[str] = mapped_column(String(64), index=True)
+    generation: Mapped[int] = mapped_column(Integer, default=0)
+    idempotency_key: Mapped[str] = mapped_column(String(64), index=True)
+    state: Mapped[str] = mapped_column(String(32), default="pending", index=True)
+    attempt_count: Mapped[int] = mapped_column(Integer, default=0)
+    lease_token: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, index=True
+    )
+    provider_object_id: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
+    request_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    error_code: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    correlation_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class AIInterpretationMemory(TenantScoped, Base):

@@ -17,9 +17,16 @@ from app.tenancy import DEFAULT_USER_EMAIL, get_active_user_id, get_active_works
 
 
 class SplitwiseAPIError(RuntimeError):
-    def __init__(self, message: str, response_data: dict[str, Any] | None = None):
+    def __init__(
+        self,
+        message: str,
+        response_data: dict[str, Any] | None = None,
+        *,
+        ambiguous: bool = False,
+    ):
         super().__init__(message)
         self.response_data = response_data or {}
+        self.ambiguous = ambiguous
 
 
 class SplitwiseService:
@@ -84,7 +91,7 @@ class SplitwiseService:
         try:
             response = requests.post(self.oauth_request_token_url, auth=auth, timeout=20.0)
         except requests.RequestException as exc:
-            raise SplitwiseAPIError(_request_error_message(exc)) from exc
+            raise SplitwiseAPIError(_request_error_message(exc), ambiguous=True) from exc
         if response.status_code >= 400:
             raise SplitwiseAPIError(
                 f"Splitwise OAuth request-token failed: HTTP {response.status_code}",
@@ -121,7 +128,7 @@ class SplitwiseService:
         try:
             response = requests.post(self.oauth_access_token_url, auth=auth, timeout=20.0)
         except requests.RequestException as exc:
-            raise SplitwiseAPIError(_request_error_message(exc)) from exc
+            raise SplitwiseAPIError(_request_error_message(exc), ambiguous=True) from exc
         if response.status_code >= 400:
             raise SplitwiseAPIError(
                 f"Splitwise OAuth access-token failed: HTTP {response.status_code}",
@@ -155,7 +162,7 @@ class SplitwiseService:
                 timeout=20.0,
             )
         except requests.RequestException as exc:
-            raise SplitwiseAPIError(_request_error_message(exc)) from exc
+            raise SplitwiseAPIError(_request_error_message(exc), ambiguous=True) from exc
         if response.status_code in {401, 403}:
             raise SplitwiseAPIError(
                 f"Splitwise authentication/authorization failed: HTTP {response.status_code}",
@@ -284,6 +291,24 @@ class SplitwiseService:
         if data.get("success") is not True:
             raise SplitwiseAPIError("Splitwise delete_expense was not successful", data)
         return data
+
+    def find_expense_by_idempotency_key(self, idempotency_key: str) -> dict[str, Any] | None:
+        marker = f"ExpenseOps ref: {idempotency_key}"
+        data = self._request("GET", "/get_expenses", params={"limit": 100})
+        for expense in data.get("expenses", []):
+            if marker in str(expense.get("details") or "") and not expense.get("deleted_at"):
+                return expense
+        return None
+
+    def expense_exists(self, expense_id: str) -> bool:
+        try:
+            data = self._request("GET", f"/get_expense/{expense_id}")
+        except SplitwiseAPIError as exc:
+            if "HTTP 404" in str(exc):
+                return False
+            raise
+        expense = data.get("expense")
+        return bool(isinstance(expense, dict) and not expense.get("deleted_at"))
 
 
 def _workspace_settings(settings: Settings) -> Settings:

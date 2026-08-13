@@ -812,6 +812,47 @@ test("a failed transaction action stays visible without blocking another row", a
   await expect(page.getByTestId("transaction-card-101").getByRole("button", { name: "Personal" })).toBeEnabled();
 });
 
+test("ambiguous Splitwise actions remain visible in Recovery and can reconcile", async ({ page }) => {
+  const transaction = {
+    id: 201,
+    plaid_transaction_id: "plaid-201",
+    merchant_name: "Aldi",
+    name: "ALDI 12",
+    amount_cents: 4250,
+    amount: "42.50",
+    iso_currency_code: "USD",
+    institution_name: "Chase",
+    category: "Groceries",
+    payment_channel: "in store",
+    date: "2026-08-12",
+    authorized_date: "2026-08-12",
+    pending: false,
+    status: "post_ambiguous",
+    agent_question: null,
+    splitwise_expense_id: null,
+    splitwise_payload_json: "{}",
+    last_error: "Splitwise timed out after the request was sent.",
+    classification_suggestion: "likely_shared",
+    classification_reason: null,
+    can_undo_transaction: false,
+    created_at: "2026-08-12T12:00:00Z",
+    updated_at: "2026-08-12T12:01:00Z",
+  };
+  await mockExpenseDashboard(page);
+  await page.route("**/transactions?status=post_ambiguous&limit=50", (route) =>
+    route.fulfill({ json: [transaction] }),
+  );
+  await page.route("**/transactions/201/recovery/retry", (route) =>
+    route.fulfill({ json: { transaction: { ...transaction, status: "posted", splitwise_expense_id: "expense-201", last_error: null }, message: "Financial operation recovered." } }),
+  );
+  await page.goto("/");
+
+  await expect(page.getByRole("heading", { name: "Financial actions needing attention" })).toBeVisible();
+  await expect(page.getByText(/has not been hidden or marked successful/i)).toBeVisible();
+  await page.getByRole("button", { name: "Reconcile and retry" }).click();
+  await expect(page.getByText("Financial operation recovered.", { exact: true })).toBeVisible();
+});
+
 for (const width of [320, 375, 390, 768, 1024, 1440]) {
   test(`dashboard has no document overflow at ${width}px`, async ({ page }) => {
     await page.setViewportSize({ width, height: width < 768 ? 844 : 900 });

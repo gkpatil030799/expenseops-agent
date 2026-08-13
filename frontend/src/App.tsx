@@ -103,6 +103,7 @@ function App() {
 
 function DashboardApp() {
   const [transactions, setTransactions] = useState<Transaction[]>([]);
+  const [recoveryTransactions, setRecoveryTransactions] = useState<Transaction[]>([]);
   const [recentTransactions, setRecentTransactions] = useState<Transaction[]>([]);
   const [allTransactions, setAllTransactions] = useState<Transaction[]>([]);
   const [aiMemories, setAiMemories] = useState<AIMemory[]>([]);
@@ -178,6 +179,7 @@ function DashboardApp() {
       .then((context) => {
         setAccountContext(context);
         void loadTransactions();
+        void loadRecoveryTransactions();
         void loadRecentActivity();
         void loadCurrentSplitwiseUser();
         void loadAIMemories();
@@ -324,8 +326,18 @@ function DashboardApp() {
   }
 
   async function refreshReviewData() {
-    await loadTransactions();
+    await Promise.all([loadTransactions(), loadRecoveryTransactions()]);
     await loadRecentActivity();
+  }
+
+  async function loadRecoveryTransactions() {
+    const statuses = ["error", "post_ambiguous", "undo_ambiguous", "posting", "undoing"];
+    const groups = await Promise.all(
+      statuses.map((status) => api<Transaction[]>(`/transactions?status=${status}&limit=50`)),
+    );
+    const data = groups.flat().sort((a, b) => b.updated_at.localeCompare(a.updated_at));
+    setRecoveryTransactions(data);
+    setAllTransactions((current) => mergeTransactions(current, data));
   }
 
   async function refreshDashboardQuietly() {
@@ -467,6 +479,15 @@ function DashboardApp() {
       label: "Moving back to review…",
       success: "Transaction moved back to the review queue.",
       action: () => api(`/transactions/${id}/undo`, { method: "POST", body: "{}" }),
+    });
+  }
+
+  async function retryFinancialOperation(id: number) {
+    await runTransactionAction({
+      id,
+      label: "Reconciling with Splitwise…",
+      success: "Financial operation recovered.",
+      action: () => api(`/transactions/${id}/recovery/retry`, { method: "POST", body: "{}" }),
     });
   }
 
@@ -795,6 +816,7 @@ function DashboardApp() {
               />
             )}
           </section>
+          {recoveryTransactions.length ? <section className="mt-6 space-y-3" aria-labelledby="recovery-title"><div><div className="inline-flex items-center gap-2 text-xs font-semibold uppercase text-amber-700"><RotateCcw className="h-3.5 w-3.5" />Recovery</div><h2 id="recovery-title" className="mt-1 text-xl font-semibold text-slate-950">Financial actions needing attention</h2><p className="mt-1 text-sm text-slate-600">ExpenseOps keeps uncertain or failed Splitwise actions visible until their provider state is confirmed.</p></div>{recoveryTransactions.map((transaction) => <Card key={transaction.id} className="border-amber-200"><CardContent className="flex flex-col gap-4 p-4 sm:flex-row sm:items-center sm:justify-between"><div className="min-w-0"><p className="font-semibold text-slate-950">{transaction.merchant_name || transaction.name} · {formatTransactionAmount(transaction)}</p><p className="mt-1 text-sm text-slate-700">{transaction.last_error || statusDisplay(transaction.status)}</p><p className="mt-1 text-xs text-slate-500">The transaction has not been hidden or marked successful.</p></div><div className="flex shrink-0 flex-wrap gap-2"><Button variant="outline" disabled={Boolean(transactionActionById[transaction.id])} onClick={() => retryFinancialOperation(transaction.id)}><RotateCcw className="h-4 w-4" />{transactionActionById[transaction.id] || "Reconcile and retry"}</Button><Button variant="ghost" onClick={() => setExpandedTransactions((current) => ({ ...current, [transaction.id]: true }))}>Return to review</Button></div>{transactionNoticeById[transaction.id] ? <p role="alert" className="text-sm text-rose-700">{transactionNoticeById[transaction.id].text}</p> : null}</CardContent></Card>)}</section> : null}
           </div>
           <section aria-labelledby="recently-handled-title"><div className="mb-3 flex items-center justify-between"><h2 id="recently-handled-title" className="text-lg font-semibold text-slate-950">Recently handled</h2><Button variant="ghost" size="sm" onClick={()=>changeExpenseTab("activity")}>View all activity</Button></div>
             <RecentActivity

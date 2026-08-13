@@ -93,6 +93,19 @@ def undo_transaction(tx_id: int, db: DbSession) -> MarkPersonalResponse:
         raise HTTPException(status_code=status_code, detail=str(exc)) from exc
 
 
+@router.post("/{tx_id}/recovery/retry", response_model=MarkPersonalResponse)
+def retry_financial_operation(tx_id: int, db: DbSession) -> MarkPersonalResponse:
+    try:
+        tx = TransactionService(db).retry_financial_operation(tx_id)
+        return MarkPersonalResponse(
+            transaction=_tx_out(tx),
+            message="Financial operation recovered.",
+        )
+    except (TransactionError, SplitwiseAPIError) as exc:
+        status_code = 404 if "not found" in str(exc).lower() else 409
+        raise HTTPException(status_code=status_code, detail=str(exc)) from exc
+
+
 @router.post("/{tx_id}/split/equal", response_model=SplitwisePostResponse)
 def split_equal(tx_id: int, payload: EqualSplitRequest, db: DbSession) -> SplitwisePostResponse:
     try:

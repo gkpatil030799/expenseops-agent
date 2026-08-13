@@ -37,7 +37,7 @@ visual-foundation changes began.
 | V8 — visual/accessibility validation | Complete (automated gate) | Six-width responsive matrix, 44px touch-target audit across primary and expanded flows, keyboard skip/focus restoration, reduced motion, 200%-zoom-equivalent layout, mobile-nav clearance, edge-state fixtures, and four-project Playwright coverage |
 | Phase 2 — UX action integrity | Complete | Structured API client; global resilience surfaces; scoped Expense, Deals, Settings, and Splitwise actions; cross-browser failure-isolation gate; checkpoint on `agent/launch-readiness` |
 | Phase 3 — identity and tenancy | In progress | Tenant-safe uniqueness and schema parity; verified OIDC email; atomic OAuth state claims; invite return/switch/wrong-account recovery; owner/member API matrix; removal/transfer; per-user Telegram and Splitwise; explicit Plaid ownership; exact connected identities. PostgreSQL RLS/request-worker role rollout remains an open exit-gate item. |
-| Phase 4 — financial correctness | Not started | — |
+| Phase 4 — financial correctness | In progress | Durable Splitwise create/delete journal, deterministic idempotency marker, atomic operation leases, explicit submitting/ambiguous states, reconciliation API, append-only audit events, and visible Recovery UI implemented; Plaid replacement/reversal reconciliation and transactional outbox remain open |
 | Phase 5 — durable workers | Not started | — |
 | Phase 6 — product-domain correctness | Not started | — |
 | Phase 7 — security and operations | Not started | — |
@@ -66,6 +66,22 @@ passing phase exit gate.
 Phase 3 is not complete until PostgreSQL row-level security and separate request/trusted-worker
 roles are implemented and proven against a real PostgreSQL test database. This remaining control is
 intentionally not represented as complete by the ORM isolation tests.
+
+## Phase 4 interim evidence
+
+| Check | Result |
+| --- | --- |
+| Durable operation journal | Splitwise create/delete attempts persist action, generation, idempotency key, actor, request, state, lease, provider object, error, correlation, and completion timestamps |
+| Duplicate protection | A successful create replays its stored result without a second provider call; an active lease rejects a concurrent submit |
+| Ambiguous create recovery | Timeout-after-send moves the transaction to `post_ambiguous`; retry searches the deterministic Splitwise marker before any new create |
+| Ambiguous delete recovery | Timeout-after-delete moves the transaction to `undo_ambiguous`; retry verifies provider absence before clearing local posted state |
+| Customer recovery | Error and ambiguous transactions remain visible in a dedicated Recovery section with Reconcile and retry and Return to review actions |
+| Auditability | Success, failure, ambiguity, recovery, actor, provider object, correlation, and idempotency identifiers emit append-only audit events |
+| Regression gate | Backend 533 passed; frontend unit 20 passed; lint had zero errors; production build passed |
+
+Phase 4 is not complete until Plaid pending-to-posted replacement, amount modification, reversal and
+removal reconciliation are implemented, valid-draft invariants are database-enforced, and post-commit
+notifications/events use the transactional outbox introduced in Phase 5.
 
 ## V1 validation evidence
 
