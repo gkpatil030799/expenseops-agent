@@ -286,6 +286,8 @@ export type ErrandPlan = {
   routing_provider: string;
   routing_is_optimized: boolean;
   route_url: string | null;
+  is_stale: boolean;
+  stale_reason: string | null;
   estimated_stop_minutes: number;
   travel_duration_minutes: number | null;
   distance_meters: number | null;

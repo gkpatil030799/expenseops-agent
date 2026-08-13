@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import math
 import re
 from dataclasses import dataclass
@@ -21,6 +22,8 @@ from app.models import (
     ErrandPlanStopHouseholdItem,
     ErrandPriority,
     ErrandStatus,
+    HouseholdItem,
+    SavedLocation,
     utc_now,
 )
 from app.services.errand_service import HouseholdOpsError, HouseholdOpsNotFound, errand_to_dict
@@ -35,6 +38,7 @@ class RouteStopInput:
     place_address: str | None
     latitude: float | None = None
     longitude: float | None = None
+    source_saved_location_id: int | None = None
 
     @property
     def destination(self) -> str:
@@ -346,7 +350,12 @@ class RoutePlanningService:
             )
             for group in ordered_groups
         ]
-        resolved_base = (base_location or self.settings.household_base_location).strip() or None
+        base_address = (base_location or self.settings.household_base_location).strip() or None
+        resolved_base = (
+            _verify_route_address(self.route_provider, base_address, "origin", "Starting point")
+            if base_address
+            else None
+        )
         try:
             route = self.route_provider.calculate_route(
                 base_location=resolved_base,
@@ -361,7 +370,7 @@ class RoutePlanningService:
         groups_by_key = {group["key"]: group for group in ordered_groups}
         plan = ErrandPlan(
             planned_for=planned_for,
-            base_location=resolved_base,
+            base_location=resolved_base.destination if resolved_base else None,
             routing_provider=route.provider,
             routing_is_optimized=route.is_optimized,
             route_url=route.route_url,
@@ -370,6 +379,14 @@ class RoutePlanningService:
             ),
             travel_duration_minutes=route.duration_minutes,
             distance_meters=route.distance_meters,
+            input_snapshot={
+                "base_location": resolved_base.destination if resolved_base else None,
+                "primary_destination": None,
+                "final_destination": None,
+                "available_minutes": None,
+                "include_replenishment": False,
+                "saved_location_ids": [],
+            },
         )
         self.db.add(plan)
         self.db.flush()
@@ -388,6 +405,7 @@ class RoutePlanningService:
                 self.db.add(ErrandPlanStopErrand(stop_id=stop.id, errand_id=errand.id))
                 errand.status = ErrandStatus.PLANNED.value
                 errand.updated_at = utc_now()
+        plan.input_fingerprint = plan_input_fingerprint(self.db, plan.input_snapshot)
         self.db.commit()
         return self.get_plan(plan.id)
 
@@ -450,6 +468,17 @@ class RoutePlanningService:
                     ],
                 }
             )
+        current_fingerprint = (
+            plan_input_fingerprint(self.db, plan.input_snapshot)
+            if plan.input_snapshot is not None
+            else None
+        )
+        is_stale = not plan.input_fingerprint or current_fingerprint != plan.input_fingerprint
+        stale_reason = (
+            "The route inputs or included errands changed. Recalculate before starting."
+            if plan.input_fingerprint
+            else "This route predates freshness verification. Recalculate before starting."
+        ) if is_stale else None
         return {
             "id": plan.id,
             "planned_for": plan.planned_for,
@@ -457,7 +486,9 @@ class RoutePlanningService:
             "status": plan.status,
             "routing_provider": plan.routing_provider,
             "routing_is_optimized": plan.routing_is_optimized,
-            "route_url": plan.route_url,
+            "route_url": None if is_stale else plan.route_url,
+            "is_stale": is_stale,
+            "stale_reason": stale_reason,
             "estimated_stop_minutes": plan.estimated_stop_minutes,
             "travel_duration_minutes": plan.travel_duration_minutes,
             "distance_meters": plan.distance_meters,
@@ -518,6 +549,13 @@ def _errand_has_resolved_place(errand: Errand) -> bool:
         errand.place_resolution_status == "resolved"
         and errand.resolved_place_name
         and errand.resolved_place_address
+        and (
+            errand.resolved_provider_place_id
+            or (
+                errand.resolved_latitude is not None
+                and errand.resolved_longitude is not None
+            )
+        )
     )
 
 
@@ -643,3 +681,113 @@ def _route_cache_key(
 
 def _aware(value: datetime) -> datetime:
     return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
+
+
+def _verify_route_address(
+    provider: RouteProvider,
+    address: str,
+    key: str,
+    label: str,
+) -> RouteStopInput:
+    try:
+        verified = provider.geocode(address)
+    except RoutingProviderError as exc:
+        raise HouseholdOpsError(
+            f"{label} could not be verified. Try again or use current coordinates."
+        ) from exc
+    if verified is None:
+        raise HouseholdOpsError(
+            f"{label} must be a verified full address or coordinates, not a generic place name."
+        )
+    return RouteStopInput(
+        key=key,
+        place_name=label,
+        place_address=verified.address,
+        latitude=verified.latitude,
+        longitude=verified.longitude,
+    )
+
+
+def plan_input_fingerprint(db: Session, snapshot: dict) -> str:
+    errands = list(
+        db.scalars(
+            select(Errand)
+            .where(
+                Errand.status.in_([ErrandStatus.OPEN.value, ErrandStatus.PLANNED.value]),
+                Errand.included_in_next_plan.is_(True),
+            )
+            .order_by(Errand.id)
+        )
+    )
+    location_ids = sorted(
+        {
+            int(value)
+            for value in snapshot.get("saved_location_ids", [])
+            if value is not None
+        }
+    )
+    locations = (
+        list(
+            db.scalars(
+                select(SavedLocation)
+                .where(SavedLocation.id.in_(location_ids))
+                .order_by(SavedLocation.id)
+            )
+        )
+        if location_ids
+        else []
+    )
+    items = (
+        list(db.scalars(select(HouseholdItem).order_by(HouseholdItem.id)))
+        if snapshot.get("include_replenishment")
+        else []
+    )
+    payload = {
+        "request": snapshot,
+        "errands": [_errand_fingerprint_values(errand) for errand in errands],
+        "saved_locations": [
+            {
+                "id": location.id,
+                "label": location.label,
+                "address": location.address,
+                "latitude": location.latitude,
+                "longitude": location.longitude,
+                "location_type": location.location_type,
+            }
+            for location in locations
+        ],
+        "household_items": [
+            {
+                "id": item.id,
+                "enabled": item.enabled,
+                "last_acquired_at": item.last_acquired_at.isoformat()
+                if item.last_acquired_at
+                else None,
+                "cadence_days": item.cadence_days,
+                "snoozed_until": item.snoozed_until.isoformat() if item.snoozed_until else None,
+                "preferred_place_name": item.preferred_place_name,
+                "preferred_place_address": item.preferred_place_address,
+                "replenishment_mode": item.replenishment_mode,
+            }
+            for item in items
+        ],
+    }
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
+    return sha256(canonical.encode()).hexdigest()
+
+
+def _errand_fingerprint_values(errand: Errand) -> dict:
+    return {
+        "id": errand.id,
+        "title": errand.title,
+        "included": errand.included_in_next_plan,
+        "resolution_status": errand.place_resolution_status,
+        "place_name": errand.resolved_place_name,
+        "place_address": errand.resolved_place_address,
+        "latitude": errand.resolved_latitude,
+        "longitude": errand.resolved_longitude,
+        "provider_place_id": errand.resolved_provider_place_id,
+        "due_at": errand.due_at.isoformat() if errand.due_at else None,
+        "duration": errand.estimated_duration_minutes,
+        "priority": errand.priority,
+    }

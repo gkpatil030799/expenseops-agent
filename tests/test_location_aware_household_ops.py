@@ -211,7 +211,7 @@ def test_haircut_and_aldi_require_resolution_before_planning(db):
     assert aldi.place_resolution_status == "unresolved"
     with pytest.raises(HouseholdOpsError, match="2 errands need locations"):
         WhileOutService(db, settings=settings()).plan(
-            origin={"address": "123 Home St, Phoenix, AZ 85001"},
+            origin={"latitude": 33.45, "longitude": -112.07},
             include_replenishment=False,
         )
 
@@ -244,8 +244,8 @@ def test_place_candidates_preference_override_and_end_to_end_route(db):
     places.resolve(aldi.id, remembered, remember_preference=False)
 
     plan, _summary = WhileOutService(db, settings=settings()).plan(
-        origin={"address": "123 Home St, Phoenix, AZ 85001"},
-        final_destination={"label": "Home", "address": "123 Home St, Phoenix, AZ 85001"},
+        origin={"latitude": 33.45, "longitude": -112.07},
+        final_destination={"label": "Home", "latitude": 33.45, "longitude": -112.07},
         include_replenishment=False,
     )
     assert {stop.place_name for stop in plan.stops} == {
@@ -297,8 +297,8 @@ def test_while_out_automatically_selects_best_full_trip_place_combination(db):
         route_provider=CombinationRouteProvider(),
         place_search_provider=FakePlaceProvider(),
     ).plan(
-        origin={"label": "Home", "address": "123 Home St, Phoenix, AZ 85001"},
-        final_destination={"label": "Work", "address": "500 Work Ave, Phoenix, AZ 85004"},
+        origin={"label": "Home", "latitude": 33.45, "longitude": -112.07},
+        final_destination={"label": "Work", "latitude": 33.46, "longitude": -112.06},
         available_minutes=90,
         include_replenishment=False,
     )
@@ -385,8 +385,8 @@ def test_while_out_uses_matrices_for_scoring_and_one_detailed_final_route(db):
         route_provider=route_provider,
         place_search_provider=FakePlaceProvider(),
     ).plan(
-        origin={"label": "Home", "address": "123 Home St, Phoenix, AZ 85001"},
-        final_destination={"label": "Work", "address": "500 Work Ave, Phoenix, AZ 85004"},
+        origin={"label": "Home", "latitude": 33.45, "longitude": -112.07},
+        final_destination={"label": "Work", "latitude": 33.46, "longitude": -112.06},
         include_replenishment=False,
     )
 
@@ -415,7 +415,7 @@ def test_haircut_and_aldi_api_flow_generates_only_concrete_destinations(db):
         blocked = client.post(
             "/api/household/errand-plans/while-out",
             json={
-                "origin": {"address": "123 Home St, Phoenix, AZ 85001"},
+                "origin": {"latitude": 33.45, "longitude": -112.07},
                 "include_replenishment": False,
             },
         )
@@ -428,21 +428,27 @@ def test_haircut_and_aldi_api_flow_generates_only_concrete_destinations(db):
                 "Copper & Sage Salon",
                 "100 N 1st Ave, Phoenix, AZ 85003",
                 "salon-a",
+                33.45,
+                -112.07,
             ),
             (
                 aldi["id"],
                 "ALDI",
                 "1401 E Warner Rd, Gilbert, AZ 85296",
                 "aldi-b",
+                33.33,
+                -111.76,
             ),
         ]
-        for errand_id, name, address, place_id in resolutions:
+        for errand_id, name, address, place_id, latitude, longitude in resolutions:
             response = client.post(
                 f"/api/household/errands/{errand_id}/resolve-place",
                 json={
                     "canonical_name": name,
                     "full_address": address,
                     "provider_place_id": place_id,
+                    "latitude": latitude,
+                    "longitude": longitude,
                     "remember_preference": True,
                 },
             )
@@ -452,10 +458,11 @@ def test_haircut_and_aldi_api_flow_generates_only_concrete_destinations(db):
         planned = client.post(
             "/api/household/errand-plans/while-out",
             json={
-                "origin": {"address": "123 Home St, Phoenix, AZ 85001"},
+                "origin": {"latitude": 33.45, "longitude": -112.07},
                 "final_destination": {
                     "label": "Home",
-                    "address": "123 Home St, Phoenix, AZ 85001",
+                    "latitude": 33.45,
+                    "longitude": -112.07,
                 },
                 "include_replenishment": False,
             },
@@ -466,8 +473,8 @@ def test_haircut_and_aldi_api_flow_generates_only_concrete_destinations(db):
         concrete = "|".join(
             [*route_values.get("waypoints", []), *route_values.get("destination", [])]
         )
-        assert "100 N 1st Ave, Phoenix, AZ 85003" in concrete
-        assert "1401 E Warner Rd, Gilbert, AZ 85296" in concrete
+        assert "33.45,-112.07" in concrete
+        assert "33.33,-111.76" in concrete
         assert "Unspecified" not in concrete
     finally:
         app.dependency_overrides.clear()
@@ -500,6 +507,13 @@ def test_current_location_requires_both_coordinates():
     assert current.address is None
 
 
+def test_generic_endpoint_label_cannot_be_used_as_a_route_location(db):
+    service = WhileOutService(db, settings=settings(), route_provider=MeasuredProvider())
+
+    with pytest.raises(HouseholdOpsError, match="verified full address or coordinates"):
+        service.resolve_location({"address": "Work"}, key="origin")
+
+
 def test_location_and_while_out_api_work_with_current_location(db):
     db.add(
         Errand(
@@ -519,7 +533,13 @@ def test_location_and_while_out_api_work_with_current_location(db):
     try:
         location = client.post(
             "/api/household/locations",
-            json={"label": "Home", "address": "Example address", "location_type": "home"},
+            json={
+                "label": "Home",
+                "address": "Example address",
+                "latitude": 33.45,
+                "longitude": -112.07,
+                "location_type": "home",
+            },
         )
         assert location.status_code == 201
         duplicate = client.post(
@@ -532,22 +552,33 @@ def test_location_and_while_out_api_work_with_current_location(db):
             "/api/household/errand-plans/while-out",
             json={
                 "origin": {"latitude": 33.45, "longitude": -112.07},
-                "primary_destination": {"label": "Home", "address": "Example address"},
+                "primary_destination": {"saved_location_id": location.json()["id"]},
                 "include_replenishment": False,
             },
         )
         assert response.status_code == 200
         assert response.json()["estimates_are_routed"] is False
         assert response.json()["plan"]["routing_is_optimized"] is False
+
+        plan_id = response.json()["plan"]["id"]
+        updated = client.patch(
+            f"/api/household/locations/{location.json()['id']}",
+            json={"address": "Changed address", "latitude": 33.55, "longitude": -112.17},
+        )
+        assert updated.status_code == 200
+        stale = client.get(f"/api/household/errand-plans/{plan_id}")
+        assert stale.status_code == 200
+        assert stale.json()["is_stale"] is True
+        assert stale.json()["route_url"] is None
     finally:
         app.dependency_overrides.clear()
 
 
 def test_route_comparison_uses_measured_incremental_time(db):
     result = WhileOutService(db, settings=settings(), route_provider=MeasuredProvider()).compare(
-        origin={"address": "Work"},
-        destination={"address": "Home"},
-        candidate={"address": "CVS"},
+        origin={"label": "Work", "latitude": 33.46, "longitude": -112.06},
+        destination={"label": "Home", "latitude": 33.45, "longitude": -112.07},
+        candidate={"label": "CVS", "latitude": 33.44, "longitude": -112.05},
     )
 
     assert result["has_measured_comparison"] is True
@@ -603,8 +634,8 @@ def test_replenishment_confidence_is_applied_to_existing_store_trip(db):
     plan, summary = WhileOutService(
         db, settings=settings(), route_provider=MeasuredProvider()
     ).plan(
-        origin={"address": "Home"},
-        primary_destination={"label": "Costco", "address": "Costco"},
+        origin={"label": "Home", "latitude": 33.45, "longitude": -112.07},
+        primary_destination={"label": "Costco", "latitude": 33.43, "longitude": -112.04},
         now=now,
     )
     output = _plan_items(plan)
@@ -634,8 +665,8 @@ def test_time_budget_filters_infeasible_candidate_and_is_truthful(db):
     plan, summary = WhileOutService(
         db, settings=settings(), route_provider=MeasuredProvider()
     ).plan(
-        origin={"address": "Work"},
-        primary_destination={"address": "Home", "label": "Home"},
+        origin={"label": "Work", "latitude": 33.46, "longitude": -112.06},
+        primary_destination={"label": "Home", "latitude": 33.45, "longitude": -112.07},
         available_minutes=30,
         include_replenishment=False,
         now=now,
@@ -663,8 +694,8 @@ def test_provider_failure_falls_back_without_time_or_optimization_claims(db):
     db.commit()
 
     plan, summary = WhileOutService(db, settings=settings(), route_provider=FailingProvider()).plan(
-        origin={"address": "Work"},
-        primary_destination={"address": "Home", "label": "Home"},
+        origin={"label": "Work", "latitude": 33.46, "longitude": -112.06},
+        primary_destination={"label": "Home", "latitude": 33.45, "longitude": -112.07},
         include_replenishment=False,
     )
 

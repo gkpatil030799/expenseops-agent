@@ -170,6 +170,17 @@ export function HouseholdOpsPage() {
   const [receiptItemDraft, setReceiptItemDraft] = useState<ReceiptItemDraft | null>(null);
   const [reviewingReceiptId, setReviewingReceiptId] = useState<number | null>(null);
   const [expandedHistoryReceiptId, setExpandedHistoryReceiptId] = useState<number | null>(null);
+  const [plannedTripSignature, setPlannedTripSignature] = useState<string | null>(null);
+
+  const tripInputSignature = useMemo(
+    () => JSON.stringify({
+      origin: selectedLocation(originChoice, locations, currentLocation, manualOrigin),
+      primaryDestination: primaryDestination.trim() || null,
+      final: selectedLocation(finalChoice, locations, currentLocation, ""),
+      availableMinutes: availableMinutes ? Number(availableMinutes) : null,
+    }),
+    [originChoice, locations, currentLocation, manualOrigin, primaryDestination, finalChoice, availableMinutes],
+  );
 
   const activeErrands = useMemo(
     () => errands.filter((errand) => errand.status === "open" || errand.status === "planned"),
@@ -193,6 +204,19 @@ export function HouseholdOpsPage() {
   useEffect(() => {
     void loadHouseholdOps();
   }, []);
+
+  useEffect(() => {
+    if (!plannedTripSignature || plannedTripSignature === tripInputSignature) return;
+    const markStale = (value: ErrandPlan): ErrandPlan => ({
+      ...value,
+      is_stale: true,
+      stale_reason: "The route inputs changed. Recalculate before starting.",
+      route_url: null,
+    });
+    setPlan((current) => current ? markStale(current) : current);
+    setWhileOut((current) => current ? { ...current, plan: markStale(current.plan) } : current);
+    setPlannedTripSignature(null);
+  }, [plannedTripSignature, tripInputSignature]);
 
   async function loadHouseholdOps() {
     setBusy((current) => current === "initial" ? "initial" : "refresh");
@@ -536,6 +560,7 @@ export function HouseholdOpsPage() {
       });
       setWhileOut(result);
       setPlan(result.plan);
+      setPlannedTripSignature(tripInputSignature);
       setNotice(
         result.estimates_are_routed
           ? "Useful stops selected using measured routing estimates."
@@ -1124,7 +1149,7 @@ function QueuePill({ icon: Icon, value, label, onClick }: { icon: typeof House; 
 
 function TodayRouteSummary({ plan, onOpen, showAction }: { plan: ErrandPlan; onOpen: () => void; showAction: boolean }) {
   const totalMinutes = plan.travel_duration_minutes !== null ? plan.travel_duration_minutes + plan.estimated_stop_minutes : null;
-  return <Card variant="secondary"><CardContent className="space-y-4 p-4 sm:p-5"><div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between"><div><p className="text-xs font-semibold uppercase tracking-[0.12em] text-slate-500">Latest route</p><h3 className="mt-1 font-semibold text-slate-950">{plan.stop_count} {plan.stop_count === 1 ? "stop" : "stops"}{totalMinutes !== null ? ` · about ${totalMinutes} minutes` : ""}</h3></div>{showAction ? <Button variant="outline" size="sm" onClick={onOpen}>Open route details<ArrowRight className="h-4 w-4" /></Button> : null}</div><RouteSequence plan={plan} compact /></CardContent></Card>;
+  return <Card variant="secondary"><CardContent className="space-y-4 p-4 sm:p-5"><div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between"><div><p className="text-xs font-semibold uppercase tracking-[0.12em] text-slate-500">Latest route</p><h3 className="mt-1 font-semibold text-slate-950">{plan.stop_count} {plan.stop_count === 1 ? "stop" : "stops"}{totalMinutes !== null ? ` · about ${totalMinutes} minutes` : ""}</h3>{plan.is_stale ? <p className="mt-1 text-xs font-medium text-amber-800">Route needs recalculation before you leave.</p> : null}</div>{showAction ? <Button variant="outline" size="sm" onClick={onOpen}>Open route details<ArrowRight className="h-4 w-4" /></Button> : null}</div><RouteSequence plan={plan} compact /></CardContent></Card>;
 }
 
 function GmailSyncStatus({ status, busy }: { status: GmailReceiptSyncStatus | null; busy: boolean }) {
@@ -1518,7 +1543,7 @@ function PlanSummary({ plan }: { plan: ErrandPlan }) {
       <div className="flex items-start justify-between gap-3 border-b border-slate-200 px-4 py-3"><div><h3 className="font-semibold text-slate-950">Next trip</h3><p className="mt-0.5 text-xs text-slate-600">{plan.stop_count} {plan.stop_count === 1 ? "stop" : "stops"}{plan.travel_duration_minutes !== null ? ` · Travel ${plan.travel_duration_minutes} min` : ""}{distanceMiles !== null ? ` · ${distanceMiles} mi` : ""}{plan.estimated_stop_minutes ? ` · Stops ${plan.estimated_stop_minutes} min` : ""}{totalMinutes !== null ? ` · Total ${totalMinutes} min` : ""}</p>{plan.incremental_travel_duration_minutes !== null ? <p className="mt-1 text-xs font-medium text-indigo-700">Approximately +{plan.incremental_travel_duration_minutes} routed minutes versus the baseline.</p> : null}</div><Badge variant="secondary">{plan.routing_is_optimized ? "Route optimized" : plan.travel_duration_minutes !== null ? "Measured route" : "Routing unavailable"}</Badge></div>
       <div className="border-b border-slate-200 bg-white px-4 py-4"><RouteSequence plan={plan} /></div>
       <ol className="divide-y divide-slate-200">{plan.stops.map((stop) => <li key={stop.id} className="flex gap-3 px-4 py-3"><span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-slate-900 text-xs font-semibold text-white">{stop.stop_order}</span><div className="min-w-0"><p className="text-sm font-semibold text-slate-900">{stop.place_name}</p>{stop.place_address ? <p className="truncate text-xs text-slate-600">{stop.place_address}</p> : null}<ul className="mt-1 space-y-0.5 text-xs text-slate-600">{stop.errands.map((errand) => <li key={`errand-${errand.id}`}>• {errand.title}</li>)}{stop.household_items.map((item) => <li key={`item-${item.id}`} className="text-indigo-700">• Buy {item.quantity ? `${item.quantity} ` : ""}{item.unit ? `${item.unit} ` : ""}{item.name}</li>)}</ul></div></li>)}</ol>
-      <div className="p-3">{plan.route_url ? <Button asChild className="w-full"><a href={plan.route_url} target="_blank" rel="noreferrer"><ExternalLink className="h-4 w-4" />Start route</a></Button> : <p className="text-center text-xs text-slate-600">Add a place to at least one errand to start a route.</p>}</div>
+      <div className="p-3">{plan.is_stale ? <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-3 text-sm text-amber-900"><p className="font-semibold">Recalculate this route</p><p className="mt-1 text-xs leading-5">{plan.stale_reason || "The route inputs changed, so the previous Maps link is disabled."}</p></div> : plan.route_url ? <Button asChild className="w-full"><a href={plan.route_url} target="_blank" rel="noreferrer"><ExternalLink className="h-4 w-4" />Start route</a></Button> : <p className="text-center text-xs text-slate-600">Add a verified place to at least one errand to start a route.</p>}</div>
     </div>
   );
 }

@@ -196,6 +196,33 @@ def test_plan_groups_locations_and_orders_deterministically(db):
     assert output["routing_provider"] == "deterministic_fallback"
     assert output["routing_is_optimized"] is False
     assert output["route_url"].startswith("https://www.google.com/maps/dir/")
+    assert output["is_stale"] is False
+
+
+def test_route_is_disabled_when_an_included_errand_changes(db):
+    errand = ErrandService(db).create_errand(
+        {
+            "title": "Pick up prescription",
+            "errand_type": "pickup",
+            "place_resolution_status": "resolved",
+            "resolved_place_name": "CVS Pharmacy",
+            "resolved_place_address": "123 W Main St, Phoenix, AZ 85001",
+            "resolved_provider_place_id": "cvs-1",
+            "priority": "high",
+            "included_in_next_plan": True,
+        }
+    )
+    service = RoutePlanningService(db, settings=SimpleNamespace(household_base_location=""))
+    plan = service.create_plan()
+
+    assert service.to_dict(plan)["is_stale"] is False
+    errand.resolved_place_address = "456 W Main St, Phoenix, AZ 85001"
+    db.commit()
+
+    output = service.to_dict(service.get_plan(plan.id))
+    assert output["is_stale"] is True
+    assert output["route_url"] is None
+    assert "Recalculate" in output["stale_reason"]
 
 
 def test_bought_updates_history_and_still_have_only_snoozes(db):

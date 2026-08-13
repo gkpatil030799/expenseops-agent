@@ -35,6 +35,7 @@ from app.services.route_planning_service import (
     RouteStopInput,
     RoutingProviderError,
     build_route_provider,
+    plan_input_fingerprint,
 )
 from app.services.saved_location_service import SavedLocationService
 
@@ -147,6 +148,7 @@ class WhileOutService:
             available_minutes=available_minutes,
             excluded=excluded,
             extra_reasons=place_result.reasons,
+            include_replenishment=include_replenishment,
         )
         summary = plan.recommendation_summary or {}
         return plan, summary
@@ -197,16 +199,40 @@ class WhileOutService:
         saved_location_id = value.get("saved_location_id")
         if saved_location_id:
             location = SavedLocationService(self.db).get_location(saved_location_id)
-            return _saved_location_stop(location, key)
-        latitude = value.get("latitude")
-        longitude = value.get("longitude")
-        label = value.get("label") or ("Current location" if latitude is not None else "Location")
+            stop = _saved_location_stop(location, key)
+        else:
+            latitude = value.get("latitude")
+            longitude = value.get("longitude")
+            label = value.get("label") or (
+                "Current location" if latitude is not None else "Location"
+            )
+            stop = RouteStopInput(
+                key=key,
+                place_name=label,
+                place_address=value.get("address"),
+                latitude=latitude,
+                longitude=longitude,
+            )
+        if stop.latitude is not None and stop.longitude is not None:
+            return stop
+        address = (stop.place_address or "").strip()
+        try:
+            verified = self.route_provider.geocode(address)
+        except (AttributeError, RoutingProviderError) as exc:
+            raise HouseholdOpsError(
+                f"{stop.place_name} could not be verified. Try again or use current coordinates."
+            ) from exc
+        if verified is None:
+            raise HouseholdOpsError(
+                f"{stop.place_name} must be a verified full address or coordinates, not a generic place name."
+            )
         return RouteStopInput(
             key=key,
-            place_name=label,
-            place_address=value.get("address"),
-            latitude=latitude,
-            longitude=longitude,
+            place_name=stop.place_name,
+            place_address=verified.address,
+            latitude=verified.latitude,
+            longitude=verified.longitude,
+            source_saved_location_id=stop.source_saved_location_id,
         )
 
     def _build_candidates(
@@ -615,6 +641,7 @@ class WhileOutService:
         available_minutes: int | None,
         excluded: list[dict],
         extra_reasons: list[str] | None = None,
+        include_replenishment: bool,
     ) -> ErrandPlan:
         candidate_by_key = {candidate.key: candidate for candidate in selected}
         ordered_keys = [_stop_key(stop) for stop in route.stops]
@@ -664,6 +691,20 @@ class WhileOutService:
             primary_destination=primary.destination if primary else None,
             final_destination=final.destination if final else None,
             recommendation_summary=summary,
+            input_snapshot={
+                "base_location": origin.destination,
+                "primary_destination": primary.destination if primary else None,
+                "final_destination": final.destination if final else None,
+                "available_minutes": available_minutes,
+                "include_replenishment": include_replenishment,
+                "saved_location_ids": sorted(
+                    {
+                        stop.source_saved_location_id
+                        for stop in (origin, primary, final)
+                        if stop is not None and stop.source_saved_location_id is not None
+                    }
+                ),
+            },
         )
         self.db.add(plan)
         self.db.flush()
@@ -688,6 +729,7 @@ class WhileOutService:
                         reason=reason,
                     )
                 )
+        plan.input_fingerprint = plan_input_fingerprint(self.db, plan.input_snapshot)
         self.db.commit()
         from app.services.route_planning_service import RoutePlanningService
 
@@ -703,6 +745,7 @@ def _saved_location_stop(location: SavedLocation, key: str) -> RouteStopInput:
         place_address=location.address,
         latitude=location.latitude,
         longitude=location.longitude,
+        source_saved_location_id=location.id,
     )
 
 
@@ -711,6 +754,13 @@ def _errand_has_resolved_place(errand: Errand) -> bool:
         errand.place_resolution_status == "resolved"
         and errand.resolved_place_name
         and errand.resolved_place_address
+        and (
+            errand.resolved_provider_place_id
+            or (
+                errand.resolved_latitude is not None
+                and errand.resolved_longitude is not None
+            )
+        )
     )
 
 

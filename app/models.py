@@ -1082,6 +1082,8 @@ class ErrandPlan(TenantScoped, Base):
     primary_destination: Mapped[str | None] = mapped_column(Text, nullable=True)
     final_destination: Mapped[str | None] = mapped_column(Text, nullable=True)
     recommendation_summary: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    input_fingerprint: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    input_snapshot: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 

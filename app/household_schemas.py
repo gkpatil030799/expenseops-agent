@@ -254,6 +254,8 @@ class ErrandPlanOut(BaseModel):
     routing_provider: str
     routing_is_optimized: bool
     route_url: str | None
+    is_stale: bool = False
+    stale_reason: str | None = None
     estimated_stop_minutes: int
     travel_duration_minutes: int | None = None
     distance_meters: int | None = None

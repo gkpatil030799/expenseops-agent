@@ -222,11 +222,43 @@ class PlaceResolutionService:
             raise HouseholdOpsError("A canonical place name and full address are required.")
         if (latitude is None) != (longitude is None):
             raise HouseholdOpsError("Latitude and longitude must be provided together.")
+        provider_place_id = values.get("provider_place_id")
+        if provider_place_id and latitude is None:
+            try:
+                details = self.provider.get_place_details(str(provider_place_id))
+            except PlaceSearchError as exc:
+                raise HouseholdOpsError("Place details could not be verified. Try again.") from exc
+            if details is not None:
+                name = details.canonical_name
+                address = details.full_address
+                latitude = details.latitude
+                longitude = details.longitude
+                values["open_now"] = details.open_now
+                values["opening_hours"] = details.opening_hours
+        elif latitude is None:
+            from app.services.route_planning_service import (
+                RoutingProviderError,
+                build_route_provider,
+            )
+
+            try:
+                geocoded = build_route_provider(self.settings).geocode(address)
+            except RoutingProviderError as exc:
+                raise HouseholdOpsError(
+                    "The manual address could not be verified. Try again or choose a search result."
+                ) from exc
+            if geocoded is None:
+                raise HouseholdOpsError(
+                    "Enter a verifiable full street address or choose a place-search result."
+                )
+            address = geocoded.address
+            latitude = geocoded.latitude
+            longitude = geocoded.longitude
         errand.resolved_place_name = name
         errand.resolved_place_address = address
         errand.resolved_latitude = latitude
         errand.resolved_longitude = longitude
-        errand.resolved_provider_place_id = values.get("provider_place_id")
+        errand.resolved_provider_place_id = provider_place_id
         errand.resolved_open_now = values.get("open_now")
         errand.resolved_opening_hours = values.get("opening_hours")
         errand.place_resolution_method = method
