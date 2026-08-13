@@ -160,6 +160,16 @@ class ReceiptIngestionService:
         self.db.commit()
         return self.get(receipt.id)
 
+    def restore(self, receipt_id: int) -> PurchaseReceipt:
+        receipt = self.get(receipt_id)
+        if receipt.parse_status != ReceiptParseStatus.IGNORED.value:
+            raise ValueError("Only an ignored receipt can be restored.")
+        receipt.parse_status = ReceiptParseStatus.NEEDS_REVIEW.value
+        receipt.ignored_at = None
+        receipt.updated_at = utc_now()
+        self.db.commit()
+        return self.get(receipt.id)
+
     def update_line_match(
         self,
         receipt_id: int,
@@ -175,7 +185,7 @@ class ReceiptIngestionService:
         old_item = line.household_item
         active_acquisition = line.acquisition
         normalizer = ItemNormalizationService(self.db)
-        if rejected or household_item_id is None:
+        if rejected:
             if active_acquisition and active_acquisition.voided_at is None:
                 AcquisitionService(self.db).undo(active_acquisition.id, commit=False)
             if old_item:
@@ -183,6 +193,14 @@ class ReceiptIngestionService:
             line.household_item_id = None
             line.match_status = ReceiptItemMatchStatus.REJECTED.value
             line.match_confidence = 1.0
+        elif household_item_id is None:
+            if active_acquisition and active_acquisition.voided_at is None:
+                AcquisitionService(self.db).undo(active_acquisition.id, commit=False)
+            if old_item:
+                normalizer.void_alias(old_item, line.raw_name, merchant=receipt.merchant_normalized)
+            line.household_item_id = None
+            line.match_status = ReceiptItemMatchStatus.UNMATCHED.value
+            line.match_confidence = None
         else:
             item = self.db.get(HouseholdItem, household_item_id)
             if item is None:

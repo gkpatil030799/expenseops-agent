@@ -221,7 +221,21 @@ export type PurchaseReceipt = {
   failure_code: string | null;
   transaction_id: number | null;
   created_at: string;
+  decision_summary: {
+    tracked: number;
+    ignored: number;
+    undecided: number;
+    total: number;
+  };
   items: ReceiptLine[];
+};
+
+export type ReceiptPage = {
+  items: PurchaseReceipt[];
+  total: number;
+  limit: number;
+  offset: number;
+  has_more: boolean;
 };
 
 export type ReplenishmentPrediction = {

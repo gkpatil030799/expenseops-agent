@@ -224,7 +224,8 @@ class WhileOutService:
             ) from exc
         if verified is None:
             raise HouseholdOpsError(
-                f"{stop.place_name} must be a verified full address or coordinates, not a generic place name."
+                f"{stop.place_name} must be a verified full address or coordinates, "
+                "not a generic place name."
             )
         return RouteStopInput(
             key=key,

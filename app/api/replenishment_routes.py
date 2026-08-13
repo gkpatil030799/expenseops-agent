@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from typing import Literal
 
 from fastapi import APIRouter, HTTPException, Query
 from sqlalchemy import func, select
@@ -144,18 +145,40 @@ def summary(db: DbSession) -> dict:
     }
 
 
-@router.get("/receipts", response_model=list[ReceiptOut])
-def list_receipts(db: DbSession, limit: int = Query(default=25, ge=1, le=100)) -> list[dict]:
+@router.get("/receipts")
+def list_receipts(
+    db: DbSession,
+    limit: int = Query(default=25, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+    bucket: Literal["all", "active", "history"] = "all",
+    include_meta: bool = False,
+) -> list[dict] | dict:
+    stmt = select(PurchaseReceipt)
+    if bucket == "active":
+        stmt = stmt.where(PurchaseReceipt.parse_status.in_(["needs_review", "failed"]))
+    elif bucket == "history":
+        stmt = stmt.where(PurchaseReceipt.parse_status.in_(["confirmed", "ignored"]))
+    total = db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
     receipts = db.execute(
-        select(PurchaseReceipt)
+        stmt
         .options(
             selectinload(PurchaseReceipt.items).selectinload(PurchaseReceiptItem.household_item),
             selectinload(PurchaseReceipt.items).selectinload(PurchaseReceiptItem.acquisition),
         )
         .order_by(PurchaseReceipt.created_at.desc())
+        .offset(offset)
         .limit(limit)
     ).scalars()
-    return [_receipt_dict(receipt) for receipt in receipts]
+    items = [_receipt_dict(receipt) for receipt in receipts]
+    if not include_meta:
+        return items
+    return {
+        "items": items,
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+        "has_more": offset + len(items) < total,
+    }
 
 
 @router.post("/receipts/{receipt_id}/confirm", response_model=ReceiptOut)
@@ -172,6 +195,14 @@ def ignore_receipt(receipt_id: int, db: DbSession) -> dict:
         return _receipt_dict(ReceiptIngestionService(db).ignore(receipt_id))
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.post("/receipts/{receipt_id}/restore", response_model=ReceiptOut)
+def restore_receipt(receipt_id: int, db: DbSession) -> dict:
+    try:
+        return _receipt_dict(ReceiptIngestionService(db).restore(receipt_id))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.patch("/receipts/{receipt_id}/items/{line_id}")
@@ -319,6 +350,13 @@ def gmail_sync_status(db: DbSession) -> dict:
 
 
 def _receipt_dict(receipt: PurchaseReceipt) -> dict:
+    tracked = sum(1 for line in receipt.items if line.household_item_id is not None)
+    ignored = sum(
+        1
+        for line in receipt.items
+        if line.household_item_id is None and line.match_status in {"rejected", "irrelevant"}
+    )
+    total = len(receipt.items)
     return {
         "id": receipt.id,
         "source": receipt.source,
@@ -331,6 +369,12 @@ def _receipt_dict(receipt: PurchaseReceipt) -> dict:
         "failure_code": receipt.failure_code,
         "transaction_id": receipt.transaction_id,
         "created_at": receipt.created_at,
+        "decision_summary": {
+            "tracked": tracked,
+            "ignored": ignored,
+            "undecided": max(0, total - tracked - ignored),
+            "total": total,
+        },
         "items": [
             {
                 "id": line.id,

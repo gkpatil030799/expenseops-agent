@@ -9,7 +9,7 @@ import pytest
 from sqlalchemy import create_engine, func, select
 from sqlalchemy.orm import sessionmaker
 
-from app.api.replenishment_routes import summary
+from app.api.replenishment_routes import _receipt_dict, list_receipts, summary
 from app.config import Settings
 from app.db import Base
 from app.jobs import gmail_receipts
@@ -206,6 +206,71 @@ def test_low_confidence_or_unmatched_lines_do_not_contaminate_history(db):
     receipt = service.ingest_text(source="telegram", source_external_id="low-1", text="unclear")
     service.confirm(receipt.id)
     assert db.scalar(select(func.count(HouseholdItemAcquisition.id))) == 0
+
+
+def test_receipt_decisions_are_summarized_and_ignored_receipt_can_be_restored(db):
+    service = ReceiptIngestionService(
+        db, settings(), StaticParser(parsed_receipt(name="untracked pantry item", confidence=0.4))
+    )
+    receipt = service.ingest_text(
+        source="telegram", source_external_id="decision-summary-1", text="unique receipt one"
+    )
+    service.update_line_match(receipt.id, receipt.items[0].id, None, rejected=True)
+
+    serialized = _receipt_dict(service.get(receipt.id))
+    assert serialized["decision_summary"] == {
+        "tracked": 0,
+        "ignored": 1,
+        "undecided": 0,
+        "total": 1,
+    }
+
+    ignored = service.ignore(receipt.id)
+    assert ignored.parse_status == "ignored"
+    restored = service.restore(receipt.id)
+    assert restored.parse_status == "needs_review"
+    assert restored.ignored_at is None
+    with pytest.raises(ValueError, match="Only an ignored receipt"):
+        service.restore(receipt.id)
+
+
+def test_receipt_line_can_return_to_undecided_without_being_rejected(db):
+    tracked = item(db)
+    service = ReceiptIngestionService(db, settings(), StaticParser(parsed_receipt()))
+    receipt = service.ingest_text(
+        source="telegram", source_external_id="undecided-1", text="unique undecided receipt"
+    )
+    assert receipt.items[0].household_item_id == tracked.id
+
+    updated = service.update_line_match(receipt.id, receipt.items[0].id, None, rejected=False)
+    assert updated.household_item_id is None
+    assert updated.match_status == "unmatched"
+    assert _receipt_dict(service.get(receipt.id))["decision_summary"]["undecided"] == 1
+
+
+def test_receipt_history_pagination_reports_truthful_total(db):
+    service = ReceiptIngestionService(
+        db, settings(), StaticParser(parsed_receipt(name="untracked item", confidence=0.4))
+    )
+    for index in range(3):
+        receipt = service.ingest_text(
+            source="telegram",
+            source_external_id=f"history-page-{index}",
+            text=f"unique receipt page {index}",
+        )
+        service.ignore(receipt.id)
+
+    first = list_receipts(
+        db=db, limit=2, offset=0, bucket="history", include_meta=True
+    )
+    second = list_receipts(
+        db=db, limit=2, offset=2, bucket="history", include_meta=True
+    )
+    assert first["total"] == 3
+    assert len(first["items"]) == 2
+    assert first["has_more"] is True
+    assert len(second["items"]) == 1
+    assert second["has_more"] is False
 
 
 def test_unmatched_receipt_line_can_start_tracking_a_new_household_item(db):

@@ -20,6 +20,13 @@ class ReceiptLineOut(BaseModel):
     match_confidence: float | None
 
 
+class ReceiptDecisionSummary(BaseModel):
+    tracked: int
+    ignored: int
+    undecided: int
+    total: int
+
+
 class ReceiptOut(BaseModel):
     id: int
     source: str
@@ -32,6 +39,7 @@ class ReceiptOut(BaseModel):
     failure_code: str | None
     transaction_id: int | None
     created_at: datetime
+    decision_summary: ReceiptDecisionSummary
     items: list[ReceiptLineOut]
 
 

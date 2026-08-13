@@ -39,6 +39,7 @@ import type {
   PlaceSearchResult,
   PlanningLocation,
   PurchaseReceipt,
+  ReceiptPage,
   ReplenishmentLearningSummary,
   ReplenishmentSuggestion,
   SavedLocation,
@@ -140,10 +141,16 @@ export function HouseholdOpsPage() {
   const [items, setItems] = useState<HouseholdItem[]>([]);
   const [plan, setPlan] = useState<ErrandPlan | null>(null);
   const [receipts, setReceipts] = useState<PurchaseReceipt[]>([]);
+  const [receiptQueueTotal, setReceiptQueueTotal] = useState(0);
+  const [receiptHistoryTotal, setReceiptHistoryTotal] = useState(0);
+  const [receiptQueueHasMore, setReceiptQueueHasMore] = useState(false);
+  const [receiptHistoryHasMore, setReceiptHistoryHasMore] = useState(false);
+  const [lastIgnoredReceipt, setLastIgnoredReceipt] = useState<PurchaseReceipt | null>(null);
   const [gmailSyncStatus, setGmailSyncStatus] = useState<GmailReceiptSyncStatus | null>(null);
   const [suggestions, setSuggestions] = useState<ReplenishmentSuggestion[]>([]);
   const [busy, setBusy] = useState<string | null>("initial");
   const [error, setError] = useState<string | null>(null);
+  const [loadWarning, setLoadWarning] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [showErrandForm, setShowErrandForm] = useState(false);
   const [showItemForm, setShowItemForm] = useState(false);
@@ -221,33 +228,44 @@ export function HouseholdOpsPage() {
   async function loadHouseholdOps() {
     setBusy((current) => current === "initial" ? "initial" : "refresh");
     setError(null);
-    try {
-      const [loadedErrands, loadedItems, latestPlan, loadedLocations, loadedLearning, loadedReceipts, loadedGmailStatus] = await Promise.all([
-        api<Errand[]>("/api/household/errands"),
-        api<HouseholdItem[]>("/api/household/items"),
-        api<ErrandPlan | null>("/api/household/errand-plans/latest"),
-        api<SavedLocation[]>("/api/household/locations"),
-        api<ReplenishmentLearningSummary>("/api/replenishment/summary"),
-        api<PurchaseReceipt[]>("/api/replenishment/receipts?limit=50"),
-        api<GmailReceiptSyncStatus>("/api/replenishment/gmail/status"),
-      ]);
-      setErrands(loadedErrands);
-      setItems(loadedItems);
-      setPlan(latestPlan);
-      setLocations(loadedLocations);
-      setLearning(loadedLearning);
-      setReceipts(loadedReceipts);
-      setGmailSyncStatus(loadedGmailStatus);
-      setOriginChoice((current) => {
-        if (current !== "manual" || manualOrigin) return current;
-        const preferred = loadedLocations.find((location) => location.location_type === "home");
-        return preferred ? `saved:${preferred.id}` : current;
-      });
-    } catch (caught) {
-      setError(errorMessage(caught));
-    } finally {
-      setBusy(null);
+    const failed = new Set<string>();
+    const receiptPages: { active?: ReceiptPage; history?: ReceiptPage } = {};
+    const load = async <T,>(label: string, request: Promise<T>, apply: (value: T) => void) => {
+      try { apply(await request); } catch { failed.add(label); }
+    };
+    await Promise.all([
+      load("errands", api<Errand[]>("/api/household/errands"), setErrands),
+      load("staples", api<HouseholdItem[]>("/api/household/items"), setItems),
+      load("latest route", api<ErrandPlan | null>("/api/household/errand-plans/latest"), setPlan),
+      load("saved locations", api<SavedLocation[]>("/api/household/locations"), (loadedLocations) => {
+        setLocations(loadedLocations);
+        setOriginChoice((current) => {
+          if (current !== "manual" || manualOrigin) return current;
+          const preferred = loadedLocations.find((location) => location.location_type === "home");
+          return preferred ? `saved:${preferred.id}` : current;
+        });
+      }),
+      load("predictions", api<ReplenishmentLearningSummary>("/api/replenishment/summary"), setLearning),
+      load("receipt queue", api<ReceiptPage>("/api/replenishment/receipts?bucket=active&limit=25&include_meta=true"), (page) => { receiptPages.active = page; }),
+      load("receipt history", api<ReceiptPage>("/api/replenishment/receipts?bucket=history&limit=25&include_meta=true"), (page) => { receiptPages.history = page; }),
+      load("Gmail receipt status", api<GmailReceiptSyncStatus>("/api/replenishment/gmail/status"), setGmailSyncStatus),
+    ]);
+    if (receiptPages.active || receiptPages.history) {
+      setReceipts((current) => mergeReceipts(
+        receiptPages.active?.items || current.filter((receipt) => ["needs_review", "failed"].includes(receipt.parse_status)),
+        receiptPages.history?.items || current.filter((receipt) => ["confirmed", "ignored"].includes(receipt.parse_status)),
+      ));
     }
+    if (receiptPages.active) {
+      setReceiptQueueTotal(receiptPages.active.total);
+      setReceiptQueueHasMore(receiptPages.active.has_more);
+    }
+    if (receiptPages.history) {
+      setReceiptHistoryTotal(receiptPages.history.total);
+      setReceiptHistoryHasMore(receiptPages.history.has_more);
+    }
+    setLoadWarning(failed.size ? `Some sections could not refresh (${Array.from(failed).join(", ")}). Existing information may be out of date; retry Refresh.` : null);
+    setBusy(null);
   }
 
   async function run(action: string, work: () => Promise<void>) {
@@ -467,11 +485,46 @@ export function HouseholdOpsPage() {
   }
 
   async function receiptAction(receipt: PurchaseReceipt, action: "confirm" | "ignore") {
+    if (action === "confirm" && receipt.decision_summary.undecided > 0 && !window.confirm(
+      `${receipt.decision_summary.undecided} item${receipt.decision_summary.undecided === 1 ? " is" : "s are"} still undecided. Confirm this receipt anyway?`,
+    )) return;
     await run(`receipt-${action}-${receipt.id}`, async () => {
       await api(`/api/replenishment/receipts/${receipt.id}/${action}`, { method: "POST" });
-      setNotice(action === "confirm" ? "Receipt purchases added to learning history." : "Receipt ignored.");
+      if (action === "confirm") {
+        const { tracked, ignored, undecided } = receipt.decision_summary;
+        setNotice(`Receipt confirmed: ${tracked} tracked, ${ignored} ignored, ${undecided} left undecided.`);
+        setLastIgnoredReceipt(null);
+      } else {
+        setNotice("Receipt ignored. You can undo this action or restore it from History.");
+        setLastIgnoredReceipt(receipt);
+      }
       setReviewingReceiptId(null);
       await loadHouseholdOps();
+    });
+  }
+
+  async function restoreReceipt(receipt: PurchaseReceipt) {
+    await run(`receipt-restore-${receipt.id}`, async () => {
+      await api(`/api/replenishment/receipts/${receipt.id}/restore`, { method: "POST" });
+      setNotice(`${receipt.merchant || "Receipt"} is back in the review queue.`);
+      setLastIgnoredReceipt(null);
+      setExpandedHistoryReceiptId(null);
+      await loadHouseholdOps();
+    });
+  }
+
+  async function loadMoreReceipts(bucket: "active" | "history") {
+    const offset = bucket === "active" ? receiptQueue.length : receiptHistory.length;
+    await run(`receipts-more-${bucket}`, async () => {
+      const page = await api<ReceiptPage>(`/api/replenishment/receipts?bucket=${bucket}&limit=25&offset=${offset}&include_meta=true`);
+      setReceipts((current) => mergeReceipts(current, page.items));
+      if (bucket === "active") {
+        setReceiptQueueTotal(page.total);
+        setReceiptQueueHasMore(page.has_more);
+      } else {
+        setReceiptHistoryTotal(page.total);
+        setReceiptHistoryHasMore(page.has_more);
+      }
     });
   }
 
@@ -777,18 +830,33 @@ export function HouseholdOpsPage() {
           </button>
         </div>
       ) : null}
+      {loadWarning ? (
+        <div className="flex items-start gap-2 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900" role="status">
+          <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
+          <span>{loadWarning}</span>
+          <Button className="ml-auto shrink-0" size="sm" variant="outline" onClick={loadHouseholdOps} disabled={busy !== null}>Retry</Button>
+        </div>
+      ) : null}
       {notice ? (
         <div className="flex items-center gap-2 rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-700 shadow-sm">
           <CheckCircle2 className="h-4 w-4 text-emerald-600" />
           {notice}
         </div>
       ) : null}
+      {lastIgnoredReceipt ? (
+        <div className="flex flex-col gap-3 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-950 shadow-sm sm:flex-row sm:items-center">
+          <span className="flex-1">{lastIgnoredReceipt.merchant || "Receipt"} was moved to History.</span>
+          <Button size="sm" variant="outline" onClick={() => restoreReceipt(lastIgnoredReceipt)} disabled={busy !== null}>
+            <RotateCcw className="h-4 w-4" /> Undo ignore
+          </Button>
+        </div>
+      ) : null}
 
-      <HouseholdNavigation active={householdView} onChange={setHouseholdView} receiptCount={receiptQueue.length} />
+      <HouseholdNavigation active={householdView} onChange={setHouseholdView} receiptCount={receiptQueueTotal} />
 
       {householdView === "today" ? (
         <TodayOverview
-          receiptCount={receiptQueue.length}
+          receiptCount={receiptQueueTotal}
           unresolvedErrandCount={activeErrands.filter((errand) => errand.place_resolution_status !== "resolved").length}
           activeErrandCount={activeErrands.length}
           dueItemCount={dueItems.length}
@@ -858,12 +926,13 @@ export function HouseholdOpsPage() {
                     </div>
                     <p className="mt-1 text-xs text-slate-600">Completed receipts leave this queue automatically.</p>
                   </div>
-                  <Badge variant="secondary">{receiptQueue.length} to review</Badge>
+                  <Badge variant="secondary">{receiptQueueTotal} to review</Badge>
                 </div>
                 {receiptQueue.length ? <div className="space-y-3">
                   <div className="divide-y divide-slate-100 overflow-hidden rounded-xl border border-slate-200">
                     {receiptQueue.map((receipt) => <ReceiptQueueRow key={receipt.id} receipt={receipt} selected={reviewingReceiptId === receipt.id} busy={busy !== null} onReview={() => setReviewingReceiptId(receipt.id)} onIgnore={() => receiptAction(receipt, "ignore")} />)}
                   </div>
+                  {receiptQueueHasMore ? <div className="flex justify-center"><Button variant="outline" onClick={() => loadMoreReceipts("active")} disabled={busy !== null}>{busy === "receipts-more-active" ? "Loading…" : `Load more (${receiptQueue.length} of ${receiptQueueTotal})`}</Button></div> : null}
                   {receiptQueue.find((receipt) => receipt.id === reviewingReceiptId) ? <ReceiptReviewCard receipt={receiptQueue.find((receipt) => receipt.id === reviewingReceiptId)!} items={items} draft={receiptItemDraft} busy={busy !== null} onDraft={setReceiptItemDraft} onMatch={updateReceiptMatch} onTrack={trackReceiptItem} onUndo={undoReceiptAcquisition} onConfirm={(receipt) => receiptAction(receipt, "confirm")} onIgnore={(receipt) => receiptAction(receipt, "ignore")} onClose={() => setReviewingReceiptId(null)} /> : null}
                 </div> : <EmptyPanel icon={CheckCircle2} title="Receipt queue is clear" description="New Gmail or Telegram receipts will appear here when they need a decision." compact />}
 
@@ -1075,6 +1144,8 @@ export function HouseholdOpsPage() {
       {householdView === "history" ? (
         <HouseholdHistory
           receipts={receiptHistory}
+          receiptTotal={receiptHistoryTotal}
+          receiptHasMore={receiptHistoryHasMore}
           errands={errandHistory}
           items={items}
           draft={receiptItemDraft}
@@ -1085,6 +1156,8 @@ export function HouseholdOpsPage() {
           onMatch={updateReceiptMatch}
           onTrack={trackReceiptItem}
           onUndoReceipt={undoReceiptAcquisition}
+          onRestoreReceipt={restoreReceipt}
+          onLoadMoreReceipts={() => loadMoreReceipts("history")}
           onRepeatErrand={repeatErrand}
           onDeleteErrand={(errand) => mutateErrand(errand, "delete")}
         />
@@ -1156,8 +1229,8 @@ function GmailSyncStatus({ status, busy }: { status: GmailReceiptSyncStatus | nu
   return <div className="flex flex-col gap-3 rounded-xl border border-slate-200 bg-slate-50/70 p-4 sm:flex-row sm:items-center sm:justify-between"><div className="flex items-start gap-3"><span className={`mt-1 h-2.5 w-2.5 shrink-0 rounded-full ring-4 ${status?.configured ? "bg-emerald-500 ring-emerald-100" : "bg-slate-400 ring-slate-200"}`} /><div><p className="text-sm font-semibold text-slate-900">{status?.configured ? "Automatic Gmail receipt import is active" : "Gmail receipt import is not configured"}</p><p className="mt-1 text-xs text-slate-600">{busy ? "Sync in progress…" : status?.last_successful_sync_at ? `Last successful sync ${formatRelativeTime(status.last_successful_sync_at)}.` : status?.configured ? "Waiting for the first successful scheduled sync." : "Add the Gmail credentials and enable receipt sync to import automatically."}</p></div></div>{status?.latest_receipt_at ? <p className="text-xs text-slate-600">Latest Gmail receipt {formatRelativeTime(status.latest_receipt_at)}</p> : null}</div>;
 }
 
-function HouseholdHistory({ receipts, errands, items, draft, expandedReceiptId, busy, onToggleReceipt, onDraft, onMatch, onTrack, onUndoReceipt, onRepeatErrand, onDeleteErrand }: { receipts: PurchaseReceipt[]; errands: Errand[]; items: HouseholdItem[]; draft: ReceiptItemDraft | null; expandedReceiptId: number | null; busy: boolean; onToggleReceipt: (receiptId: number) => void; onDraft: React.Dispatch<React.SetStateAction<ReceiptItemDraft | null>>; onMatch: (receipt: PurchaseReceipt, line: PurchaseReceipt["items"][number], value: string) => void; onTrack: () => void; onUndoReceipt: (receipt: PurchaseReceipt, acquisitionId: number) => void; onRepeatErrand: (errand: Errand) => void; onDeleteErrand: (errand: Errand) => void }) {
-  return <div className="grid gap-5 xl:grid-cols-2"><Card><CardHeader><div className="mb-1 inline-flex items-center gap-2 text-xs font-semibold uppercase text-slate-500"><ReceiptText className="h-4 w-4" />Receipts</div><CardTitle>Receipt history</CardTitle><CardDescription>Completed and ignored receipts stay available without occupying the review queue.</CardDescription></CardHeader><CardContent>{receipts.length ? <div className="divide-y divide-slate-200 overflow-hidden rounded-lg border border-slate-200 bg-white">{receipts.map((receipt) => <ReceiptHistoryRow key={receipt.id} receipt={receipt} expanded={expandedReceiptId === receipt.id} busy={busy} items={items} draft={draft} onToggle={() => onToggleReceipt(receipt.id)} onDraft={onDraft} onMatch={onMatch} onTrack={onTrack} onUndo={onUndoReceipt} />)}</div> : <EmptyPanel icon={ReceiptText} title="No completed receipts yet" description="Confirmed and ignored receipts will appear here." compact />}</CardContent></Card><Card><CardHeader><div className="mb-1 inline-flex items-center gap-2 text-xs font-semibold uppercase text-slate-500"><ListChecks className="h-4 w-4" />Errands</div><CardTitle>Errand history</CardTitle><CardDescription>Repeat a past errand without rebuilding its destination.</CardDescription></CardHeader><CardContent>{errands.length ? <div className="divide-y divide-slate-200 overflow-hidden rounded-lg border border-slate-200 bg-white">{errands.map((errand) => <ErrandHistoryRow key={errand.id} errand={errand} busy={busy} onRepeat={() => onRepeatErrand(errand)} onDelete={() => onDeleteErrand(errand)} />)}</div> : <EmptyPanel icon={ListChecks} title="No completed errands yet" description="Completed and skipped errands will appear here." compact />}</CardContent></Card></div>;
+function HouseholdHistory({ receipts, receiptTotal, receiptHasMore, errands, items, draft, expandedReceiptId, busy, onToggleReceipt, onDraft, onMatch, onTrack, onUndoReceipt, onRestoreReceipt, onLoadMoreReceipts, onRepeatErrand, onDeleteErrand }: { receipts: PurchaseReceipt[]; receiptTotal: number; receiptHasMore: boolean; errands: Errand[]; items: HouseholdItem[]; draft: ReceiptItemDraft | null; expandedReceiptId: number | null; busy: boolean; onToggleReceipt: (receiptId: number) => void; onDraft: React.Dispatch<React.SetStateAction<ReceiptItemDraft | null>>; onMatch: (receipt: PurchaseReceipt, line: PurchaseReceipt["items"][number], value: string) => void; onTrack: () => void; onUndoReceipt: (receipt: PurchaseReceipt, acquisitionId: number) => void; onRestoreReceipt: (receipt: PurchaseReceipt) => void; onLoadMoreReceipts: () => void; onRepeatErrand: (errand: Errand) => void; onDeleteErrand: (errand: Errand) => void }) {
+  return <div className="grid gap-5 xl:grid-cols-2"><Card><CardHeader><div className="mb-1 inline-flex items-center gap-2 text-xs font-semibold uppercase text-slate-500"><ReceiptText className="h-4 w-4" />Receipts</div><CardTitle>Receipt history</CardTitle><CardDescription>{receiptTotal} completed or ignored receipt{receiptTotal === 1 ? "" : "s"}. They stay available without occupying the review queue.</CardDescription></CardHeader><CardContent className="space-y-3">{receipts.length ? <div className="divide-y divide-slate-200 overflow-hidden rounded-lg border border-slate-200 bg-white">{receipts.map((receipt) => <ReceiptHistoryRow key={receipt.id} receipt={receipt} expanded={expandedReceiptId === receipt.id} busy={busy} items={items} draft={draft} onToggle={() => onToggleReceipt(receipt.id)} onDraft={onDraft} onMatch={onMatch} onTrack={onTrack} onUndo={onUndoReceipt} onRestore={() => onRestoreReceipt(receipt)} />)}</div> : <EmptyPanel icon={ReceiptText} title="No completed receipts yet" description="Confirmed and ignored receipts will appear here." compact />}{receiptHasMore ? <div className="flex justify-center"><Button variant="outline" onClick={onLoadMoreReceipts} disabled={busy}>{`Load more (${receipts.length} of ${receiptTotal})`}</Button></div> : null}</CardContent></Card><Card><CardHeader><div className="mb-1 inline-flex items-center gap-2 text-xs font-semibold uppercase text-slate-500"><ListChecks className="h-4 w-4" />Errands</div><CardTitle>Errand history</CardTitle><CardDescription>Repeat a past errand without rebuilding its destination.</CardDescription></CardHeader><CardContent>{errands.length ? <div className="divide-y divide-slate-200 overflow-hidden rounded-lg border border-slate-200 bg-white">{errands.map((errand) => <ErrandHistoryRow key={errand.id} errand={errand} busy={busy} onRepeat={() => onRepeatErrand(errand)} onDelete={() => onDeleteErrand(errand)} />)}</div> : <EmptyPanel icon={ListChecks} title="No completed errands yet" description="Completed and skipped errands will appear here." compact />}</CardContent></Card></div>;
 }
 
 function WhileOutPanel({
@@ -1409,7 +1482,7 @@ function ErrandEditor({ form, setForm, editing, busy, onSave, onCancel }: { form
 }
 
 function ReceiptQueueRow({ receipt, selected, busy, onReview, onIgnore }: { receipt: PurchaseReceipt; selected: boolean; busy: boolean; onReview: () => void; onIgnore: () => void }) {
-  const unresolved = receipt.items.filter((line) => !line.household_item_id && line.match_status !== "rejected").length;
+  const unresolved = receipt.decision_summary.undecided;
   return (
     <div className={`flex flex-col gap-3 p-4 transition sm:flex-row sm:items-center sm:justify-between ${selected ? "bg-indigo-50/60" : "bg-white hover:bg-slate-50/70"}`}>
       <div className="min-w-0">
@@ -1429,30 +1502,30 @@ function ReceiptQueueRow({ receipt, selected, busy, onReview, onIgnore }: { rece
 }
 
 function ReceiptReviewCard({ receipt, items, draft, busy, onDraft, onMatch, onTrack, onUndo, onConfirm, onIgnore, onClose }: { receipt: PurchaseReceipt; items: HouseholdItem[]; draft: ReceiptItemDraft | null; busy: boolean; onDraft: React.Dispatch<React.SetStateAction<ReceiptItemDraft | null>>; onMatch: (receipt: PurchaseReceipt, line: PurchaseReceipt["items"][number], value: string) => void; onTrack: () => void; onUndo: (receipt: PurchaseReceipt, acquisitionId: number) => void; onConfirm: (receipt: PurchaseReceipt) => void; onIgnore: (receipt: PurchaseReceipt) => void; onClose: () => void }) {
-  const decided = receipt.items.filter((line) => line.household_item_id || line.match_status === "rejected").length;
+  const { tracked, ignored, undecided, total } = receipt.decision_summary;
   return (
     <div className="rounded-xl border border-indigo-200 bg-white shadow-sm">
       <div className="flex flex-wrap items-start justify-between gap-3 border-b border-indigo-100 bg-indigo-50/50 p-4">
-        <div><p className="text-xs font-semibold uppercase tracking-wide text-indigo-700">Reviewing receipt</p><h3 className="mt-1 font-semibold text-slate-950">{receipt.merchant || "Unknown merchant"}</h3><p className="mt-1 text-xs text-slate-600">{decided} of {receipt.items.length} items classified{receiptTotal(receipt)}</p></div>
+        <div><p className="text-xs font-semibold uppercase tracking-wide text-indigo-700">Reviewing receipt</p><h3 className="mt-1 font-semibold text-slate-950">{receipt.merchant || "Unknown merchant"}</h3><p className="mt-1 text-xs text-slate-600">{tracked} tracked · {ignored} ignored · {undecided} undecided · {total} total{receiptTotal(receipt)}</p></div>
         <IconButton label="Close receipt review" onClick={onClose}><X className="h-4 w-4" /></IconButton>
       </div>
       <div className="p-4"><ReceiptItemsEditor receipt={receipt} items={items} draft={draft} busy={busy} onDraft={onDraft} onMatch={onMatch} onTrack={onTrack} onUndo={onUndo} /></div>
       <div className="sticky bottom-0 flex flex-wrap justify-end gap-2 border-t border-slate-200 bg-white/95 p-4 backdrop-blur">
         <Button variant="ghost" onClick={() => onIgnore(receipt)} disabled={busy}>Ignore receipt</Button>
-        <Button onClick={() => onConfirm(receipt)} disabled={busy}><Check className="h-4 w-4" />Confirm current matches</Button>
+        <Button onClick={() => onConfirm(receipt)} disabled={busy}><Check className="h-4 w-4" />Confirm receipt</Button>
       </div>
     </div>
   );
 }
 
-function ReceiptHistoryRow({ receipt, expanded, busy, items, draft, onToggle, onDraft, onMatch, onTrack, onUndo }: { receipt: PurchaseReceipt; expanded: boolean; busy: boolean; items: HouseholdItem[]; draft: ReceiptItemDraft | null; onToggle: () => void; onDraft: React.Dispatch<React.SetStateAction<ReceiptItemDraft | null>>; onMatch: (receipt: PurchaseReceipt, line: PurchaseReceipt["items"][number], value: string) => void; onTrack: () => void; onUndo: (receipt: PurchaseReceipt, acquisitionId: number) => void }) {
+function ReceiptHistoryRow({ receipt, expanded, busy, items, draft, onToggle, onDraft, onMatch, onTrack, onUndo, onRestore }: { receipt: PurchaseReceipt; expanded: boolean; busy: boolean; items: HouseholdItem[]; draft: ReceiptItemDraft | null; onToggle: () => void; onDraft: React.Dispatch<React.SetStateAction<ReceiptItemDraft | null>>; onMatch: (receipt: PurchaseReceipt, line: PurchaseReceipt["items"][number], value: string) => void; onTrack: () => void; onUndo: (receipt: PurchaseReceipt, acquisitionId: number) => void; onRestore: () => void }) {
   return (
     <div>
       <button type="button" onClick={onToggle} aria-expanded={expanded} className="flex w-full items-center justify-between gap-4 p-3 text-left transition hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-indigo-500">
         <span className="min-w-0"><span className="block truncate text-sm font-semibold text-slate-900">{receipt.merchant || "Unknown merchant"}</span><span className="mt-0.5 block text-xs text-slate-600">{receiptDate(receipt)} · {receipt.items.length} items{receiptTotal(receipt)}</span></span>
         <span className="flex shrink-0 items-center gap-2"><Badge variant="secondary">{receipt.parse_status}</Badge><span className="text-xs font-semibold text-indigo-700">{expanded ? "Hide" : "Details"}</span></span>
       </button>
-      {expanded ? <div className="border-t border-slate-100 bg-slate-50/40 p-4"><p className="mb-3 text-xs text-slate-600">Matches remain correctable. Changes to confirmed purchases update the learning history.</p><ReceiptItemsEditor receipt={receipt} items={items} draft={draft} busy={busy} onDraft={onDraft} onMatch={onMatch} onTrack={onTrack} onUndo={onUndo} /></div> : null}
+      {expanded ? <div className="border-t border-slate-100 bg-slate-50/40 p-4"><div className="mb-3 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between"><p className="text-xs text-slate-600">{receipt.parse_status === "ignored" ? "Restore this receipt if it was ignored by mistake." : "Matches remain correctable. Changes to confirmed purchases update the learning history."}</p>{receipt.parse_status === "ignored" ? <Button size="sm" variant="outline" onClick={onRestore} disabled={busy}><RotateCcw className="h-4 w-4" />Restore to review</Button> : null}</div><ReceiptItemsEditor receipt={receipt} items={items} draft={draft} busy={busy} onDraft={onDraft} onMatch={onMatch} onTrack={onTrack} onUndo={onUndo} /></div> : null}
     </div>
   );
 }
@@ -1592,6 +1665,7 @@ function toLocalInput(value: string | null) { if (!value) return ""; const date 
 function dueLabel(value: string) { const due = new Date(value); const today = new Date(); const days = Math.ceil((due.getTime() - today.getTime()) / 86_400_000); if (days < 0) return "Overdue"; if (days === 0) return "Due today"; if (days === 1) return "Due tomorrow"; return `Due ${due.toLocaleDateString(undefined, { month: "short", day: "numeric" })}`; }
 function receiptDate(receipt: PurchaseReceipt) { return new Date(receipt.purchased_at || receipt.created_at).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" }); }
 function receiptTotal(receipt: PurchaseReceipt) { return receipt.total_cents === null ? "" : ` · ${new Intl.NumberFormat(undefined, { style: "currency", currency: receipt.currency || "USD" }).format(receipt.total_cents / 100)}`; }
+function mergeReceipts(...groups: PurchaseReceipt[][]) { return Array.from(new Map(groups.flat().map((receipt) => [receipt.id, receipt])).values()); }
 function shortLocation(value: string) { const trimmed = value.trim(); if (!trimmed) return "Location"; try { const parsed = JSON.parse(trimmed) as { label?: string; address?: string }; return parsed.label || parsed.address || trimmed; } catch { return trimmed.split(",")[0] || trimmed; } }
 function formatRelativeTime(value: string) { const seconds = Math.max(0, Math.round((Date.now() - new Date(value).getTime()) / 1000)); if (seconds < 60) return "just now"; if (seconds < 3600) return `${Math.floor(seconds / 60)} min ago`; if (seconds < 86400) return `${Math.floor(seconds / 3600)} hr ago`; return new Date(value).toLocaleDateString(undefined, { month: "short", day: "numeric" }); }
 function selectedLocation(choice: string, locations: SavedLocation[], current: PlanningLocation | null, manual: string): PlanningLocation | null { if (choice === "current") return current; if (choice.startsWith("saved:")) { const location = locations.find((item) => item.id === Number(choice.slice(6))); return location ? { saved_location_id: location.id } : null; } return manual.trim() ? { label: "Starting point", address: manual.trim() } : null; }
