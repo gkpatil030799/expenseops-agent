@@ -13,6 +13,7 @@ from app.job_tenancy import (
 )
 from app.logging_config import log_event
 from app.services.gmail_promotion_ingestion_service import GmailPromotionIngestionService
+from app.services.job_lease_service import acquire_job_lease, release_job_lease
 from app.services.promotion_digest_service import PromotionDigestService
 from app.services.promotion_ranking_service import PromotionRankingService
 
@@ -33,15 +34,40 @@ def run(command: str) -> dict:
         for context in contexts:
             try:
                 enter_job_workspace(db, context.workspace_id)
-                if command == "sync":
-                    value = GmailPromotionIngestionService(db, context.settings).sync().__dict__
-                elif command == "rescore":
-                    value = {"rescored": PromotionRankingService(db).rescore_all()}
-                elif command == "digest":
-                    result = PromotionDigestService(db, context.settings).send()
-                    value = {"status": result.delivery_status, "offers": result.offers_included}
-                else:
-                    raise ValueError("unknown_command")
+                job_name = f"promotions_{command}"
+                lease = acquire_job_lease(
+                    db, workspace_id=context.workspace_id, job_name=job_name
+                )
+                if lease is None:
+                    log_event(
+                        logger,
+                        "promotion_workspace_job_skipped_overlap",
+                        workspace_id=context.workspace_id,
+                        command=command,
+                    )
+                    continue
+                try:
+                    if command == "sync":
+                        value = GmailPromotionIngestionService(
+                            db, context.settings
+                        ).sync().__dict__
+                    elif command == "rescore":
+                        value = {"rescored": PromotionRankingService(db).rescore_all()}
+                    elif command == "digest":
+                        result = PromotionDigestService(db, context.settings).send()
+                        value = {
+                            "status": result.delivery_status,
+                            "offers": result.offers_included,
+                        }
+                    else:
+                        raise ValueError("unknown_command")
+                finally:
+                    release_job_lease(
+                        db,
+                        workspace_id=context.workspace_id,
+                        job_name=job_name,
+                        lease_token=lease,
+                    )
                 results.append({"workspace_id": context.workspace_id, **value})
             except Exception as exc:
                 db.rollback()

@@ -8,6 +8,7 @@ from app.job_tenancy import (
     leave_job_workspace,
 )
 from app.logging_config import log_event
+from app.services.job_lease_service import acquire_job_lease, release_job_lease
 from app.services.weekly_replenishment_service import WeeklyReplenishmentService
 
 logger = logging.getLogger(__name__)
@@ -20,7 +21,28 @@ def main() -> None:
         for context in all_workspace_job_contexts(db, get_settings()):
             try:
                 enter_job_workspace(db, context.workspace_id)
-                run = WeeklyReplenishmentService(db).run()
+                lease = acquire_job_lease(
+                    db,
+                    workspace_id=context.workspace_id,
+                    job_name="weekly_replenishment",
+                    lease_seconds=3600,
+                )
+                if lease is None:
+                    log_event(
+                        logger,
+                        "weekly_replenishment_workspace_skipped_overlap",
+                        workspace_id=context.workspace_id,
+                    )
+                    continue
+                try:
+                    run = WeeklyReplenishmentService(db).run()
+                finally:
+                    release_job_lease(
+                        db,
+                        workspace_id=context.workspace_id,
+                        job_name="weekly_replenishment",
+                        lease_token=lease,
+                    )
                 print(
                     f"workspace {context.workspace_id} replenishment run "
                     f"{run.run_key}: {run.status}"

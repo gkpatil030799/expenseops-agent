@@ -8,6 +8,7 @@ from app.db import SessionLocal
 from app.job_tenancy import enter_job_workspace, gmail_job_contexts, leave_job_workspace
 from app.logging_config import log_event
 from app.services.gmail_receipt_service import GmailReceiptService
+from app.services.job_lease_service import acquire_job_lease, release_job_lease
 
 logger = logging.getLogger(__name__)
 
@@ -21,7 +22,29 @@ def run(max_results: int = 25) -> dict[str, int]:
         for context in gmail_job_contexts(db, settings):
             try:
                 enter_job_workspace(db, context.workspace_id)
-                result = GmailReceiptService(db, context.settings).sync(max_results=max_results)
+                lease = acquire_job_lease(
+                    db,
+                    workspace_id=context.workspace_id,
+                    job_name="gmail_receipts_sync",
+                )
+                if lease is None:
+                    log_event(
+                        logger,
+                        "gmail_receipt_workspace_sync_skipped_overlap",
+                        workspace_id=context.workspace_id,
+                    )
+                    continue
+                try:
+                    result = GmailReceiptService(db, context.settings).sync(
+                        max_results=max_results
+                    )
+                finally:
+                    release_job_lease(
+                        db,
+                        workspace_id=context.workspace_id,
+                        job_name="gmail_receipts_sync",
+                        lease_token=lease,
+                    )
                 totals["scanned"] += result.scanned
                 totals["ingested"] += result.ingested
                 totals["skipped"] += result.skipped

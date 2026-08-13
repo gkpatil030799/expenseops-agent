@@ -3,13 +3,14 @@ from __future__ import annotations
 import json
 import logging
 import re
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from hashlib import sha256
 from urllib.parse import quote
 
 from fastapi import APIRouter, Header, HTTPException, Query, Request
 from sqlalchemy import select
-from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
 from app.api.deps import DbSession
 from app.config import get_settings
@@ -19,6 +20,7 @@ from app.models import (
     GmailAccount,
     TelegramIdentity,
     TelegramLinkCode,
+    TelegramWebhookUpdate,
     TransactionStatus,
     utc_now,
 )
@@ -127,25 +129,112 @@ async def telegram_webhook(
 ) -> dict[str, bool]:
     _verify_webhook_secret(telegram_secret or secret)
     update = await request.json()
-    if _handle_telegram_connect(update, db):
+    update_record = _claim_telegram_update(db, update)
+    if update.get("update_id") is not None and update_record is None:
         return {"ok": True}
-    _resolve_telegram_tenant(update, db)
-    with telegram_split_state_store.use_db(db):
-        log_event(
-            logger,
-            "telegram_webhook_received",
-            has_callback=bool(update.get("callback_query")),
-            has_message=bool(update.get("message")),
-        )
-        callback_query = update.get("callback_query")
-        if callback_query:
-            return _handle_callback_query(callback_query, db)
+    try:
+        if _handle_telegram_connect(update, db):
+            _complete_telegram_update(db, update_record)
+            return {"ok": True}
+        _resolve_telegram_tenant(update, db)
+        if update_record is not None:
+            update_record.workspace_id = db.info.get("workspace_id")
+            update_record.user_id = db.info.get("user_id")
+        with telegram_split_state_store.use_db(db):
+            log_event(
+                logger,
+                "telegram_webhook_received",
+                has_callback=bool(update.get("callback_query")),
+                has_message=bool(update.get("message")),
+            )
+            callback_query = update.get("callback_query")
+            if callback_query:
+                result = _handle_callback_query(callback_query, db)
+                _complete_telegram_update(db, update_record)
+                return result
 
-        message = update.get("message")
-        if message:
-            if not _handle_receipt_attachment(message, db):
-                _handle_text_message(message, db)
-    return {"ok": True}
+            message = update.get("message")
+            if message:
+                if not _handle_receipt_attachment(message, db):
+                    _handle_text_message(message, db)
+        _complete_telegram_update(db, update_record)
+        return {"ok": True}
+    except Exception as exc:
+        _fail_telegram_update(db, update_record, exc)
+        raise
+
+
+def _claim_telegram_update(
+    db: DbSession, update: dict
+) -> TelegramWebhookUpdate | None:
+    raw_update_id = update.get("update_id")
+    if raw_update_id is None or not hasattr(db, "scalar"):
+        return None
+    try:
+        update_id = int(raw_update_id)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="Invalid Telegram update id") from None
+    now = utc_now()
+    existing = db.scalar(
+        select(TelegramWebhookUpdate).where(TelegramWebhookUpdate.update_id == update_id)
+    )
+    if existing is not None:
+        lease_active = existing.lease_expires_at and _aware_datetime(
+            existing.lease_expires_at
+        ) > now
+        if existing.state == "processed" or (existing.state == "processing" and lease_active):
+            return None
+        existing.state = "processing"
+        existing.attempt_count += 1
+        existing.lease_expires_at = now + timedelta(seconds=90)
+        existing.last_error = None
+        db.commit()
+        return existing
+    record = TelegramWebhookUpdate(
+        update_id=update_id,
+        payload_hash=sha256(
+            json.dumps(update, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest(),
+        lease_expires_at=now + timedelta(seconds=90),
+    )
+    db.add(record)
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        return None
+    db.refresh(record)
+    return record
+
+
+def _complete_telegram_update(
+    db: DbSession, record: TelegramWebhookUpdate | None
+) -> None:
+    if record is None:
+        return
+    record.state = "processed"
+    record.processed_at = utc_now()
+    record.lease_expires_at = None
+    record.last_error = None
+    db.commit()
+
+
+def _fail_telegram_update(
+    db: DbSession,
+    record: TelegramWebhookUpdate | None,
+    error: Exception,
+) -> None:
+    if record is None:
+        return
+    record_id = record.id
+    db.rollback()
+    current = db.get(TelegramWebhookUpdate, record_id)
+    if current is None:
+        return
+    current.state = "failed"
+    current.lease_expires_at = None
+    current.last_error = f"{type(error).__name__}: {error}"[:2000]
+    db.commit()
 
 
 def _verify_webhook_secret(incoming_secret: str | None) -> None:

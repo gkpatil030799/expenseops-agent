@@ -111,6 +111,29 @@ class TelegramIdentity(TenantScoped, Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
 
+class TelegramWebhookUpdate(Base):
+    __tablename__ = "telegram_webhook_updates"
+    __table_args__ = (UniqueConstraint("update_id", name="uq_telegram_webhook_update_id"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    update_id: Mapped[int] = mapped_column(Integer, index=True)
+    workspace_id: Mapped[int | None] = mapped_column(
+        ForeignKey("workspaces.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    user_id: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    payload_hash: Mapped[str] = mapped_column(String(64))
+    state: Mapped[str] = mapped_column(String(32), default="processing", index=True)
+    attempt_count: Mapped[int] = mapped_column(Integer, default=1)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, index=True
+    )
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    received_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    processed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
 class SplitwiseIntegration(TenantScoped, Base):
     __tablename__ = "splitwise_integrations"
     __table_args__ = (
@@ -514,6 +537,25 @@ class OutboxEvent(TenantScoped, Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class ScheduledJobLease(TenantScoped, Base):
+    __tablename__ = "scheduled_job_leases"
+    __table_args__ = (
+        UniqueConstraint(
+            "workspace_id", "job_name", name="uq_scheduled_job_lease_workspace_job"
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    workspace_id: Mapped[int] = mapped_column(
+        ForeignKey("workspaces.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    job_name: Mapped[str] = mapped_column(String(100), index=True)
+    lease_token: Mapped[str] = mapped_column(String(64))
+    lease_expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    acquired_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
 
 class AIInterpretationMemory(TenantScoped, Base):

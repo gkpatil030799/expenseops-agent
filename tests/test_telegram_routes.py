@@ -10,7 +10,7 @@ from app.api import telegram_routes
 from app.config import Settings
 from app.db import Base, get_db
 from app.main import app
-from app.models import ExpenseTransaction, PlaidItem
+from app.models import ExpenseTransaction, PlaidItem, TelegramWebhookUpdate
 from app.services.telegram_state_service import TelegramSessionStore
 
 
@@ -194,6 +194,33 @@ def test_telegram_webhook_allows_request_when_no_secret_configured(monkeypatch):
 
     assert response.status_code == 200
     assert response.json() == {"ok": True}
+
+
+def test_telegram_update_id_is_processed_once_and_failed_attempt_can_retry(
+    isolate_telegram_route_tests,
+):
+    factory = isolate_telegram_route_tests
+    update = {"update_id": 42, "message": {"message_id": 1, "text": "hello"}}
+    with factory() as db:
+        record = telegram_routes._claim_telegram_update(db, update)  # noqa: SLF001
+        assert record is not None
+        telegram_routes._complete_telegram_update(db, record)  # noqa: SLF001
+        assert telegram_routes._claim_telegram_update(db, update) is None  # noqa: SLF001
+        stored = db.query(TelegramWebhookUpdate).one()
+        assert stored.state == "processed"
+        assert stored.attempt_count == 1
+        assert stored.payload_hash
+
+    failed_update = {"update_id": 43, "message": {"message_id": 2, "text": "retry"}}
+    with factory() as db:
+        failed = telegram_routes._claim_telegram_update(db, failed_update)  # noqa: SLF001
+        telegram_routes._fail_telegram_update(  # noqa: SLF001
+            db, failed, RuntimeError("temporary")
+        )
+        retried = telegram_routes._claim_telegram_update(db, failed_update)  # noqa: SLF001
+        assert retried is not None
+        assert retried.attempt_count == 2
+        assert retried.last_error is None
 
 
 def test_telegram_webhook_allows_correct_secret(monkeypatch):
