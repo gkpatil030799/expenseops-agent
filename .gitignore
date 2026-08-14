@@ -5,6 +5,7 @@ __pycache__/
 .pytest_cache/
 .ruff_cache/
 expenseops.db
+expenseops-insights-demo.db
 *.sqlite
 *.sqlite3
 .DS_Store
