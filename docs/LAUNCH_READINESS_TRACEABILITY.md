@@ -39,7 +39,7 @@ visual-foundation changes began.
 | Phase 3 — identity and tenancy | Complete (code gate) | Tenant-safe uniqueness and schema parity; verified OIDC identity and invite recovery; owner/member API matrix; per-user provider ownership; PostgreSQL FORCE RLS policies; transaction-local request scope; explicit verified-webhook/trusted-worker bypass; shared database rate limiting. Live production activation and restore evidence remain Phase 7 operations gates. |
 | Phase 4 — financial correctness | Complete | Durable Splitwise create/update/delete journal, deterministic idempotency marker, atomic leases, pending-to-posted relationships, finalized-amount and removal reconciliation, valid-draft database invariant, visible Recovery UI, immutable actor/channel/attempt Activity, and atomic Splitwise confirmation outbox implemented |
 | Phase 5 — durable workers | Complete (code gate) | Production Plaid, Splitwise, Telegram inbound/delivery, Gmail receipt, and Gmail promotion work use durable leased processing; crash reconciliation, jittered provider-aware retries, dead letters/operator replay, cursor safety, overlap protection, and truthful job outcomes are covered. Railway worker activation remains a Phase 7 deployment gate. |
-| Phase 6 — product-domain correctness | In progress | Insights financial truth, Household verified-route freshness, receipt pagination/recovery, and Deals trust/reversibility are implemented; atomic batch receipt submission and the combined product-domain browser gate remain open |
+| Phase 6 — product-domain correctness | Complete (code gate) | Insights financial truth, Household verified-route freshness, atomic receipt review, pagination/recovery, and Deals trust/reversibility are implemented and pass the combined four-browser product-domain gate |
 | Phase 7 — security and operations | Not started | — |
 | Phase 8 — GA validation and re-audit | Not started | — |
 
@@ -118,7 +118,7 @@ The Phase 5 code gate is complete. Creating and observing the dedicated Railway 
 alerting on retry/dead-letter depth, and proving worker recovery in production remain explicit Phase 7
 operations gates; they are not implied by local code completion.
 
-## Phase 6 interim evidence
+## Phase 6 completion evidence
 
 | Check | Result |
 | --- | --- |
@@ -135,15 +135,19 @@ operations gates; they are not implied by local code completion.
 | Household partial-load resilience | Errands, staples, route, locations, predictions, receipt pages, and Gmail status load independently; a failed section no longer erases successful sections and a persistent partial-refresh warning provides Retry |
 | Receipt scale and truth | Active and historical receipt buckets are independently paginated with server-side totals and Load more controls; queue badges and Today recommendations use the complete active count |
 | Receipt decision safety | Every receipt exposes tracked, ignored, undecided, and total counts; confirming with undecided lines requires acknowledgement and reports a final decision summary |
+| Atomic receipt review | All staged match, ignore, defer, and create-item choices are validated and committed in one transaction; any invalid line rolls back the complete batch, so partial receipt classifications cannot leak through |
+| Concurrent-editor safety | Receipt batches include the observed `updated_at`; a stale submission returns HTTP 409 with refresh guidance instead of overwriting a newer decision |
 | Ignored receipt recovery | Ignore exposes immediate Undo, ignored records remain discoverable in History, and a guarded restore endpoint returns them to the review queue |
 | Undecided semantics | Selecting “decide later” now persists `unmatched`; it no longer silently classifies the line as rejected/non-household |
 | Deals pagination truth | The API returns total, saved total, limit, offset, and `has_more`; All deals exposes the complete count and a real Load more path instead of presenting the first 100 as complete |
 | Reversible deal controls | Save toggles to Unsave; merchant mute requires confirmation, exposes Undo, and has a durable unmute endpoint; dismissed deals retain their existing restore path |
 | Destination trust | Offer responses expose the canonical ingestion-time destination domain, trust state, and reason; unverified links remain behind a domain-specific review interstitial |
-| Regression gate | Backend 550 passed before Deals slice; focused Household/migration 35, Deals 34, and replenishment 29 passed; Ruff passed; frontend unit 21 passed; production build passed; lint had zero errors (repository-wide pre-existing warnings remain) |
+| Product-domain browser matrix | 20 passed across desktop Chromium, mobile Chromium, Firefox, and WebKit, covering atomic receipt submission, stale-route launch prevention, Deal trust/disconnected states, and reconciled Insights |
+| Regression gate | Full backend 571 passed; focused product-domain backend 126 passed; Ruff and diff checks passed; frontend unit 21 passed; production build passed; lint had zero errors (20 pre-existing warnings) |
 
-Phase 6 remains in progress until atomic batch receipt submission and the complete product-domain
-browser matrix pass their exit gates.
+Phase 6 is complete at the code gate. Backup/restore proof, production migration control,
+readiness behavior, observability, and other live-environment gates remain explicitly assigned to
+Phase 7.
 
 ## V1 validation evidence
 

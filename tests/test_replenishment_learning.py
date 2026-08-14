@@ -302,6 +302,118 @@ def test_unmatched_receipt_line_can_start_tracking_a_new_household_item(db):
     assert acquisition.user_confirmed is True
 
 
+def test_receipt_decisions_apply_and_confirm_atomically(db):
+    tracked = item(db, "Paper towels")
+    parsed = parsed_receipt(name="Paper towels")
+    parsed.items.append(
+        ParsedReceiptItem(
+            name="Birthday candles",
+            quantity=1,
+            unit="pack",
+            line_total_cents=399,
+            confidence=0.4,
+        )
+    )
+    service = ReceiptIngestionService(db, settings(), StaticParser(parsed))
+    receipt = service.ingest_text(
+        source="telegram",
+        source_external_id="atomic-decisions-1",
+        text="atomic receipt",
+    )
+
+    updated = service.apply_decisions(
+        receipt.id,
+        expected_updated_at=receipt.updated_at,
+        decisions=[
+            {
+                "line_id": receipt.items[0].id,
+                "decision": "match",
+                "household_item_id": tracked.id,
+            },
+            {"line_id": receipt.items[1].id, "decision": "reject"},
+        ],
+        confirm=True,
+        acknowledge_undecided=False,
+    )
+
+    assert updated.parse_status == "confirmed"
+    assert _receipt_dict(updated)["decision_summary"] == {
+        "tracked": 1,
+        "ignored": 1,
+        "undecided": 0,
+        "total": 2,
+    }
+    assert db.scalar(select(func.count(HouseholdItemAcquisition.id))) == 1
+
+
+def test_receipt_decision_batch_rolls_back_every_line_on_failure(db):
+    tracked = item(db, "Paper towels")
+    parsed = parsed_receipt(name="Paper towels")
+    parsed.items.append(
+        ParsedReceiptItem(
+            name="Dish soap",
+            quantity=1,
+            unit="bottle",
+            line_total_cents=599,
+            confidence=0.4,
+        )
+    )
+    service = ReceiptIngestionService(db, settings(), StaticParser(parsed))
+    receipt = service.ingest_text(
+        source="telegram",
+        source_external_id="atomic-decisions-rollback",
+        text="atomic receipt rollback",
+    )
+    second_line = receipt.items[1]
+
+    with pytest.raises(ValueError, match="Household item not found"):
+        service.apply_decisions(
+            receipt.id,
+            expected_updated_at=receipt.updated_at,
+            decisions=[
+                {"line_id": second_line.id, "decision": "reject"},
+                {
+                    "line_id": receipt.items[0].id,
+                    "decision": "match",
+                    "household_item_id": tracked.id + 9999,
+                },
+            ],
+            confirm=False,
+            acknowledge_undecided=False,
+        )
+
+    unchanged = service.get(receipt.id)
+    assert unchanged.parse_status == "needs_review"
+    assert unchanged.items[1].match_status == "unmatched"
+    assert db.scalar(select(func.count(HouseholdItemAcquisition.id))) == 0
+
+
+def test_receipt_batch_rejects_stale_editor_version(db):
+    service = ReceiptIngestionService(
+        db,
+        settings(),
+        StaticParser(parsed_receipt(name="Untracked pantry item", confidence=0.4)),
+    )
+    receipt = service.ingest_text(
+        source="telegram",
+        source_external_id="stale-receipt-editor",
+        text="stale receipt",
+    )
+    expected_updated_at = receipt.updated_at
+    service.update_line_match(receipt.id, receipt.items[0].id, None, rejected=True)
+
+    with pytest.raises(ValueError, match="receipt_changed_refresh_required"):
+        service.apply_decisions(
+            receipt.id,
+            expected_updated_at=expected_updated_at,
+            decisions=[{"line_id": receipt.items[0].id, "decision": "unmatched"}],
+            confirm=False,
+            acknowledge_undecided=False,
+        )
+
+    assert service.get(receipt.id).items[0].match_status == "rejected"
+
+
 def test_duplicate_external_id_is_idempotent_and_skips_reparse(db):
     item(db)
     parser = StaticParser(parsed_receipt())

@@ -417,6 +417,11 @@ Implement:
 
 ## Phase 6 — Product-domain correctness
 
+Status: **Complete (code gate).** Insights now reports reconciled, viewer-relative,
+single-currency financial truth; Household routes are verified and freshness-bound; receipt review
+decisions commit atomically; and Deals exposes truthful pagination, reversible controls, and explicit
+destination trust. Production observability and operational proof remain in Phase 7.
+
 ### Insights
 
 Use a single-currency view initially rather than silently introducing FX conversion.

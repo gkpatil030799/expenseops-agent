@@ -247,6 +247,7 @@ export type PurchaseReceipt = {
   failure_code: string | null;
   transaction_id: number | null;
   created_at: string;
+  updated_at: string;
   decision_summary: {
     tracked: number;
     ignored: number;

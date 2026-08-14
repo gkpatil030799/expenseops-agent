@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import hashlib
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from difflib import SequenceMatcher
 
 from sqlalchemy import select
@@ -106,7 +106,13 @@ class ReceiptIngestionService:
             raise ValueError("Receipt not found.")
         return receipt
 
-    def confirm(self, receipt_id: int, *, user_confirmed: bool = True) -> PurchaseReceipt:
+    def confirm(
+        self,
+        receipt_id: int,
+        *,
+        user_confirmed: bool = True,
+        commit: bool = True,
+    ) -> PurchaseReceipt:
         receipt = self.get(receipt_id)
         if receipt.parse_status == ReceiptParseStatus.IGNORED.value:
             raise ValueError("Ignored receipt cannot be confirmed.")
@@ -149,7 +155,87 @@ class ReceiptIngestionService:
         receipt.parse_status = ReceiptParseStatus.CONFIRMED.value
         receipt.confirmed_at = utc_now()
         receipt.updated_at = utc_now()
-        self.db.commit()
+        if commit:
+            self.db.commit()
+            return self.get(receipt.id)
+        self.db.flush()
+        return receipt
+
+    def apply_decisions(
+        self,
+        receipt_id: int,
+        *,
+        decisions: list[dict],
+        expected_updated_at: datetime,
+        confirm: bool,
+        acknowledge_undecided: bool,
+    ) -> PurchaseReceipt:
+        receipt = self.get(receipt_id)
+        if receipt.parse_status != ReceiptParseStatus.NEEDS_REVIEW.value:
+            raise ValueError("Only a receipt needing review can accept decisions.")
+        if _aware(receipt.updated_at) != _aware(expected_updated_at):
+            raise ValueError("receipt_changed_refresh_required")
+        line_ids = [int(decision.get("line_id") or 0) for decision in decisions]
+        if len(line_ids) != len(set(line_ids)):
+            raise ValueError("Each receipt line can be decided only once.")
+        known_line_ids = {line.id for line in receipt.items}
+        if any(line_id not in known_line_ids for line_id in line_ids):
+            raise ValueError("Receipt line not found.")
+        try:
+            for decision in decisions:
+                line_id = int(decision["line_id"])
+                action = str(decision["decision"])
+                if action == "match":
+                    household_item_id = decision.get("household_item_id")
+                    if household_item_id is None:
+                        raise ValueError("A household item is required for a match decision.")
+                    self.update_line_match(
+                        receipt_id,
+                        line_id,
+                        int(household_item_id),
+                        commit=False,
+                    )
+                elif action == "unmatched":
+                    self.update_line_match(receipt_id, line_id, None, commit=False)
+                elif action == "reject":
+                    self.update_line_match(
+                        receipt_id,
+                        line_id,
+                        None,
+                        rejected=True,
+                        commit=False,
+                    )
+                elif action == "create":
+                    self.track_line_as_new_household_item(
+                        receipt_id,
+                        line_id,
+                        name=str(decision.get("name") or ""),
+                        cadence_days=int(decision.get("cadence_days") or 30),
+                        replenishment_mode=str(decision.get("replenishment_mode") or "either"),
+                        commit=False,
+                    )
+                else:
+                    raise ValueError("Unsupported receipt decision.")
+            self.db.flush()
+            receipt.updated_at = utc_now()
+            if confirm:
+                undecided = sum(
+                    1
+                    for line in receipt.items
+                    if line.household_item_id is None
+                    and line.match_status
+                    not in {
+                        ReceiptItemMatchStatus.REJECTED.value,
+                        ReceiptItemMatchStatus.IRRELEVANT.value,
+                    }
+                )
+                if undecided and not acknowledge_undecided:
+                    raise ValueError("Acknowledge undecided receipt lines before confirming.")
+                self.confirm(receipt.id, commit=False)
+            self.db.commit()
+        except Exception:
+            self.db.rollback()
+            raise
         return self.get(receipt.id)
 
     def ignore(self, receipt_id: int) -> PurchaseReceipt:
@@ -177,6 +263,7 @@ class ReceiptIngestionService:
         household_item_id: int | None,
         *,
         rejected: bool = False,
+        commit: bool = True,
     ) -> PurchaseReceiptItem:
         receipt = self.get(receipt_id)
         line = next((item for item in receipt.items if item.id == line_id), None)
@@ -249,8 +336,11 @@ class ReceiptIngestionService:
             line.match_confidence = 1.0
         line.updated_at = utc_now()
         receipt.updated_at = utc_now()
-        self.db.commit()
-        self.db.refresh(line)
+        if commit:
+            self.db.commit()
+            self.db.refresh(line)
+        else:
+            self.db.flush()
         return line
 
     def track_line_as_new_household_item(
@@ -261,6 +351,7 @@ class ReceiptIngestionService:
         name: str,
         cadence_days: int,
         replenishment_mode: str = "either",
+        commit: bool = True,
     ) -> tuple[HouseholdItem, PurchaseReceiptItem]:
         receipt = self.get(receipt_id)
         line = next((item for item in receipt.items if item.id == line_id), None)
@@ -279,7 +370,12 @@ class ReceiptIngestionService:
         )
         self.db.add(item)
         self.db.flush()
-        updated_line = self.update_line_match(receipt.id, line.id, item.id)
+        updated_line = self.update_line_match(
+            receipt.id,
+            line.id,
+            item.id,
+            commit=commit,
+        )
         self.db.refresh(item)
         return item, updated_line
 
@@ -460,3 +556,7 @@ def _logical_purchase_key(
         ]
     )
     return hashlib.sha256(identity.encode("utf-8")).hexdigest()
+
+
+def _aware(value: datetime) -> datetime:
+    return value if value.tzinfo else value.replace(tzinfo=UTC)

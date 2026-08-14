@@ -63,8 +63,16 @@ async function mockSpendingInsights(page: Page) {
       previous_end_date: "2026-07-13",
       granularity: "week",
     },
-    summary: { total_cents: 128450, personal_cents: 74200, shared_cents: 43800, transaction_count: 31, average_cents: 4144 },
-    comparison: { total_cents: 116200, personal_cents: 68100, shared_cents: 39400, transaction_count: 28, average_cents: 4150 },
+    scope: {
+      currency: "USD",
+      available_currencies: ["USD"],
+      excluded_other_currency_transactions: 0,
+      spend_basis: "card",
+      viewer_share_identity_connected: true,
+      pending_transactions_excluded: true,
+    },
+    summary: { total_cents: 128450, personal_cents: 74200, shared_cents: 43800, classified_cents: 118000, unreviewed_cents: 10450, refund_cents: 0, transaction_count: 31, average_cents: 4144 },
+    comparison: { total_cents: 116200, personal_cents: 68100, shared_cents: 39400, classified_cents: 107500, unreviewed_cents: 8700, refund_cents: 0, transaction_count: 28, average_cents: 4150 },
     trend: [
       { period: "2026-07-13", total_cents: 17400, personal_cents: 11200, shared_cents: 5100, transactions: 5 },
       { period: "2026-07-20", total_cents: 28200, personal_cents: 16100, shared_cents: 9800, transactions: 7 },
@@ -104,7 +112,7 @@ async function mockSpendingInsights(page: Page) {
     accounts: ["Chase checking", "Freedom card"],
     categories: ["Food & Dining", "Health", "Home & Bills", "Lifestyle", "Transportation"],
     merchants: ["Aldi", "APS", "Costco", "Shell", "Target"],
-    data_quality: { unknown_share_transactions: 0, pending_review_cents: 12500, uncategorized_cents: 0, pending_transactions_excluded: true },
+    data_quality: { unknown_share_transactions: 0, unreviewed_cents: 10450, pending_review_cents: 10450, uncategorized_cents: 0, pending_transactions_excluded: true },
   } }));
 }
 
@@ -121,6 +129,8 @@ async function mockHouseholdOps(page: Page, options: { allClear?: boolean } = {}
     routing_provider: "google_routes",
     routing_is_optimized: true,
     route_url: "https://www.google.com/maps/dir/",
+    is_stale: false,
+    stale_reason: null,
     estimated_stop_minutes: 25,
     travel_duration_minutes: 31,
     distance_meters: 19312,
@@ -201,8 +211,10 @@ async function mockDeals(page: Page, options: { connected?: boolean; empty?: boo
       expires_at: "2099-12-31T23:59:59Z",
       expiry_precision: "exact",
       destination_url: "https://www.target.com/circle/o/target-circle/-/123",
+      destination_domain: "target.com",
       terms_summary: "Valid on one qualifying order.",
       trust_status: "trusted",
+      trust_reason: "Merchant domain verified.",
       status: "active",
       score: 91,
       saved: false,
@@ -223,8 +235,10 @@ async function mockDeals(page: Page, options: { connected?: boolean; empty?: boo
       expires_at: null,
       expiry_precision: "unknown",
       destination_url: "https://offers.example.net/weekend",
+      destination_domain: "offers.example.net",
       terms_summary: null,
       trust_status: "review",
+      trust_reason: "Destination domain was not verified.",
       status: "active",
       score: 77,
       saved: true,
@@ -232,7 +246,14 @@ async function mockDeals(page: Page, options: { connected?: boolean; empty?: boo
       source_count: 1,
     },
   ]);
-  await page.route("**/api/promotions?**", (route) => route.fulfill({ json: offers }));
+  await page.route("**/api/promotions?**", (route) => route.fulfill({ json: {
+    items: offers,
+    total: offers.length,
+    saved_total: offers.filter((offer) => Boolean((offer as { saved?: boolean }).saved)).length,
+    limit: 100,
+    offset: 0,
+    has_more: false,
+  } }));
   await page.route("**/api/promotions/categories", (route) => route.fulfill({ json: ["Groceries", "Shopping"] }));
   await page.route("**/api/integrations", (route) => route.fulfill({ json: {
     gmail: { connected: options.connected ?? true },
@@ -357,6 +378,99 @@ test("household tabs do not create mobile document overflow", async ({ page }) =
     scrollWidth: document.documentElement.scrollWidth,
   }));
   expect(dimensions.scrollWidth).toBeLessThanOrEqual(dimensions.clientWidth);
+});
+
+test("receipt review submits staged decisions as one atomic request", async ({ page }) => {
+  await mockExpenseDashboard(page);
+  await mockHouseholdOps(page, { allClear: true });
+  const receipt = {
+    id: 51,
+    source: "gmail",
+    merchant: "Aldi",
+    purchased_at: "2026-08-12T18:00:00Z",
+    total_cents: 1899,
+    currency: "USD",
+    parse_status: "needs_review",
+    parse_confidence: 0.94,
+    failure_code: null,
+    transaction_id: null,
+    created_at: "2026-08-12T18:01:00Z",
+    updated_at: "2026-08-12T18:01:00Z",
+    decision_summary: { tracked: 0, ignored: 0, undecided: 1, total: 1 },
+    items: [{ id: 501, raw_name: "Basmati Rice", normalized_name: "basmati rice", quantity: 1, unit: "bag", line_total_cents: 1899, household_item_id: null, household_item_name: null, acquisition_id: null, match_status: "unmatched", match_confidence: 0.4 }],
+  };
+  await page.route("**/api/household/items", (route) => route.fulfill({ json: [{ id: 71, name: "Rice", quantity: "1", unit: "bag", cadence_days: 30, replenishment_mode: "either", enabled: true, should_surface: false }] }));
+  await page.route("**/api/replenishment/receipts?**", (route) => {
+    const bucket = new URL(route.request().url()).searchParams.get("bucket");
+    return route.fulfill({ json: bucket === "active" ? { items: [receipt], total: 1, limit: 25, offset: 0, has_more: false } : { items: [], total: 0, limit: 25, offset: 0, has_more: false } });
+  });
+  let patchCalls = 0;
+  let submitted: Record<string, unknown> | null = null;
+  await page.route("**/api/replenishment/receipts/51/items/**", (route) => {
+    patchCalls += 1;
+    return route.fulfill({ status: 500, json: { detail: "Line-by-line writes are forbidden" } });
+  });
+  await page.route("**/api/replenishment/receipts/51/decisions", async (route) => {
+    submitted = route.request().postDataJSON() as Record<string, unknown>;
+    return route.fulfill({ json: {
+      ...receipt,
+      updated_at: "2026-08-12T18:02:00Z",
+      decision_summary: { tracked: 1, ignored: 0, undecided: 0, total: 1 },
+      items: [{ ...receipt.items[0], household_item_id: 71, household_item_name: "Rice", match_status: "matched", match_confidence: 1 }],
+    } });
+  });
+
+  await page.goto("/");
+  await page.getByRole("button", { name: "Household" }).click();
+  await page.getByRole("button", { name: /^Receipts/ }).click();
+  await page.getByRole("button", { name: "Review receipt" }).click();
+  await page.getByLabel("Match Basmati Rice").selectOption("71");
+  await expect(page.getByText(/Decision staged/)).toBeVisible();
+  expect(patchCalls).toBe(0);
+  await page.getByRole("button", { name: "Save 1 decision" }).click();
+  await expect(page.getByText("Saved 1 receipt decision together.")).toBeVisible();
+  expect(submitted).toEqual({
+    expected_updated_at: "2026-08-12T18:01:00Z",
+    decisions: [{ line_id: 501, decision: "match", household_item_id: 71 }],
+    finalize: "save",
+  });
+  expect(patchCalls).toBe(0);
+});
+
+test("a stale household route cannot expose a start link", async ({ page }) => {
+  await mockExpenseDashboard(page);
+  await mockHouseholdOps(page);
+  await page.route("**/api/household/errand-plans/latest", (route) => route.fulfill({ json: {
+    id: 7,
+    planned_for: null,
+    base_location: "Home, 123 W Main Street",
+    status: "planned",
+    routing_provider: "google_routes",
+    routing_is_optimized: true,
+    route_url: null,
+    is_stale: true,
+    stale_reason: "A saved location changed. Recalculate before starting.",
+    estimated_stop_minutes: 25,
+    travel_duration_minutes: 31,
+    distance_meters: 19312,
+    baseline_travel_duration_minutes: 18,
+    incremental_travel_duration_minutes: 13,
+    available_minutes: 75,
+    planning_mode: "while_out",
+    primary_destination: null,
+    final_destination: "Home, 123 W Main Street",
+    stop_count: 1,
+    stops: [{ id: 21, stop_order: 1, place_name: "CVS Pharmacy", place_address: "500 N Central Ave, Phoenix, AZ", errands: [], household_items: [] }],
+    created_at: "2026-08-12T12:00:00Z",
+    updated_at: "2026-08-12T12:00:00Z",
+  } }));
+
+  await page.goto("/");
+  await page.getByRole("button", { name: "Household" }).click();
+  await expect(page.getByText("Route needs recalculation before you leave.")).toBeVisible();
+  await page.getByRole("button", { name: "Errands", exact: true }).click();
+  await expect(page.getByText("Recalculate this route")).toBeVisible();
+  await expect(page.getByRole("link", { name: "Start route" })).toHaveCount(0);
 });
 
 test("account identity exposes settings without occupying primary navigation", async ({ page }) => {
@@ -659,8 +773,8 @@ test("insights tell a scoped, accessible spending story", async ({ page }) => {
 
   await expect(page.getByRole("heading", { name: "Spending Insights" })).toBeVisible();
   await expect(page.getByText("Jul 14–Aug 12, 2026", { exact: true })).toBeVisible();
-  await expect(page.getByText("Compared with Jun 14–Jul 13, 2026 · Displayed as USD; no currency conversion applied")).toBeVisible();
-  await expect(page.getByLabel("Spending overview").getByText("$1,285")).toBeVisible();
+  await expect(page.getByText("Compared with Jun 14–Jul 13, 2026 · USD only · no currency conversion")).toBeVisible();
+  await expect(page.getByLabel("Spending overview").getByText("$1,285", { exact: true })).toBeVisible();
   await expect(page.getByRole("heading", { name: "What changed" })).toBeVisible();
   await expect(page).toHaveScreenshot("spending-insights.png", { fullPage: true, timeout: 15_000 });
 
@@ -677,7 +791,7 @@ test("insights remain usable without horizontal document overflow", async ({ pag
   await mockSpendingInsights(page);
   await page.goto("/");
   await page.getByRole("button", { name: /insights/i, exact: true }).click();
-  await expect(page.getByLabel("Spending overview").getByText("$1,285")).toBeVisible();
+  await expect(page.getByLabel("Spending overview").getByText("$1,285", { exact: true })).toBeVisible();
 
   const dimensions = await page.evaluate(() => ({
     clientWidth: document.documentElement.clientWidth,

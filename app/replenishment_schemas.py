@@ -39,6 +39,7 @@ class ReceiptOut(BaseModel):
     failure_code: str | None
     transaction_id: int | None
     created_at: datetime
+    updated_at: datetime
     decision_summary: ReceiptDecisionSummary
     items: list[ReceiptLineOut]
 
@@ -52,6 +53,22 @@ class ReceiptLineNewHouseholdItemRequest(BaseModel):
     name: str = Field(..., min_length=1, max_length=255)
     cadence_days: int = Field(default=30, ge=1, le=3650)
     replenishment_mode: Literal["errand", "delivery", "either"] = "either"
+
+
+class ReceiptLineDecisionRequest(BaseModel):
+    line_id: int = Field(..., ge=1)
+    decision: Literal["match", "unmatched", "reject", "create"]
+    household_item_id: int | None = Field(default=None, ge=1)
+    name: str | None = Field(default=None, min_length=1, max_length=255)
+    cadence_days: int = Field(default=30, ge=1, le=3650)
+    replenishment_mode: Literal["errand", "delivery", "either"] = "either"
+
+
+class ReceiptBatchDecisionRequest(BaseModel):
+    expected_updated_at: datetime
+    decisions: list[ReceiptLineDecisionRequest] = Field(default_factory=list, max_length=500)
+    finalize: Literal["save", "confirm"] = "save"
+    acknowledge_undecided: bool = False
 
 
 class FeedbackRequest(BaseModel):

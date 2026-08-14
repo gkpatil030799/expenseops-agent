@@ -21,6 +21,7 @@ from app.replenishment_schemas import (
     AcquisitionCorrectionRequest,
     FeedbackRequest,
     GmailSyncRequest,
+    ReceiptBatchDecisionRequest,
     ReceiptLineMatchRequest,
     ReceiptLineNewHouseholdItemRequest,
     ReceiptOut,
@@ -187,6 +188,27 @@ def confirm_receipt(receipt_id: int, db: DbSession) -> dict:
         return _receipt_dict(ReceiptIngestionService(db).confirm(receipt_id))
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/receipts/{receipt_id}/decisions", response_model=ReceiptOut)
+def submit_receipt_decisions(
+    receipt_id: int,
+    payload: ReceiptBatchDecisionRequest,
+    db: DbSession,
+) -> dict:
+    try:
+        receipt = ReceiptIngestionService(db).apply_decisions(
+            receipt_id,
+            decisions=[decision.model_dump() for decision in payload.decisions],
+            expected_updated_at=payload.expected_updated_at,
+            confirm=payload.finalize == "confirm",
+            acknowledge_undecided=payload.acknowledge_undecided,
+        )
+        return _receipt_dict(receipt)
+    except ValueError as exc:
+        detail = str(exc)
+        status_code = 409 if detail == "receipt_changed_refresh_required" else 400
+        raise HTTPException(status_code=status_code, detail=detail) from exc
 
 
 @router.post("/receipts/{receipt_id}/ignore", response_model=ReceiptOut)
@@ -369,6 +391,7 @@ def _receipt_dict(receipt: PurchaseReceipt) -> dict:
         "failure_code": receipt.failure_code,
         "transaction_id": receipt.transaction_id,
         "created_at": receipt.created_at,
+        "updated_at": receipt.updated_at,
         "decision_summary": {
             "tracked": tracked,
             "ignored": ignored,

@@ -89,6 +89,15 @@ type ReceiptItemDraft = {
   replenishment_mode: HouseholdItem["replenishment_mode"];
 };
 
+type ReceiptLineDecisionDraft = {
+  line_id: number;
+  decision: "match" | "unmatched" | "reject" | "create";
+  household_item_id?: number;
+  name?: string;
+  cadence_days?: number;
+  replenishment_mode?: HouseholdItem["replenishment_mode"];
+};
+
 type HouseholdView = "today" | "errands" | "receipts" | "staples" | "history";
 
 type GmailReceiptSyncStatus = {
@@ -175,6 +184,7 @@ export function HouseholdOpsPage() {
   const [rememberPlace, setRememberPlace] = useState(true);
   const [learning, setLearning] = useState<ReplenishmentLearningSummary | null>(null);
   const [receiptItemDraft, setReceiptItemDraft] = useState<ReceiptItemDraft | null>(null);
+  const [receiptDecisionDrafts, setReceiptDecisionDrafts] = useState<Record<number, Record<number, ReceiptLineDecisionDraft>>>({});
   const [reviewingReceiptId, setReviewingReceiptId] = useState<number | null>(null);
   const [expandedHistoryReceiptId, setExpandedHistoryReceiptId] = useState<number | null>(null);
   const [plannedTripSignature, setPlannedTripSignature] = useState<string | null>(null);
@@ -454,8 +464,53 @@ export function HouseholdOpsPage() {
     });
   }
 
+  function stageReceiptMatch(
+    receipt: PurchaseReceipt,
+    line: PurchaseReceipt["items"][number],
+    value: string,
+  ) {
+    if (value === "create") {
+      setReceiptItemDraft({
+        receiptId: receipt.id,
+        lineId: line.id,
+        name: line.raw_name,
+        cadence_days: "30",
+        replenishment_mode: "either",
+      });
+      return;
+    }
+    if (receiptItemDraft?.lineId === line.id) setReceiptItemDraft(null);
+    const decision: ReceiptLineDecisionDraft = value === "reject"
+      ? { line_id: line.id, decision: "reject" }
+      : value
+        ? { line_id: line.id, decision: "match", household_item_id: Number(value) }
+        : { line_id: line.id, decision: "unmatched" };
+    setReceiptDecisionDrafts((current) => ({
+      ...current,
+      [receipt.id]: { ...(current[receipt.id] || {}), [line.id]: decision },
+    }));
+    setNotice("Decision staged. Save or confirm the receipt to apply all changes together.");
+  }
+
   async function trackReceiptItem() {
     if (!receiptItemDraft) return;
+    const receipt = receipts.find((candidate) => candidate.id === receiptItemDraft.receiptId);
+    if (receipt?.parse_status === "needs_review") {
+      const decision: ReceiptLineDecisionDraft = {
+        line_id: receiptItemDraft.lineId,
+        decision: "create",
+        name: receiptItemDraft.name.trim(),
+        cadence_days: Number(receiptItemDraft.cadence_days),
+        replenishment_mode: receiptItemDraft.replenishment_mode,
+      };
+      setReceiptDecisionDrafts((current) => ({
+        ...current,
+        [receipt.id]: { ...(current[receipt.id] || {}), [decision.line_id]: decision },
+      }));
+      setReceiptItemDraft(null);
+      setNotice(`${decision.name} will be created when you save or confirm this receipt.`);
+      return;
+    }
     await run(`receipt-new-item-${receiptItemDraft.lineId}`, async () => {
       await api(
         `/api/replenishment/receipts/${receiptItemDraft.receiptId}/items/${receiptItemDraft.lineId}/track`,
@@ -485,21 +540,62 @@ export function HouseholdOpsPage() {
   }
 
   async function receiptAction(receipt: PurchaseReceipt, action: "confirm" | "ignore") {
-    if (action === "confirm" && receipt.decision_summary.undecided > 0 && !window.confirm(
-      `${receipt.decision_summary.undecided} item${receipt.decision_summary.undecided === 1 ? " is" : "s are"} still undecided. Confirm this receipt anyway?`,
+    const preview = receiptDecisionSummary(receipt, receiptDecisionDrafts[receipt.id]);
+    if (action === "confirm" && preview.undecided > 0 && !window.confirm(
+      `${preview.undecided} item${preview.undecided === 1 ? " is" : "s are"} still undecided. Confirm this receipt anyway?`,
     )) return;
     await run(`receipt-${action}-${receipt.id}`, async () => {
-      await api(`/api/replenishment/receipts/${receipt.id}/${action}`, { method: "POST" });
+      const updated = action === "confirm"
+        ? await api<PurchaseReceipt>(`/api/replenishment/receipts/${receipt.id}/decisions`, {
+            method: "POST",
+            body: JSON.stringify({
+              expected_updated_at: receipt.updated_at,
+              decisions: Object.values(receiptDecisionDrafts[receipt.id] || {}),
+              finalize: "confirm",
+              acknowledge_undecided: preview.undecided > 0,
+            }),
+          })
+        : await api<PurchaseReceipt>(`/api/replenishment/receipts/${receipt.id}/ignore`, { method: "POST" });
       if (action === "confirm") {
-        const { tracked, ignored, undecided } = receipt.decision_summary;
+        const { tracked, ignored, undecided } = updated.decision_summary;
         setNotice(`Receipt confirmed: ${tracked} tracked, ${ignored} ignored, ${undecided} left undecided.`);
         setLastIgnoredReceipt(null);
       } else {
         setNotice("Receipt ignored. You can undo this action or restore it from History.");
         setLastIgnoredReceipt(receipt);
       }
+      setReceiptDecisionDrafts((current) => {
+        const next = { ...current };
+        delete next[receipt.id];
+        return next;
+      });
       setReviewingReceiptId(null);
       await loadHouseholdOps();
+    });
+  }
+
+  async function saveReceiptDecisions(receipt: PurchaseReceipt) {
+    const decisions = Object.values(receiptDecisionDrafts[receipt.id] || {});
+    if (!decisions.length) {
+      setNotice("No receipt decisions have changed.");
+      return;
+    }
+    await run(`receipt-save-${receipt.id}`, async () => {
+      const updated = await api<PurchaseReceipt>(`/api/replenishment/receipts/${receipt.id}/decisions`, {
+        method: "POST",
+        body: JSON.stringify({
+          expected_updated_at: receipt.updated_at,
+          decisions,
+          finalize: "save",
+        }),
+      });
+      setReceipts((current) => current.map((value) => value.id === updated.id ? updated : value));
+      setReceiptDecisionDrafts((current) => {
+        const next = { ...current };
+        delete next[receipt.id];
+        return next;
+      });
+      setNotice(`Saved ${decisions.length} receipt decision${decisions.length === 1 ? "" : "s"} together.`);
     });
   }
 
@@ -933,7 +1029,7 @@ export function HouseholdOpsPage() {
                     {receiptQueue.map((receipt) => <ReceiptQueueRow key={receipt.id} receipt={receipt} selected={reviewingReceiptId === receipt.id} busy={busy !== null} onReview={() => setReviewingReceiptId(receipt.id)} onIgnore={() => receiptAction(receipt, "ignore")} />)}
                   </div>
                   {receiptQueueHasMore ? <div className="flex justify-center"><Button variant="outline" onClick={() => loadMoreReceipts("active")} disabled={busy !== null}>{busy === "receipts-more-active" ? "Loading…" : `Load more (${receiptQueue.length} of ${receiptQueueTotal})`}</Button></div> : null}
-                  {receiptQueue.find((receipt) => receipt.id === reviewingReceiptId) ? <ReceiptReviewCard receipt={receiptQueue.find((receipt) => receipt.id === reviewingReceiptId)!} items={items} draft={receiptItemDraft} busy={busy !== null} onDraft={setReceiptItemDraft} onMatch={updateReceiptMatch} onTrack={trackReceiptItem} onUndo={undoReceiptAcquisition} onConfirm={(receipt) => receiptAction(receipt, "confirm")} onIgnore={(receipt) => receiptAction(receipt, "ignore")} onClose={() => setReviewingReceiptId(null)} /> : null}
+                  {receiptQueue.find((receipt) => receipt.id === reviewingReceiptId) ? <ReceiptReviewCard receipt={receiptQueue.find((receipt) => receipt.id === reviewingReceiptId)!} items={items} draft={receiptItemDraft} decisions={receiptDecisionDrafts[reviewingReceiptId!] || {}} busy={busy !== null} onDraft={setReceiptItemDraft} onMatch={stageReceiptMatch} onTrack={trackReceiptItem} onUndo={undoReceiptAcquisition} onSave={saveReceiptDecisions} onConfirm={(receipt) => receiptAction(receipt, "confirm")} onIgnore={(receipt) => receiptAction(receipt, "ignore")} onClose={() => setReviewingReceiptId(null)} /> : null}
                 </div> : <EmptyPanel icon={CheckCircle2} title="Receipt queue is clear" description="New Gmail or Telegram receipts will appear here when they need a decision." compact />}
 
               </section>
@@ -1501,17 +1597,19 @@ function ReceiptQueueRow({ receipt, selected, busy, onReview, onIgnore }: { rece
   );
 }
 
-function ReceiptReviewCard({ receipt, items, draft, busy, onDraft, onMatch, onTrack, onUndo, onConfirm, onIgnore, onClose }: { receipt: PurchaseReceipt; items: HouseholdItem[]; draft: ReceiptItemDraft | null; busy: boolean; onDraft: React.Dispatch<React.SetStateAction<ReceiptItemDraft | null>>; onMatch: (receipt: PurchaseReceipt, line: PurchaseReceipt["items"][number], value: string) => void; onTrack: () => void; onUndo: (receipt: PurchaseReceipt, acquisitionId: number) => void; onConfirm: (receipt: PurchaseReceipt) => void; onIgnore: (receipt: PurchaseReceipt) => void; onClose: () => void }) {
-  const { tracked, ignored, undecided, total } = receipt.decision_summary;
+function ReceiptReviewCard({ receipt, items, draft, decisions, busy, onDraft, onMatch, onTrack, onUndo, onSave, onConfirm, onIgnore, onClose }: { receipt: PurchaseReceipt; items: HouseholdItem[]; draft: ReceiptItemDraft | null; decisions: Record<number, ReceiptLineDecisionDraft>; busy: boolean; onDraft: React.Dispatch<React.SetStateAction<ReceiptItemDraft | null>>; onMatch: (receipt: PurchaseReceipt, line: PurchaseReceipt["items"][number], value: string) => void; onTrack: () => void; onUndo: (receipt: PurchaseReceipt, acquisitionId: number) => void; onSave: (receipt: PurchaseReceipt) => void; onConfirm: (receipt: PurchaseReceipt) => void; onIgnore: (receipt: PurchaseReceipt) => void; onClose: () => void }) {
+  const { tracked, ignored, undecided, total } = receiptDecisionSummary(receipt, decisions);
+  const changed = Object.keys(decisions).length;
   return (
     <div className="rounded-xl border border-indigo-200 bg-white shadow-sm">
       <div className="flex flex-wrap items-start justify-between gap-3 border-b border-indigo-100 bg-indigo-50/50 p-4">
         <div><p className="text-xs font-semibold uppercase tracking-wide text-indigo-700">Reviewing receipt</p><h3 className="mt-1 font-semibold text-slate-950">{receipt.merchant || "Unknown merchant"}</h3><p className="mt-1 text-xs text-slate-600">{tracked} tracked · {ignored} ignored · {undecided} undecided · {total} total{receiptTotal(receipt)}</p></div>
         <IconButton label="Close receipt review" onClick={onClose}><X className="h-4 w-4" /></IconButton>
       </div>
-      <div className="p-4"><ReceiptItemsEditor receipt={receipt} items={items} draft={draft} busy={busy} onDraft={onDraft} onMatch={onMatch} onTrack={onTrack} onUndo={onUndo} /></div>
+      <div className="p-4"><ReceiptItemsEditor receipt={receipt} items={items} draft={draft} decisions={decisions} busy={busy} onDraft={onDraft} onMatch={onMatch} onTrack={onTrack} onUndo={onUndo} /></div>
       <div className="sticky bottom-0 flex flex-wrap justify-end gap-2 border-t border-slate-200 bg-white/95 p-4 backdrop-blur">
         <Button variant="ghost" onClick={() => onIgnore(receipt)} disabled={busy}>Ignore receipt</Button>
+        <Button variant="outline" onClick={() => onSave(receipt)} disabled={busy || !changed}>Save {changed || ""} decision{changed === 1 ? "" : "s"}</Button>
         <Button onClick={() => onConfirm(receipt)} disabled={busy}><Check className="h-4 w-4" />Confirm receipt</Button>
       </div>
     </div>
@@ -1530,16 +1628,47 @@ function ReceiptHistoryRow({ receipt, expanded, busy, items, draft, onToggle, on
   );
 }
 
-function ReceiptItemsEditor({ receipt, items, draft, busy, onDraft, onMatch, onTrack, onUndo }: { receipt: PurchaseReceipt; items: HouseholdItem[]; draft: ReceiptItemDraft | null; busy: boolean; onDraft: React.Dispatch<React.SetStateAction<ReceiptItemDraft | null>>; onMatch: (receipt: PurchaseReceipt, line: PurchaseReceipt["items"][number], value: string) => void; onTrack: () => void; onUndo: (receipt: PurchaseReceipt, acquisitionId: number) => void }) {
+function ReceiptItemsEditor({ receipt, items, draft, decisions, busy, onDraft, onMatch, onTrack, onUndo }: { receipt: PurchaseReceipt; items: HouseholdItem[]; draft: ReceiptItemDraft | null; decisions?: Record<number, ReceiptLineDecisionDraft>; busy: boolean; onDraft: React.Dispatch<React.SetStateAction<ReceiptItemDraft | null>>; onMatch: (receipt: PurchaseReceipt, line: PurchaseReceipt["items"][number], value: string) => void; onTrack: () => void; onUndo: (receipt: PurchaseReceipt, acquisitionId: number) => void }) {
   if (!receipt.items.length) return <p className="text-sm text-slate-600">No line items were detected.</p>;
   return <div className="grid gap-3 sm:grid-cols-2">{receipt.items.map((line) => {
     const creatingThisItem = draft?.lineId === line.id;
-    return <div key={line.id} className={`grid gap-1 rounded-lg ${creatingThisItem ? "border border-indigo-200 bg-indigo-50/50 p-3" : ""}`}>
-      <label className="grid gap-1 text-xs font-medium text-slate-700"><span className="truncate">{line.raw_name}</span><select className={controlClass} value={creatingThisItem ? "create" : line.match_status === "rejected" ? "reject" : line.household_item_id?.toString() || ""} onChange={(event) => onMatch(receipt, line, event.target.value)} disabled={["ignored", "failed"].includes(receipt.parse_status) || busy} aria-label={`Match ${line.raw_name}`}><option value="">Unmatched — decide later</option>{items.map((item) => <option key={item.id} value={item.id}>Match to: {item.name}</option>)}<option value="create">＋ Track as a new household item…</option><option value="reject">Not a household item</option></select></label>
+    const staged = decisions?.[line.id];
+    const selectedValue = creatingThisItem || staged?.decision === "create"
+      ? "create"
+      : staged?.decision === "reject"
+        ? "reject"
+        : staged?.decision === "unmatched"
+          ? ""
+          : staged?.decision === "match"
+            ? String(staged.household_item_id)
+            : line.match_status === "rejected"
+              ? "reject"
+              : line.household_item_id?.toString() || "";
+    return <div key={line.id} className={`grid gap-1 rounded-lg ${creatingThisItem ? "border border-indigo-200 bg-indigo-50/50 p-3" : staged ? "border border-indigo-100 bg-indigo-50/30 p-3" : ""}`}>
+      <label className="grid gap-1 text-xs font-medium text-slate-700"><span className="truncate">{line.raw_name}</span><select className={controlClass} value={selectedValue} onChange={(event) => onMatch(receipt, line, event.target.value)} disabled={["ignored", "failed"].includes(receipt.parse_status) || busy} aria-label={`Match ${line.raw_name}`}><option value="">Unmatched — decide later</option>{items.map((item) => <option key={item.id} value={item.id}>Match to: {item.name}</option>)}<option value="create">＋ Track as a new household item…</option><option value="reject">Not a household item</option></select></label>
       {creatingThisItem && draft ? <div className="mt-2 grid gap-2"><p className="text-xs leading-5 text-slate-600">Give this staple a reusable name and starting cadence.</p><Input value={draft.name} onChange={(event) => onDraft((current) => current ? { ...current, name: event.target.value } : current)} placeholder="Household item name" /><div className="grid gap-2 sm:grid-cols-2"><label className="grid gap-1 text-xs font-medium text-slate-700">Starting cadence (days)<Input type="number" min="1" max="3650" value={draft.cadence_days} onChange={(event) => onDraft((current) => current ? { ...current, cadence_days: event.target.value } : current)} /></label><label className="grid gap-1 text-xs font-medium text-slate-700">How to replenish<select className={controlClass} value={draft.replenishment_mode} onChange={(event) => onDraft((current) => current ? { ...current, replenishment_mode: event.target.value as HouseholdItem["replenishment_mode"] } : current)}><option value="either">Errand or delivery</option><option value="errand">Errand</option><option value="delivery">Delivery</option></select></label></div><div className="flex justify-end gap-2"><Button size="sm" variant="outline" onClick={() => onDraft(null)}>Cancel</Button><Button size="sm" onClick={onTrack} disabled={!draft.name.trim() || !Number(draft.cadence_days) || busy}><Plus className="h-3.5 w-3.5" />Create & match</Button></div></div> : null}
       {line.acquisition_id ? <button type="button" className="justify-self-start rounded text-xs font-semibold text-rose-700 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500" onClick={() => onUndo(receipt, line.acquisition_id!)}>Undo learned purchase</button> : null}
     </div>;
   })}</div>;
+}
+
+function receiptDecisionSummary(
+  receipt: PurchaseReceipt,
+  decisions: Record<number, ReceiptLineDecisionDraft> = {},
+) {
+  let tracked = 0;
+  let ignored = 0;
+  let undecided = 0;
+  for (const line of receipt.items) {
+    const staged = decisions[line.id];
+    if (staged?.decision === "match" || staged?.decision === "create") tracked += 1;
+    else if (staged?.decision === "reject") ignored += 1;
+    else if (staged?.decision === "unmatched") undecided += 1;
+    else if (line.household_item_id !== null) tracked += 1;
+    else if (["rejected", "irrelevant"].includes(line.match_status)) ignored += 1;
+    else undecided += 1;
+  }
+  return { tracked, ignored, undecided, total: receipt.items.length };
 }
 
 function ItemEditor({ form, setForm, editing, busy, onSave, onCancel }: { form: ItemForm; setForm: React.Dispatch<React.SetStateAction<ItemForm>>; editing: boolean; busy: boolean; onSave: () => void; onCancel: () => void }) {
