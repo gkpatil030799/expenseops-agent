@@ -49,6 +49,10 @@ class User(Base):
     api_token_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    deletion_requested_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class Workspace(Base):
@@ -179,7 +183,10 @@ class AuthIdentity(Base):
 
 class AuthSession(Base):
     __tablename__ = "auth_sessions"
-    __table_args__ = (UniqueConstraint("token_hash", name="uq_auth_sessions_token_hash"),)
+    __table_args__ = (
+        UniqueConstraint("token_hash", name="uq_auth_sessions_token_hash"),
+        Index("ix_auth_sessions_user_expiry", "user_id", "revoked_at", "expires_at"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
@@ -246,6 +253,10 @@ class TelegramLinkCode(TenantScoped, Base):
 
 class AuditEvent(Base):
     __tablename__ = "audit_events"
+    __table_args__ = (
+        Index("ix_audit_events_workspace_created", "workspace_id", "created_at"),
+        Index("ix_audit_events_workspace_type_created", "workspace_id", "event_type", "created_at"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     workspace_id: Mapped[int] = mapped_column(
@@ -258,6 +269,31 @@ class AuditEvent(Base):
     request_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     metadata_json: Mapped[dict] = mapped_column(JSON, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class DataConsent(TenantScoped, Base):
+    __tablename__ = "data_consents"
+    __table_args__ = (
+        UniqueConstraint(
+            "workspace_id", "user_id", "purpose", name="uq_data_consent_workspace_user_purpose"
+        ),
+        Index("ix_data_consents_user_purpose", "user_id", "purpose"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    workspace_id: Mapped[int] = mapped_column(
+        ForeignKey("workspaces.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    purpose: Mapped[str] = mapped_column(String(64))
+    granted: Mapped[bool] = mapped_column(Boolean, default=False)
+    policy_version: Mapped[str] = mapped_column(String(32), default="2026-08-13")
+    granted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
 
 class TransactionStatus(StrEnum):
@@ -374,6 +410,9 @@ class PlaidItem(TenantScoped, Base):
 
 class PlaidWebhookEvent(Base):
     __tablename__ = "plaid_webhook_events"
+    __table_args__ = (
+        Index("ix_plaid_webhook_processing_received", "processing_status", "received_at"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     workspace_id: Mapped[int | None] = mapped_column(
@@ -415,6 +454,13 @@ class ExpenseTransaction(TenantScoped, Base):
             "(splitwise_payload_json IS NOT NULL "
             "AND trim(splitwise_payload_json) NOT IN ('', '{}'))",
             name="ck_expense_transactions_valid_shared_draft",
+        ),
+        Index(
+            "ix_expense_transactions_workspace_review",
+            "workspace_id",
+            "status",
+            "pending",
+            "date",
         ),
     )
 
@@ -475,6 +521,12 @@ class FinancialOperation(TenantScoped, Base):
         UniqueConstraint(
             "workspace_id", "idempotency_key", name="uq_financial_operation_idempotency"
         ),
+        Index(
+            "ix_financial_operations_workspace_state_updated",
+            "workspace_id",
+            "state",
+            "updated_at",
+        ),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
@@ -511,6 +563,12 @@ class OutboxEvent(TenantScoped, Base):
     __table_args__ = (
         UniqueConstraint(
             "workspace_id", "dedupe_key", name="uq_outbox_events_workspace_dedupe"
+        ),
+        Index(
+            "ix_outbox_events_workspace_delivery",
+            "workspace_id",
+            "state",
+            "available_at",
         ),
     )
 
@@ -648,6 +706,12 @@ class PurchaseReceipt(TenantScoped, Base):
             "source",
             "source_external_id",
             name="uq_receipt_workspace_source_external",
+        ),
+        Index(
+            "ix_purchase_receipts_workspace_queue",
+            "workspace_id",
+            "parse_status",
+            "created_at",
         ),
     )
 
@@ -883,6 +947,12 @@ class PromotionMessage(TenantScoped, Base):
         UniqueConstraint(
             "workspace_id", "gmail_message_id", name="uq_promotion_message_workspace_gmail"
         ),
+        Index(
+            "ix_promotion_messages_workspace_processing",
+            "workspace_id",
+            "parse_status",
+            "received_at",
+        ),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
@@ -913,6 +983,13 @@ class PromotionOffer(TenantScoped, Base):
     __table_args__ = (
         UniqueConstraint(
             "workspace_id", "campaign_fingerprint", name="uq_offer_workspace_campaign"
+        ),
+        Index(
+            "ix_promotion_offers_workspace_active_rank",
+            "workspace_id",
+            "status",
+            "saved",
+            "score",
         ),
     )
 

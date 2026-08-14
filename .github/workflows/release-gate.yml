@@ -1,0 +1,80 @@
+name: Release gate
+
+on:
+  pull_request:
+  push:
+    branches: [main, agent/launch-readiness]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-gate-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend:
+    runs-on: ubuntu-24.04
+    services:
+      postgres:
+        image: postgres:16.4-bookworm
+        env:
+          POSTGRES_USER: expenseops
+          POSTGRES_PASSWORD: expenseops-test
+          POSTGRES_DB: expenseops_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U expenseops -d expenseops_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    env:
+      DATABASE_URL: postgresql+psycopg://expenseops:expenseops-test@127.0.0.1:5432/expenseops_test
+      APP_SECRET_KEY: 1CwLk4SP7M7b9r0mvJtvXyHaWnBqAvDrMJe7EIHhsa8=
+      APP_SECRET_KEY_VERSION: ci-v1
+      TRUSTED_HOSTS: testserver,localhost,127.0.0.1
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11.13"
+          cache: pip
+      - run: python -m pip install --requirement requirements.lock
+      - run: python -m pip install --no-deps --editable .
+      - run: python -m pip install pytest==9.0.3 ruff==0.15.14 pip-audit==2.9.0
+      - run: alembic upgrade head
+      - run: alembic check
+      - run: ruff check app tests sandbox
+      - run: pytest -q
+      - run: pip-audit --requirement requirements.lock
+
+  frontend:
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20.19.4"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+      - run: npm run lint -- --max-warnings=20
+      - run: npm test -- --run
+      - run: npm run build
+      - run: npm audit --audit-level=high
+
+  container:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          tags: expenseops:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

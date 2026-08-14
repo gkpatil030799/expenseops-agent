@@ -139,7 +139,7 @@ class PlaidService:
             raise PlaidWebhookVerificationError("missing_plaid_verification_header")
 
         try:
-            from jose import jwt
+            import jwt
         except Exception as exc:  # pragma: no cover - dependency/config failure
             raise PlaidWebhookVerificationError("verification_unexpected_error") from exc
 
@@ -166,7 +166,7 @@ class PlaidService:
         try:
             claims = jwt.decode(
                 verification_header,
-                jwk,
+                jwt.PyJWK.from_dict(jwk).key,
                 algorithms=["ES256"],
                 options={"verify_aud": False},
             )

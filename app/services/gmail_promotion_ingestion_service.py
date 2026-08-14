@@ -15,6 +15,7 @@ from sqlalchemy.orm import Session
 from app.config import Settings, get_settings
 from app.job_tenancy import gmail_settings_for_session
 from app.models import GmailSyncCheckpoint, PromotionMessage, PromotionOffer, utc_now
+from app.services.data_lifecycle_service import gmail_consent_granted
 from app.services.gmail_client_service import GmailClient
 from app.services.managed_auth_service import record_audit_once
 from app.services.promotion_extraction_service import PromotionExtractionService
@@ -41,7 +42,15 @@ class GmailPromotionIngestionService:
 
     @property
     def configured(self) -> bool:
-        return bool(self.settings.promotions_enabled and self.gmail.configured)
+        return bool(
+            self.settings.promotions_enabled
+            and self.gmail.configured
+            and gmail_consent_granted(self.db, "gmail_promotions")
+            and (
+                not self.settings.promotions_llm_fallback_enabled
+                or gmail_consent_granted(self.db, "model_receipt_processing")
+            )
+        )
 
     def sync(self, *, max_results: int | None = None) -> PromotionSyncResult:
         if not self.configured:

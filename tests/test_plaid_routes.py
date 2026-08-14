@@ -68,9 +68,9 @@ def test_link_token_accepts_plaid_datetime_expiration(monkeypatch):
 
 
 def test_plaid_webhook_signature_verifies_generated_jwt_with_raw_body_hash():
+    import jwt
     from cryptography.hazmat.primitives import serialization
     from cryptography.hazmat.primitives.asymmetric import ec
-    from jose import jwt
 
     raw_body = b'{"webhook_type":"TRANSACTIONS","webhook_code":"SYNC_UPDATES_AVAILABLE"}'
     private_key = ec.generate_private_key(ec.SECP256R1())
@@ -107,9 +107,9 @@ def test_plaid_webhook_signature_verifies_generated_jwt_with_raw_body_hash():
 
 
 def test_plaid_webhook_signature_rejects_raw_body_hash_mismatch():
+    import jwt
     from cryptography.hazmat.primitives import serialization
     from cryptography.hazmat.primitives.asymmetric import ec
-    from jose import jwt
 
     raw_body = b'{"webhook_type":"TRANSACTIONS"}'
     private_key = ec.generate_private_key(ec.SECP256R1())
@@ -1124,9 +1124,9 @@ def _override_db(SessionLocal):
 
 
 def _signed_webhook_jwt(raw_body: bytes):
+    import jwt
     from cryptography.hazmat.primitives import serialization
     from cryptography.hazmat.primitives.asymmetric import ec
-    from jose import jwt
 
     private_key = ec.generate_private_key(ec.SECP256R1())
     private_pem = private_key.private_bytes(

@@ -19,6 +19,7 @@ def _safe_production_settings(**overrides):
         "database_url": "postgresql://expenseops@db.example/expenseops",
         "enable_postgres_rls": True,
         "rate_limit_backend": "postgres",
+        "support_email": "support@example.com",
         "_env_file": None,
     }
     values.update(overrides)
@@ -29,6 +30,23 @@ def test_health_route_is_public():
     response = TestClient(app).get("/health")
 
     assert response.status_code == 200
+    assert response.headers["x-content-type-options"] == "nosniff"
+    assert response.headers["x-frame-options"] == "DENY"
+
+
+def test_legal_pages_are_public_and_explain_customer_data_controls():
+    client = TestClient(app)
+
+    privacy = client.get("/legal/privacy")
+    terms = client.get("/legal/terms")
+
+    assert privacy.status_code == 200
+    assert "Information we process" in privacy.text
+    assert "does not sell" in privacy.text
+    assert "Retention and deletion" in privacy.text
+    assert terms.status_code == 200
+    assert "Third-party services" in terms.text
+    assert terms.headers["x-content-type-options"] == "nosniff"
 
 
 def test_readiness_reports_database_and_optional_configuration_without_secrets():
@@ -40,6 +58,34 @@ def test_readiness_reports_database_and_optional_configuration_without_secrets()
     assert payload["checks"]["database"] == "ok"
     assert "client_secret" not in str(payload).casefold()
     assert "api_key" not in str(payload).casefold()
+
+
+def test_production_readiness_returns_503_when_schema_is_stale(monkeypatch):
+    import app.main as main
+
+    monkeypatch.setattr(
+        main,
+        "settings",
+        _safe_production_settings(
+            auth_mode="oidc",
+            oidc_issuer="https://identity.example",
+            oidc_audience="expenseops",
+            oidc_client_id="client-id",
+            oidc_redirect_uri="https://expenseops.example/auth/callback",
+            trusted_hosts=["expenseops.example"],
+        ),
+    )
+    monkeypatch.setattr(
+        main.ScriptDirectory,
+        "from_config",
+        lambda _config: type("Script", (), {"get_current_head": lambda _self: "future-head"})(),
+    )
+
+    response = TestClient(app).get("/readiness", headers={"host": "testserver"})
+
+    assert response.status_code == 503
+    assert response.json()["status"] == "not_ready"
+    assert response.json()["checks"]["migration_current"] is False
 
 
 def test_dashboard_api_requires_auth_in_production(monkeypatch):

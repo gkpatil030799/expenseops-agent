@@ -4,7 +4,8 @@
 **Inputs:** Visual Aesthetics Audit, UX Launch-Readiness Audit, Backend Launch-Readiness Audit  
 **Release standard:** General availability for all customers  
 **Priority:** Visual aesthetics first, followed by UX integrity, backend correctness, reliability, security, and production operations  
-**Implementation status:** Phases 0–4 complete on `agent/launch-readiness`; live PostgreSQL RLS rollout remains a Phase 7 operations gate
+**Implementation status:** Phases 0–7 complete at the code gate on `agent/launch-readiness`;
+live backup/restore, alert-delivery, worker, and Railway rollout evidence remain production gates
 
 ## Strategy
 
@@ -468,6 +469,13 @@ Use a single-currency view initially rather than silently introducing FX convers
 - Household and Deals failures never appear as legitimate empty states.
 
 ## Phase 7 — Security, privacy, and production operations
+
+Status: **Complete (code gate); live operations gate open.** Security headers, safe errors,
+versioned encryption and rotation, privacy/consent/deletion flows, retention jobs, hardened
+readiness, operational metrics, reproducible dependency/container controls, and release CI are
+implemented. Railway PITR/backup activation, a timed restore drill, alert delivery tests, and
+service-specific migration-job/worker/retention configuration require live production evidence before
+GA.
 
 - Configure automated encrypted backups and PITR.
 - Declare RPO and RTO and complete a timed restore drill.

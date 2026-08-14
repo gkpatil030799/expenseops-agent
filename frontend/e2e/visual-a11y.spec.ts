@@ -166,6 +166,7 @@ async function mockHouseholdOps(page: Page, options: { allClear?: boolean } = {}
 }
 
 async function mockSettings(page: Page, role = "owner") {
+  const consents = { gmail_receipts: false, gmail_promotions: false, model_receipt_processing: false };
   await page.route("**/api/**", (route) => {
     const pathname = new URL(route.request().url()).pathname;
     if (pathname === "/api/workspaces") return route.fulfill({ json: [{ id: 1, name: "Patil household", role, current: true }] });
@@ -182,6 +183,20 @@ async function mockSettings(page: Page, role = "owner") {
       openai: { connected: true, managed_by: "application" },
     } });
     if (pathname === "/api/integrations/onboarding") return route.fulfill({ json: { complete: true } });
+    if (pathname === "/api/privacy" && route.request().method() === "GET") return route.fulfill({ json: {
+      policy_version: "2026-08-13",
+      privacy_url: "/legal/privacy",
+      terms_url: "/legal/terms",
+      support_email: "support@example.com",
+      retention: { authentication_sessions_days: 30, webhook_delivery_metadata_days: 30, completed_delivery_events_days: 30, promotion_messages_days: 180, ignored_receipts_days: 365, financial_audit_events_days: 2555 },
+      consents,
+      deletion: { confirmation: "DELETE gunjan@example.com", financial_history_retained_for_audit: true },
+    } });
+    if (pathname === "/api/privacy/consents" && route.request().method() === "POST") {
+      const payload = route.request().postDataJSON() as { purpose: keyof typeof consents; granted: boolean };
+      consents[payload.purpose] = payload.granted;
+      return route.fulfill({ json: { ...payload, policy_version: "2026-08-13" } });
+    }
     return route.fallback();
   });
   const groups = [{ id: 10, name: "Apartment", group_type: "home", simplify_by_default: true, invite_link: "https://www.splitwise.com/join/abc", members: [] }];
@@ -512,6 +527,25 @@ test("settings make workspace invitations and Splitwise group tools discoverable
   expect(blocking).toEqual([]);
   const dimensions = await page.evaluate(() => ({ clientWidth: document.documentElement.clientWidth, scrollWidth: document.documentElement.scrollWidth }));
   expect(dimensions.scrollWidth).toBeLessThanOrEqual(dimensions.clientWidth);
+});
+
+test("privacy settings expose consent, retention, legal, support, and guarded deletion", async ({ page }) => {
+  await mockExpenseDashboard(page);
+  await mockSettings(page);
+  await page.goto("/");
+  await page.getByRole("button", { name: "Open account menu for Gunjan Patil" }).click();
+  await page.getByRole("menuitem", { name: "Settings" }).click();
+  await chooseSettingsSection(page, "privacy", /Privacy & account/);
+
+  await expect(page.getByRole("heading", { name: "Privacy and account actions" })).toBeVisible();
+  await expect(page.getByRole("link", { name: "Privacy Policy" })).toHaveAttribute("href", "/legal/privacy");
+  await expect(page.getByRole("link", { name: "Terms of Service" })).toHaveAttribute("href", "/legal/terms");
+  await expect(page.getByRole("link", { name: "Contact support" })).toHaveAttribute("href", "mailto:support@example.com");
+  await expect(page.getByText("2555 days")).toBeVisible();
+  const deleteButton = page.getByRole("button", { name: "Delete my account" });
+  await expect(deleteButton).toBeDisabled();
+  await page.getByLabel(/Type DELETE gunjan@example.com/).fill("DELETE gunjan@example.com");
+  await expect(deleteButton).toBeEnabled();
 });
 
 test("settings label personal and workspace connections and hide owner actions from members", async ({ page }) => {

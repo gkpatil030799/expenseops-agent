@@ -25,6 +25,7 @@ from app.models import (
 )
 from app.rate_limit import rate_limiter
 from app.security import encrypt_secret
+from app.services.data_lifecycle_service import DataLifecycleService
 from app.services.managed_auth_service import record_audit, record_audit_once
 from app.services.oauth_state_service import (
     OAuthStateError,
@@ -125,6 +126,23 @@ def connect_gmail(
     settings = get_settings()
     if not settings.gmail_client_id or not settings.gmail_client_secret:
         raise HTTPException(status_code=400, detail="Gmail OAuth is not configured")
+    consent = DataLifecycleService(db, settings).consent_status(
+        workspace_id=workspace.id,
+        user_id=user.id,
+    )
+    required = {"gmail_receipts"}
+    if settings.promotions_enabled:
+        required.add("gmail_promotions")
+    if settings.receipt_parser_provider == "openai" or (
+        settings.promotions_enabled and settings.promotions_llm_fallback_enabled
+    ):
+        required.add("model_receipt_processing")
+    missing = sorted(purpose for purpose in required if not consent.get(purpose))
+    if missing:
+        raise HTTPException(
+            status_code=409,
+            detail="Review and accept the Gmail data-use choices before connecting.",
+        )
     rate_limiter.check(f"gmail-oauth:{user.id}", limit=10, window_seconds=600)
     record_audit(
         db,

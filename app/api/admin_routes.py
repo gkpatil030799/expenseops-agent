@@ -5,7 +5,17 @@ from sqlalchemy import func, select
 
 from app.api.deps import CurrentUser, DbSession
 from app.config import get_settings
-from app.models import AuditEvent, User, Workspace, WorkspaceMembership
+from app.models import (
+    AuditEvent,
+    FinancialOperation,
+    GmailSyncCheckpoint,
+    OutboxEvent,
+    ScheduledJobLease,
+    User,
+    Workspace,
+    WorkspaceMembership,
+    utc_now,
+)
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
 
@@ -26,9 +36,7 @@ WORKFLOW_EVENTS = (
 
 @router.get("/onboarding-funnel")
 def onboarding_funnel(db: DbSession, user: CurrentUser) -> dict:
-    allowed = {email.casefold() for email in get_settings().admin_user_emails}
-    if user.email.casefold() not in allowed:
-        raise HTTPException(status_code=404, detail="Not found")
+    _require_admin(user)
     event_types = (*FUNNEL_EVENTS, *WORKFLOW_EVENTS)
     counts = dict(
         db.execute(
@@ -61,3 +69,60 @@ def onboarding_funnel(db: DbSession, user: CurrentUser) -> dict:
         "total_users": db.scalar(select(func.count(User.id))) or 0,
         "total_workspaces": db.scalar(select(func.count(Workspace.id))) or 0,
     }
+
+
+@router.get("/operations")
+def operational_status(db: DbSession, user: CurrentUser) -> dict:
+    _require_admin(user)
+    now = utc_now()
+    pending_outbox = db.scalar(
+        select(func.count(OutboxEvent.id)).where(OutboxEvent.state.in_(("pending", "processing")))
+    ) or 0
+    failed_outbox = db.scalar(
+        select(func.count(OutboxEvent.id)).where(OutboxEvent.state == "dead_letter")
+    ) or 0
+    oldest_pending = db.scalar(
+        select(func.min(OutboxEvent.created_at)).where(
+            OutboxEvent.state.in_(("pending", "processing"))
+        )
+    )
+    ambiguous_financial = db.scalar(
+        select(func.count(FinancialOperation.id)).where(
+            FinancialOperation.state.in_(("ambiguous", "failed", "dead_letter"))
+        )
+    ) or 0
+    expired_leases = db.scalar(
+        select(func.count(ScheduledJobLease.id)).where(ScheduledJobLease.lease_expires_at < now)
+    ) or 0
+    gmail_freshness = db.scalar(select(func.max(GmailSyncCheckpoint.updated_at)))
+    queue_age_seconds = (
+        max(0, int((now - _aware(oldest_pending)).total_seconds())) if oldest_pending else 0
+    )
+    status = "degraded" if failed_outbox or ambiguous_financial else "healthy"
+    return {
+        "status": status,
+        "queue": {
+            "pending": pending_outbox,
+            "dead_letter": failed_outbox,
+            "oldest_pending_age_seconds": queue_age_seconds,
+        },
+        "financial_operations": {"attention_required": ambiguous_financial},
+        "scheduled_jobs": {"expired_leases": expired_leases},
+        "gmail": {"latest_checkpoint_at": gmail_freshness},
+        "alert_thresholds": {
+            "queue_age_seconds": 300,
+            "dead_letter_count": 1,
+            "financial_attention_count": 1,
+            "sync_freshness_seconds": 7200,
+        },
+    }
+
+
+def _require_admin(user: User) -> None:
+    allowed = {email.casefold() for email in get_settings().admin_user_emails}
+    if user.email.casefold() not in allowed:
+        raise HTTPException(status_code=404, detail="Not found")
+
+
+def _aware(value):
+    return value if value.tzinfo else value.replace(tzinfo=utc_now().tzinfo)

@@ -25,6 +25,13 @@ class Settings(BaseSettings):
     )
     database_url: str = "sqlite:///./expenseops.db"
     app_secret_key: str = ""
+    app_secret_key_version: str = "v1"
+    app_secret_key_previous: Annotated[list[str], NoDecode] = Field(default_factory=list)
+    trusted_hosts: Annotated[list[str], NoDecode] = Field(
+        default_factory=lambda: ["localhost", "127.0.0.1", "testserver"]
+    )
+    enforce_https: bool = True
+    support_email: str = "support@expenseops.invalid"
     dashboard_username: str = ""
     dashboard_password: str = ""
     dashboard_api_token: str = ""
@@ -49,6 +56,12 @@ class Settings(BaseSettings):
     database_pool_recycle_seconds: int = Field(default=900, ge=30, le=86400)
     database_statement_timeout_ms: int = Field(default=15_000, ge=1000, le=300_000)
     database_lock_timeout_ms: int = Field(default=5_000, ge=100, le=60_000)
+    retention_auth_session_days: int = Field(default=30, ge=1, le=365)
+    retention_webhook_days: int = Field(default=30, ge=1, le=365)
+    retention_completed_outbox_days: int = Field(default=30, ge=1, le=365)
+    retention_promotion_message_days: int = Field(default=180, ge=30, le=730)
+    retention_ignored_receipt_days: int = Field(default=365, ge=30, le=2555)
+    retention_audit_event_days: int = Field(default=2555, ge=365, le=3650)
 
     allow_posting_pending_transactions: bool = False
 
@@ -136,6 +149,8 @@ class Settings(BaseSettings):
         "plaid_products",
         "oidc_algorithms",
         "admin_user_emails",
+        "app_secret_key_previous",
+        "trusted_hosts",
         mode="before",
     )
     @classmethod
@@ -159,6 +174,8 @@ class Settings(BaseSettings):
         errors: list[str] = []
         if not self.app_secret_key or self.app_secret_key == "paste-a-generated-fernet-key-here":
             errors.append("APP_SECRET_KEY must be configured for production.")
+        if not self.app_secret_key_version.strip():
+            errors.append("APP_SECRET_KEY_VERSION must be configured for production.")
         if self.allow_unverified_plaid_webhooks_for_local_test:
             errors.append(
                 "ALLOW_UNVERIFIED_PLAID_WEBHOOKS_FOR_LOCAL_TEST must be false in production."
@@ -174,6 +191,12 @@ class Settings(BaseSettings):
 
         errors: list[str] = []
         errors.extend(self._production_database_errors())
+        if not self.trusted_hosts or "*" in self.trusted_hosts:
+            errors.append("TRUSTED_HOSTS must explicitly list production hosts.")
+        if not self.enforce_https:
+            errors.append("ENFORCE_HTTPS must be true in production.")
+        if not self.support_email.strip() or self.support_email.endswith(".invalid"):
+            errors.append("SUPPORT_EMAIL must be a monitored address in production.")
         if not self.telegram_webhook_secret:
             errors.append("TELEGRAM_WEBHOOK_SECRET must be configured for production.")
         if self.auth_mode != "oidc":

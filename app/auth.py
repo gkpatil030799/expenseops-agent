@@ -37,6 +37,8 @@ PUBLIC_EXACT_PATHS = {
     "/plaid/webhook",
     "/auth/login",
     "/auth/callback",
+    "/legal/privacy",
+    "/legal/terms",
 }
 
 

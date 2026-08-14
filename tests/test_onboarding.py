@@ -1,12 +1,11 @@
 from __future__ import annotations
 
-import hashlib
 from datetime import UTC, datetime, timedelta
 
+import jwt
 import pytest
 from fastapi import HTTPException, Request
 from fastapi.testclient import TestClient
-from jose import jwt
 from sqlalchemy import create_engine, func, select
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
@@ -35,6 +34,7 @@ from app.rate_limit import InMemoryRateLimiter
 from app.services.managed_auth_service import (
     OIDCValidationError,
     OIDCVerifier,
+    calculate_oidc_at_hash,
     provision_oidc_identity,
     record_audit,
 )
@@ -44,6 +44,8 @@ from app.services.oauth_state_service import (
     create_oauth_state,
 )
 from app.tenancy import TenantContext, ensure_default_tenancy, hash_api_token, set_session_tenant
+
+_TEST_SIGNING_KEY = "test-signing-key-that-is-at-least-32-bytes"
 
 
 @pytest.fixture
@@ -150,11 +152,11 @@ def _identity_token(**overrides) -> str:
         "exp": datetime.now(UTC) + timedelta(minutes=5),
     }
     claims.update(overrides)
-    return jwt.encode(claims, "test-signing-key", algorithm="HS256")
+    return jwt.encode(claims, _TEST_SIGNING_KEY, algorithm="HS256")
 
 
 def _verifier() -> OIDCVerifier:
-    return OIDCVerifier(_oidc_settings(), key_resolver=lambda _token: "test-signing-key")
+    return OIDCVerifier(_oidc_settings(), key_resolver=lambda _token: _TEST_SIGNING_KEY)
 
 
 def test_first_login_provisions_user_personal_workspace_and_owner(database):
@@ -184,7 +186,7 @@ def test_unverified_oidc_email_is_rejected(database):
 
 def test_oidc_at_hash_is_validated_when_access_token_is_available():
     access_token = "provider-access-token"
-    token = _identity_token(at_hash=jwt.calculate_at_hash(access_token, hashlib.sha256))
+    token = _identity_token(at_hash=calculate_oidc_at_hash(access_token, "HS256"))
 
     claims = _verifier().validate(token, access_token=access_token)
 

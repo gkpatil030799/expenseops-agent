@@ -20,6 +20,7 @@ def _safe_production_settings(**overrides):
         "database_url": "postgresql://expenseops@db.example/expenseops",
         "enable_postgres_rls": True,
         "rate_limit_backend": "postgres",
+        "support_email": "support@example.com",
         "_env_file": None,
     }
     values.update(overrides)
@@ -96,6 +97,13 @@ def test_production_config_rejects_local_auth_mode():
     settings = _safe_production_settings(auth_mode="local")
 
     with pytest.raises(ValueError, match="AUTH_MODE"):
+        settings.validate_web_runtime()
+
+
+def test_production_config_requires_a_real_support_address():
+    settings = _safe_production_settings(support_email="support@expenseops.invalid")
+
+    with pytest.raises(ValueError, match="SUPPORT_EMAIL"):
         settings.validate_web_runtime()
 
 

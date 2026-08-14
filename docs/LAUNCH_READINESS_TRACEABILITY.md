@@ -40,7 +40,7 @@ visual-foundation changes began.
 | Phase 4 — financial correctness | Complete | Durable Splitwise create/update/delete journal, deterministic idempotency marker, atomic leases, pending-to-posted relationships, finalized-amount and removal reconciliation, valid-draft database invariant, visible Recovery UI, immutable actor/channel/attempt Activity, and atomic Splitwise confirmation outbox implemented |
 | Phase 5 — durable workers | Complete (code gate) | Production Plaid, Splitwise, Telegram inbound/delivery, Gmail receipt, and Gmail promotion work use durable leased processing; crash reconciliation, jittered provider-aware retries, dead letters/operator replay, cursor safety, overlap protection, and truthful job outcomes are covered. Railway worker activation remains a Phase 7 deployment gate. |
 | Phase 6 — product-domain correctness | Complete (code gate) | Insights financial truth, Household verified-route freshness, atomic receipt review, pagination/recovery, and Deals trust/reversibility are implemented and pass the combined four-browser product-domain gate |
-| Phase 7 — security and operations | Not started | — |
+| Phase 7 — security and operations | Complete (code gate); live operations gate open | Hardened readiness and HTTP security, versioned secret rotation, privacy/consent/deletion and retention, operational queue metrics, migration-controlled non-root container, exact runtime lock, dependency audit, release CI, and production runbook are implemented. Railway backup/PITR activation, restore timing, alert delivery, and service rollout remain unproven live gates. |
 | Phase 8 — GA validation and re-audit | Not started | — |
 
 ## Release rule
@@ -148,6 +148,29 @@ operations gates; they are not implied by local code completion.
 Phase 6 is complete at the code gate. Backup/restore proof, production migration control,
 readiness behavior, observability, and other live-environment gates remain explicitly assigned to
 Phase 7.
+
+## Phase 7 completion evidence
+
+| Check | Result |
+| --- | --- |
+| Migration ownership | The container start command only launches the web process; migrations are verified in CI and assigned to a dedicated owner-credential deployment job, avoiding replica and cron migration races while keeping DDL credentials out of runtime services |
+| Readiness truth | `/readiness` resolves the current Alembic head dynamically and returns HTTP 503 in production for an unavailable database, stale schema, unsafe auth, missing shared rate limiting, incomplete RLS/FORCE RLS, a superuser/BYPASSRLS runtime role, wildcard hosts, or disabled HTTPS |
+| HTTP boundary | Explicit trusted hosts, production HTTPS redirects, HSTS, CSP, Permissions Policy, Referrer Policy, `nosniff`, frame denial, API no-store, correlation IDs, and secret-safe 500 responses are enforced centrally |
+| Encryption rotation | Ciphertext carries a key version; current, previous-version, and legacy ciphertext remain readable during rotation; a trusted global job re-encrypts Gmail, Splitwise, Plaid, and OAuth credentials |
+| Privacy choices | Settings exposes receipt, promotion, and model-processing consent; Gmail connection requires applicable persisted consent; Privacy Policy, Terms, support, retention expectations, and guarded account deletion are customer-visible |
+| Account deletion | Exact typed confirmation revokes sessions and provider credentials, removes imported content only the user could access, anonymizes identity, retains minimized financial/audit integrity history, preserves shared records for remaining members, and blocks deletion until a shared-workspace owner transfers ownership |
+| Retention | A daily, failure-truthful job removes expired sessions, OAuth/link/webhook state, completed outbox payloads, old promotions/ignored receipts/audit events, and rate-limit windows according to bounded configuration |
+| Operational visibility | The protected operations endpoint reports pending/dead outbox depth and age, financial recovery states, expired leases, Gmail freshness, and documented warning/critical thresholds |
+| Database controls | Pool size/overflow/acquisition/recycle and PostgreSQL statement/lock timeouts are configurable; high-volume tenant/date/state access paths have composite indexes |
+| Reproducibility | Exact Python runtime requirements, an npm lock, pinned runtime image versions, a non-root container, and a GitHub release gate cover lint, tests, PostgreSQL migration parity, dependency audits, frontend build, and container build |
+| Dependency security | Python and npm advisory scans found zero known vulnerabilities after replacing the unmaintained JWT dependency and upgrading affected cryptography, framework, settings, and multipart packages |
+| Privacy browser matrix | Privacy, legal, support, retention, consent, and guarded-deletion UX passed desktop Chromium, mobile Chromium, Firefox, and WebKit |
+| Operations runbook | RPO 5 minutes with healthy PITR, fallback RPO 24 hours, RTO 4 hours, release/rollback, quarterly restore drill, key rotation, retention, alert thresholds, and incident basics are documented |
+| Regression gate | Backend 582 passed; Ruff and diff checks passed; frontend unit 21 passed; lint had zero errors (20 pre-existing warnings); production build passed; Python and npm dependency audits reported zero known vulnerabilities; focused privacy browser matrix 4 passed |
+
+Phase 7 is complete only at the code gate. GA remains blocked until Railway backups and PITR are
+enabled, a timed restore drill proves the declared RPO/RTO, alert delivery is tested, and the
+dedicated migration job, outbox worker, and retention cron are observed successfully in production.
 
 ## V1 validation evidence
 

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import { Brain, Building2, CheckCircle2, ChevronRight, Circle, Copy, ExternalLink, Link2, MessageCircle, Pencil, Plus, Settings2, Shield, SlidersHorizontal, Unplug, UserMinus, UserRound, Users, UsersRound, WalletCards } from "lucide-react";
+import { Brain, Building2, CheckCircle2, ChevronRight, Circle, Copy, ExternalLink, Link2, MessageCircle, Pencil, Plus, Settings2, Shield, SlidersHorizontal, Trash2, Unplug, UserMinus, UserRound, Users, UsersRound, WalletCards } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -23,6 +23,16 @@ type Integrations = {
   openai: { connected: boolean; managed_by: string };
 };
 type OnboardingStatus = { complete: boolean };
+type ConsentPurpose = "gmail_receipts" | "gmail_promotions" | "model_receipt_processing";
+type PrivacySummary = {
+  policy_version: string;
+  privacy_url: string;
+  terms_url: string;
+  support_email: string;
+  retention: Record<string, number>;
+  consents: Record<ConsentPurpose, boolean>;
+  deletion: { confirmation: string; financial_history_retained_for_audit: boolean };
+};
 type SettingsSection = "account" | "workspace" | "personal" | "workspace-connections" | "expense" | "splitwise" | "learning" | "privacy";
 
 const settingsSections: Array<{ value: SettingsSection; label: string; description: string; icon: typeof Settings2 }> = [
@@ -48,6 +58,8 @@ export function AccountSettingsPage({ context, splitwiseTools, learnedBehaviorTo
   const [message, setMessage] = useState("");
   const [integrationError, setIntegrationError] = useState("");
   const [onboarding, setOnboarding] = useState<OnboardingStatus | null>(null);
+  const [privacy, setPrivacy] = useState<PrivacySummary | null>(null);
+  const [deletionConfirmation, setDeletionConfirmation] = useState("");
   const [section, setSection] = useState<SettingsSection>("account");
   const [busyAction, setBusyAction] = useState<string | null>(null);
   const pendingActions = useRef(new Set<string>());
@@ -90,6 +102,7 @@ export function AccountSettingsPage({ context, splitwiseTools, learnedBehaviorTo
       const supportId = error instanceof ApiError ? ` Support ID: ${error.correlationId}` : "";
       setIntegrationError(`${apiErrorMessage(error, "Settings could not be loaded.")}${supportId}`);
     });
+    void api<PrivacySummary>("/api/privacy").then(setPrivacy).catch(() => undefined);
   }, []);
 
   useEffect(() => {
@@ -173,6 +186,29 @@ export function AccountSettingsPage({ context, splitwiseTools, learnedBehaviorTo
         method: "POST",
       });
       window.location.assign(value.authorization_url);
+    });
+  }
+
+  async function updateConsent(purpose: ConsentPurpose, granted: boolean) {
+    await performAction(`consent-${purpose}`, async () => {
+      await api("/api/privacy/consents", {
+        method: "POST",
+        body: JSON.stringify({ purpose, granted }),
+      });
+      const updated = await api<PrivacySummary>("/api/privacy");
+      setPrivacy(updated);
+    }, granted ? "Data-use choice saved." : "Data-use permission withdrawn.");
+  }
+
+  async function deleteAccount() {
+    if (!privacy || deletionConfirmation !== privacy.deletion.confirmation) return;
+    if (!window.confirm("Permanently disconnect your providers and delete your ExpenseOps account? This cannot be undone.")) return;
+    await performAction("delete-account", async () => {
+      await api("/api/privacy/account", {
+        method: "DELETE",
+        body: JSON.stringify({ confirmation: deletionConfirmation }),
+      });
+      window.location.assign("/auth/login");
     });
   }
 
@@ -264,6 +300,12 @@ export function AccountSettingsPage({ context, splitwiseTools, learnedBehaviorTo
           </SettingsPanel> : null}
 
           {section === "workspace-connections" ? <SettingsPanel title="Workspace connections" description="Shared data sources and application-managed providers for this workspace.">
+            <Card><CardHeader><CardTitle>Data-use choices</CardTitle><CardDescription>Choose what ExpenseOps may read and process before connecting Gmail. You can withdraw these permissions later.</CardDescription></CardHeader><CardContent className="grid gap-2">
+              <ConsentToggle label="Receipt emails" detail="Read matching receipt and order emails to create correctable purchase records." checked={privacy?.consents.gmail_receipts || false} busy={busyAction === "consent-gmail_receipts"} onChange={(checked) => updateConsent("gmail_receipts", checked)} />
+              <ConsentToggle label="Promotion emails" detail="Read promotional messages to extract relevant deals; unrelated mailbox content is not requested." checked={privacy?.consents.gmail_promotions || false} busy={busyAction === "consent-gmail_promotions"} onChange={(checked) => updateConsent("gmail_promotions", checked)} />
+              <ConsentToggle label="Configured model processing" detail="Allow relevant receipt or promotion text to be sent to the configured model provider when parsing needs it." checked={privacy?.consents.model_receipt_processing || false} busy={busyAction === "consent-model_receipt_processing"} onChange={(checked) => updateConsent("model_receipt_processing", checked)} />
+              <p className="text-xs leading-5 text-slate-600">Review the <a className="font-medium text-indigo-700 underline" href="/legal/privacy" target="_blank" rel="noreferrer">Privacy Policy</a> before connecting.</p>
+            </CardContent></Card>
             <Card><CardContent className="grid gap-3 p-4 sm:p-5">
               <IntegrationRow name="Gmail" mark="G" scope="Workspace" connected={integrations?.gmail.connected} connectedDetail={integrations?.gmail.identity ? `Connected as ${integrations.gmail.identity}` : "Connected workspace receipt inbox."} ownerManaged={!canManageWorkspace} busy={busyAction === "connect-gmail" || busyAction === "disconnect-/api/integrations/gmail"} onConnect={canManageWorkspace ? connectGmail : undefined} onDisconnect={canManageWorkspace ? () => disconnect("/api/integrations/gmail") : undefined} />
               <IntegrationRow name="Google Maps" mark="M" scope="Application" connected connectedDetail="Application-managed routing and place search." />
@@ -284,8 +326,10 @@ export function AccountSettingsPage({ context, splitwiseTools, learnedBehaviorTo
           </SettingsPanel> : null}
 
           {section === "privacy" ? <SettingsPanel title="Privacy and account actions" description="Understand where data is used and access irreversible workspace actions.">
-            <Card><CardHeader><CardTitle>Data boundaries</CardTitle><CardDescription>Connections are used only for the current ExpenseOps workspace unless labeled Personal or Application above.</CardDescription></CardHeader><CardContent className="space-y-2 text-sm leading-6 text-slate-700"><p>Disconnect a provider from its connection section to stop future imports. Existing transaction and learning history is retained unless a deletion workflow explicitly says otherwise.</p><p>Self-service account deletion and retention controls are not yet available in this build; they remain a launch blocker tracked in the readiness plan.</p></CardContent></Card>
+            <Card><CardHeader><CardTitle>Data boundaries</CardTitle><CardDescription>Connections are used only for the current ExpenseOps workspace unless labeled Personal or Application above.</CardDescription></CardHeader><CardContent className="space-y-3 text-sm leading-6 text-slate-700"><p>Disconnect a provider to stop future imports. Account deletion removes provider credentials, sessions, personal identity details, and imported content only you could access. Records shared with other workspace members remain with that workspace. A minimized financial and security audit record is retained for the documented period.</p><div className="flex flex-wrap gap-3"><a className="font-semibold text-indigo-700 underline" href="/legal/privacy" target="_blank" rel="noreferrer">Privacy Policy</a><a className="font-semibold text-indigo-700 underline" href="/legal/terms" target="_blank" rel="noreferrer">Terms of Service</a>{privacy ? <a className="font-semibold text-indigo-700 underline" href={`mailto:${privacy.support_email}`}>Contact support</a> : null}</div></CardContent></Card>
+            {privacy ? <Card><CardHeader><CardTitle>Retention schedule</CardTitle><CardDescription>Maximum operational retention periods. Provider data may be removed sooner when you disconnect or delete your account.</CardDescription></CardHeader><CardContent><dl className="grid gap-2 sm:grid-cols-2">{Object.entries(privacy.retention).map(([key, days]) => <div key={key} className="rounded-lg bg-slate-50 p-3"><dt className="text-xs font-semibold uppercase tracking-wide text-slate-600">{retentionLabel(key)}</dt><dd className="mt-1 font-semibold text-slate-950">{days} days</dd></div>)}</dl></CardContent></Card> : null}
             <Card className="border-rose-200"><CardHeader><div className="inline-flex w-fit items-center gap-2 rounded-full bg-rose-50 px-2.5 py-1 text-xs font-semibold uppercase tracking-wide text-rose-700"><Shield className="h-3.5 w-3.5" />Danger zone</div><CardTitle>Leave this workspace</CardTitle><CardDescription>Your access will be removed. Shared workspace data is not deleted.</CardDescription></CardHeader><CardContent><Button variant="outline" disabled={busyAction === "leave-workspace"} className="border-rose-300 text-rose-700 hover:bg-rose-50 hover:text-rose-800" onClick={leaveWorkspace}><UserMinus className="h-4 w-4" />{busyAction === "leave-workspace" ? "Leaving…" : `Leave ${context.workspace.name}`}</Button></CardContent></Card>
+            {privacy ? <Card className="border-rose-300"><CardHeader><CardTitle>Delete ExpenseOps account</CardTitle><CardDescription>Disconnect providers, remove content only you could access, revoke sessions, and anonymize your identity. Shared records remain with their workspace, and owners must transfer ownership first.</CardDescription></CardHeader><CardContent className="grid gap-3"><label className="grid gap-1.5 text-sm font-medium text-slate-800">Type <code>{privacy.deletion.confirmation}</code><Input value={deletionConfirmation} onChange={(event) => setDeletionConfirmation(event.target.value)} autoComplete="off" /></label><Button variant="outline" className="w-fit border-rose-300 text-rose-700 hover:bg-rose-50 hover:text-rose-800" disabled={deletionConfirmation !== privacy.deletion.confirmation || busyAction === "delete-account"} onClick={deleteAccount}><Trash2 className="h-4 w-4" />{busyAction === "delete-account" ? "Deleting…" : "Delete my account"}</Button></CardContent></Card> : null}
           </SettingsPanel> : null}
         </main>
       </div>
@@ -307,6 +351,14 @@ function SettingsPanel({ title, description, children }: { title: string; descri
 
 function PreferenceFact({ icon: Icon, title, detail }: { icon: typeof Settings2; title: string; detail: string }) {
   return <div className="flex items-start gap-3 p-4 sm:p-5"><span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-slate-100 text-slate-600"><Icon className="h-4 w-4" /></span><div><h3 className="text-sm font-semibold text-slate-950">{title}</h3><p className="mt-1 text-sm leading-6 text-slate-600">{detail}</p></div></div>;
+}
+
+function ConsentToggle({ label, detail, checked, busy, onChange }: { label: string; detail: string; checked: boolean; busy: boolean; onChange: (checked: boolean) => void }) {
+  return <label className="flex min-h-14 cursor-pointer items-start gap-3 rounded-xl border border-slate-200 p-3 transition hover:border-indigo-300 focus-within:ring-2 focus-within:ring-indigo-500"><input type="checkbox" className="mt-1 h-5 w-5 rounded border-slate-300 text-indigo-600 focus:ring-indigo-500" checked={checked} disabled={busy} onChange={(event) => onChange(event.target.checked)} /><span><span className="block text-sm font-semibold text-slate-950">{label}</span><span className="mt-0.5 block text-sm leading-5 text-slate-600">{detail}</span></span></label>;
+}
+
+function retentionLabel(value: string) {
+  return value.replace(/_days$/, "").replace(/_/g, " ");
 }
 
 function UnavailableSettings({ title, detail }: { title: string; detail: string }) {

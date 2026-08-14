@@ -563,7 +563,7 @@ def _plaid_verification_kid_present(verification_header: str) -> bool:
     if not verification_header:
         return False
     try:
-        from jose import jwt
+        import jwt
 
         return bool(jwt.get_unverified_header(verification_header).get("kid"))
     except Exception:

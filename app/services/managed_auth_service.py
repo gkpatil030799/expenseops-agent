@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+import base64
+import hashlib
+import hmac
 import json
 import secrets
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 
 import httpx
-from jose import JWTError, jwt
+import jwt
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -48,24 +51,29 @@ class OIDCVerifier:
             if algorithm not in self.settings.oidc_algorithms:
                 raise OIDCValidationError("Unsupported identity-token algorithm")
             key = self.key_resolver(token)
+            if isinstance(key, dict):
+                key = jwt.PyJWK.from_dict(key).key
             claims = jwt.decode(
                 token,
                 key,
                 algorithms=self.settings.oidc_algorithms,
                 audience=self.settings.oidc_audience,
                 issuer=self.settings.oidc_issuer.rstrip("/"),
-                access_token=access_token,
                 options={
-                    "require_sub": True,
-                    "require_exp": True,
-                    # OIDC authorization-code callbacks pass the access token and
-                    # validate its at_hash binding. Standalone bearer ID tokens do
-                    # not have a paired access token, so that optional claim cannot
-                    # be checked in that context.
-                    "verify_at_hash": access_token is not None,
+                    "require": ["sub", "exp"],
                 },
             )
-        except (JWTError, OIDCValidationError, httpx.HTTPError, KeyError, ValueError) as exc:
+            if access_token is not None:
+                expected_at_hash = calculate_oidc_at_hash(access_token, algorithm)
+                if not hmac.compare_digest(str(claims.get("at_hash") or ""), expected_at_hash):
+                    raise OIDCValidationError("Identity token access-token binding is invalid")
+        except (
+            jwt.PyJWTError,
+            OIDCValidationError,
+            httpx.HTTPError,
+            KeyError,
+            ValueError,
+        ) as exc:
             raise OIDCValidationError("Invalid identity token") from exc
         if not claims.get("sub"):
             raise OIDCValidationError("Identity token has no subject")
@@ -90,6 +98,25 @@ class OIDCVerifier:
         if key is None:
             raise OIDCValidationError("Signing key not found")
         return key
+
+
+def calculate_oidc_at_hash(access_token: str, algorithm: str) -> str:
+    """Return the OIDC at_hash for a JWS algorithm without relying on JWT extras."""
+    digest_name = {
+        "HS256": "sha256",
+        "RS256": "sha256",
+        "ES256": "sha256",
+        "HS384": "sha384",
+        "RS384": "sha384",
+        "ES384": "sha384",
+        "HS512": "sha512",
+        "RS512": "sha512",
+        "ES512": "sha512",
+    }.get(algorithm)
+    if digest_name is None:
+        raise OIDCValidationError("Unsupported identity-token hash algorithm")
+    digest = hashlib.new(digest_name, access_token.encode("ascii")).digest()
+    return base64.urlsafe_b64encode(digest[: len(digest) // 2]).rstrip(b"=").decode("ascii")
 
 
 def provision_oidc_identity(

@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 from app.config import Settings, get_settings
 from app.job_tenancy import gmail_settings_for_session
 from app.models import GmailSyncCheckpoint, PurchaseReceipt, utc_now
+from app.services.data_lifecycle_service import gmail_consent_granted
 from app.services.gmail_client_service import GmailClient
 from app.services.receipt_ingestion_service import ReceiptIngestionService
 
@@ -43,6 +44,11 @@ class GmailReceiptService:
             and self.settings.gmail_client_id
             and self.settings.gmail_client_secret
             and self.settings.gmail_refresh_token
+            and gmail_consent_granted(self.db, "gmail_receipts")
+            and (
+                self.settings.receipt_parser_provider != "openai"
+                or gmail_consent_granted(self.db, "model_receipt_processing")
+            )
         )
 
     def sync(self, *, max_results: int = 25) -> GmailSyncResult:
