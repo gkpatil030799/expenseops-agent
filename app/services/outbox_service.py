@@ -64,7 +64,7 @@ def claim_outbox_batch(
     db: Session,
     *,
     limit: int = 25,
-    lease_seconds: int = 90,
+    lease_seconds: int = 180,
 ) -> list[OutboxEvent]:
     now = utc_now()
     candidates = list(
@@ -111,6 +111,37 @@ def complete_outbox_event(db: Session, event_id: int, lease_token: str) -> bool:
     return True
 
 
+def replay_dead_outbox_events(
+    db: Session,
+    *,
+    event_type: str | None = None,
+    limit: int = 25,
+) -> int:
+    stmt = (
+        select(OutboxEvent)
+        .execution_options(skip_tenant_scope=True)
+        .where(OutboxEvent.state == "dead")
+        .order_by(OutboxEvent.updated_at, OutboxEvent.id)
+        .limit(limit)
+        .with_for_update(skip_locked=True)
+    )
+    if event_type:
+        stmt = stmt.where(OutboxEvent.event_type == event_type)
+    events = list(db.scalars(stmt))
+    now = utc_now()
+    for event in events:
+        event.state = "pending"
+        event.attempt_count = 0
+        event.available_at = now
+        event.lease_token = None
+        event.lease_expires_at = None
+        event.last_error = None
+        event.completed_at = None
+        event.updated_at = now
+    db.commit()
+    return len(events)
+
+
 def fail_outbox_event(
     db: Session,
     event_id: int,
@@ -118,6 +149,7 @@ def fail_outbox_event(
     error: Exception,
     *,
     max_attempts: int = 8,
+    retry_after_seconds: int | None = None,
 ) -> str:
     event = _leased_event(db, event_id, lease_token)
     if event is None:
@@ -125,7 +157,10 @@ def fail_outbox_event(
     now = utc_now()
     terminal = event.attempt_count >= max_attempts
     event.state = "dead" if terminal else "retry"
-    event.available_at = now + timedelta(seconds=_retry_delay_seconds(event.attempt_count))
+    delay_seconds = _retry_delay_seconds(event.attempt_count)
+    if retry_after_seconds is not None:
+        delay_seconds = max(delay_seconds, min(86_400, max(0, retry_after_seconds)))
+    event.available_at = now + timedelta(seconds=delay_seconds)
     event.updated_at = now
     event.lease_token = None
     event.lease_expires_at = None
@@ -147,6 +182,9 @@ def _leased_event(db: Session, event_id: int, lease_token: str) -> OutboxEvent |
 
 
 def _retry_delay_seconds(attempt_count: int) -> int:
-    # Deterministic exponential delay keeps worker behavior testable. Provider
-    # Retry-After support can raise available_at further in the handler.
-    return min(3600, 5 * (2 ** max(0, attempt_count - 1)))
+    # Bounded jitter prevents a provider recovery from waking every tenant at
+    # once. The provider's Retry-After value, when present, is applied as the
+    # lower bound by ``fail_outbox_event``.
+    base = min(3600, 5 * (2 ** max(0, attempt_count - 1)))
+    jitter = secrets.randbelow(max(2, (base // 4) + 1))
+    return min(3600, base + jitter)

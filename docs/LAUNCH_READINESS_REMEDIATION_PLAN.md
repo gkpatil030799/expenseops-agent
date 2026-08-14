@@ -381,6 +381,11 @@ Frontend work:
 
 ## Phase 5 — Durable workers and schedulers
 
+Status: **Complete (code gate).** The transactional outbox, production provider workers,
+crash reconciliation, provider-aware retry policy, dead-letter replay, Gmail cursor safety,
+scheduler leases, and truthful job outcomes are implemented and regression-tested. Provisioning and
+observing the dedicated Railway worker is intentionally retained as a Phase 7 operations gate.
+
 Recommended initial architecture: PostgreSQL transactional outbox plus dedicated Railway worker services using leases and `FOR UPDATE SKIP LOCKED`.
 
 Implement:

@@ -97,9 +97,18 @@ def undo_transaction(tx_id: int, db: DbSession) -> MarkPersonalResponse:
 def retry_financial_operation(tx_id: int, db: DbSession) -> MarkPersonalResponse:
     try:
         tx = TransactionService(db).retry_financial_operation(tx_id)
+        still_processing = tx.status in {
+            TransactionStatus.POSTING.value,
+            TransactionStatus.UNDOING.value,
+            TransactionStatus.RECONCILIATION_REQUIRED.value,
+        }
         return MarkPersonalResponse(
             transaction=_tx_out(tx),
-            message="Financial operation recovered.",
+            message=(
+                "Financial operation queued. ExpenseOps will verify Splitwise in the background."
+                if still_processing
+                else "Financial operation recovered."
+            ),
         )
     except (TransactionError, SplitwiseAPIError) as exc:
         status_code = 404 if "not found" in str(exc).lower() else 409

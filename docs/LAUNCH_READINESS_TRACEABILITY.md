@@ -38,7 +38,7 @@ visual-foundation changes began.
 | Phase 2 — UX action integrity | Complete | Structured API client; global resilience surfaces; scoped Expense, Deals, Settings, and Splitwise actions; cross-browser failure-isolation gate; checkpoint on `agent/launch-readiness` |
 | Phase 3 — identity and tenancy | Complete (code gate) | Tenant-safe uniqueness and schema parity; verified OIDC identity and invite recovery; owner/member API matrix; per-user provider ownership; PostgreSQL FORCE RLS policies; transaction-local request scope; explicit verified-webhook/trusted-worker bypass; shared database rate limiting. Live production activation and restore evidence remain Phase 7 operations gates. |
 | Phase 4 — financial correctness | Complete | Durable Splitwise create/update/delete journal, deterministic idempotency marker, atomic leases, pending-to-posted relationships, finalized-amount and removal reconciliation, valid-draft database invariant, visible Recovery UI, immutable actor/channel/attempt Activity, and atomic Splitwise confirmation outbox implemented |
-| Phase 5 — durable workers | In progress | Transactional outbox schema/service, leased retry/dead-letter worker, durable production Plaid webhook acknowledgement, post-delivery Telegram sent markers, Telegram `update_id` dedupe/retry, resumable Gmail receipt/history pagination, scheduler overlap leases, and truthful cron failures implemented; Splitwise worker, inbound Telegram queue, provider Retry-After, and Railway worker rollout remain open |
+| Phase 5 — durable workers | Complete (code gate) | Production Plaid, Splitwise, Telegram inbound/delivery, Gmail receipt, and Gmail promotion work use durable leased processing; crash reconciliation, jittered provider-aware retries, dead letters/operator replay, cursor safety, overlap protection, and truthful job outcomes are covered. Railway worker activation remains a Phase 7 deployment gate. |
 | Phase 6 — product-domain correctness | In progress | Insights financial truth, Household verified-route freshness, receipt pagination/recovery, and Deals trust/reversibility are implemented; atomic batch receipt submission and the combined product-domain browser gate remain open |
 | Phase 7 — security and operations | Not started | — |
 | Phase 8 — GA validation and re-audit | Not started | — |
@@ -100,17 +100,23 @@ remain explicitly assigned to Phase 5.
 | --- | --- |
 | Transactional outbox | Tenant-scoped events persist payload, dedupe key, correlation, state, attempts, availability, lease, error, and completion metadata |
 | Worker recovery | PostgreSQL claims use `FOR UPDATE SKIP LOCKED`; expired leases are reclaimable; failures receive bounded exponential retry and terminal dead-letter state |
+| Provider-aware retries | Retry delay uses bounded exponential backoff plus jitter and honors provider `Retry-After` as a minimum; Splitwise and Telegram expose rate-limit timing to the worker |
+| Dead-letter recovery | Operators can selectively requeue dead events with `python -m app.jobs.outbox --once --replay-dead [--event-type ...]`; a customer retry also safely revives a dead Splitwise event |
 | Plaid acknowledgement | Production webhooks commit both their webhook record and `plaid.sync_item` outbox event before returning success; local/test mode retains the immediate developer path |
 | Telegram delivery truth | Production review notifications persist a unique outbox event and queued marker; `review_notification_sent_at` is written only after Telegram reports success |
-| Telegram inbound idempotency | Global `update_id` uniqueness, processing leases, payload hashes, attempt state, and failed-attempt recovery prevent repeated callbacks/messages from applying twice |
+| Telegram inbound durability | Production webhooks persist the full update and a tenant-scoped `telegram.process_update` event before acknowledging; global `update_id` uniqueness, processing leases, payload hashes, and failed-attempt recovery prevent duplicate application |
+| Splitwise mutation worker | Production create, update, and delete requests atomically commit the financial journal and `splitwise.execute_operation` event; local development remains synchronous; retries verify provider state before any repeated mutation |
+| Crash-after-provider recovery | A create accepted by Splitwise before a worker crash is recovered through the deterministic provider marker without issuing a second create; update/delete replays verify current provider state first |
 | Gmail pagination | Receipt-list and incremental promotion-history page tokens persist between runs; history checkpoints do not advance until the final page succeeds |
 | Scheduler truth | Gmail receipt, promotion, and weekly replenishment jobs now fail the process when any tenant fails instead of logging an error and exiting successfully |
 | Scheduler overlap | Per-workspace/job database leases skip concurrent invocations and permit safe recovery after expiry |
 | Worker command | `python -m app.jobs.outbox` runs continuously; `--once` supports bounded operational checks |
-| Regression gate | Backend 545 passed; Ruff passed; migration/model parity passed; frontend unit 20 passed; production build passed; lint had zero errors |
+| Truthful customer feedback | The UI distinguishes a durably queued split/recovery from a provider-confirmed result instead of claiming success early |
+| Regression gate | Backend 568 passed; focused worker/financial/Telegram gate 122 passed; frontend unit 21 passed; Ruff and diff checks passed; production build passed; lint had zero errors (20 pre-existing warnings) |
 
-Phase 5 is not complete until Splitwise mutations and inbound Telegram processing use durable workers,
-provider `Retry-After` is honored, and the dedicated Railway worker service is configured and observed.
+The Phase 5 code gate is complete. Creating and observing the dedicated Railway worker service,
+alerting on retry/dead-letter depth, and proving worker recovery in production remain explicit Phase 7
+operations gates; they are not implied by local code completion.
 
 ## Phase 6 interim evidence
 

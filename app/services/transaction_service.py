@@ -1241,11 +1241,13 @@ class TransactionService:
     ) -> tuple[ExpenseTransaction, dict[str, Any]]:
         if not self._supports_operation_journal():
             return self._legacy_splitwise_create(tx, payload)
+        defer_provider = self._should_defer_splitwise_provider_action()
         operation = operation or self._claim_financial_operation(
             tx,
             action="splitwise_create",
             generation=tx.splitwise_generation,
             request_json=payload,
+            commit=not defer_provider,
         )
         if operation.state == "succeeded" and operation.provider_object_id:
             tx.status = TransactionStatus.POSTED.value
@@ -1253,12 +1255,20 @@ class TransactionService:
             tx.last_error = None
             self.db.commit()
             return tx, {"replayed": True, "expenses": [{"id": operation.provider_object_id}]}
-        if operation.state == "needs_reconciliation":
+        if operation.attempt_count > 0 or operation.state == "needs_reconciliation":
             recovered = self.splitwise_service.find_expense_by_idempotency_key(
                 operation.idempotency_key
             )
             if recovered is not None:
                 return self._complete_splitwise_create(tx, operation, recovered, recovered=True)
+        if defer_provider:
+            self._queue_splitwise_operation(
+                tx,
+                operation,
+                status=TransactionStatus.POSTING.value,
+                message="Splitwise is processing this expense in the background.",
+            )
+            return tx, {"queued": True, "operation_id": operation.id}
         operation = self._acquire_operation_lease(operation)
         payload = dict(payload)
         marker = f"ExpenseOps ref: {operation.idempotency_key}"
@@ -1365,20 +1375,31 @@ class TransactionService:
         if not expense_id:
             raise TransactionError("The Splitwise expense is unavailable for reconciliation.")
         _validate_splitwise_payload(payload, expected_total_cents=abs(tx.amount_cents))
+        defer_provider = self._should_defer_splitwise_provider_action()
         operation = operation or self._claim_financial_operation(
             tx,
             action="splitwise_update",
             generation=tx.splitwise_generation,
             request_json={"provider_object_id": expense_id, "payload": payload},
+            commit=not defer_provider,
         )
         provider_id = operation.provider_object_id or str(
             (operation.request_json or {}).get("provider_object_id") or expense_id
         )
         if operation.state == "succeeded":
             return self._complete_splitwise_update(tx, operation, payload)
-        if operation.state == "needs_reconciliation":
+        if operation.attempt_count > 0 or operation.state == "needs_reconciliation":
             if self.splitwise_service.expense_matches_payload(provider_id, payload):
                 return self._complete_splitwise_update(tx, operation, payload)
+        if defer_provider:
+            operation.provider_object_id = provider_id
+            self._queue_splitwise_operation(
+                tx,
+                operation,
+                status=TransactionStatus.RECONCILIATION_REQUIRED.value,
+                message="Splitwise is reconciling the finalized bank amount.",
+            )
+            return tx
         operation.provider_object_id = provider_id
         operation = self._acquire_operation_lease(operation)
         tx.status = TransactionStatus.RECONCILIATION_REQUIRED.value
@@ -1447,6 +1468,7 @@ class TransactionService:
         expense_id = tx.splitwise_expense_id
         if not expense_id and operation is None:
             raise TransactionError("The Splitwise expense is already absent.")
+        defer_provider = self._should_defer_splitwise_provider_action()
         operation = operation or self._claim_financial_operation(
             tx,
             action=action,
@@ -1455,15 +1477,28 @@ class TransactionService:
                 "provider_object_id": expense_id,
                 "result_status": result_status,
             },
+            commit=not defer_provider,
         )
         provider_id = operation.provider_object_id or expense_id
         if operation.state == "succeeded":
             return self._complete_splitwise_delete(tx, operation)
-        if operation.state == "needs_reconciliation" and provider_id:
+        should_reconcile = (
+            operation.attempt_count > 0 or operation.state == "needs_reconciliation"
+        )
+        if should_reconcile and provider_id:
             if not self.splitwise_service.expense_exists(provider_id):
                 return self._complete_splitwise_delete(tx, operation)
         if not provider_id:
             return self._complete_splitwise_delete(tx, operation)
+        if defer_provider:
+            operation.provider_object_id = provider_id
+            self._queue_splitwise_operation(
+                tx,
+                operation,
+                status=TransactionStatus.UNDOING.value,
+                message="Splitwise is removing this expense in the background.",
+            )
+            return tx
         operation.provider_object_id = provider_id
         operation = self._acquire_operation_lease(operation)
         tx.status = TransactionStatus.UNDOING.value
@@ -1539,6 +1574,7 @@ class TransactionService:
         action: str,
         generation: int,
         request_json: dict[str, Any],
+        commit: bool = True,
     ) -> FinancialOperation:
         key_material = f"{tx.workspace_id}:{tx.id}:{action}:{generation}"
         idempotency_key = hashlib.sha256(key_material.encode()).hexdigest()
@@ -1561,7 +1597,10 @@ class TransactionService:
             )
             self.db.add(operation)
             try:
-                self.db.commit()
+                if commit:
+                    self.db.commit()
+                else:
+                    self.db.flush()
             except IntegrityError:
                 self.db.rollback()
                 operation = self.db.scalar(
@@ -1574,6 +1613,65 @@ class TransactionService:
                 if operation is None:
                     raise
         return operation
+
+    def _should_defer_splitwise_provider_action(self) -> bool:
+        session_info = getattr(self.db, "info", {})
+        return (
+            self.settings.environment == "production"
+            and not self._splitwise_service_injected
+            and not bool(session_info.get("durable_worker"))
+        )
+
+    def _queue_splitwise_operation(
+        self,
+        tx: ExpenseTransaction,
+        operation: FinancialOperation,
+        *,
+        status: str,
+        message: str,
+    ) -> None:
+        operation.state = "pending"
+        operation.lease_token = None
+        operation.lease_expires_at = None
+        operation.updated_at = utc_now()
+        tx.status = status
+        tx.last_error = message
+        tx.updated_at = utc_now()
+        event = enqueue_outbox_event(
+            self.db,
+            workspace_id=tx.workspace_id,
+            event_type="splitwise.execute_operation",
+            aggregate_type="financial_operation",
+            aggregate_id=operation.id,
+            dedupe_key=f"splitwise-operation:{operation.id}",
+            payload={
+                "operation_id": operation.id,
+                "transaction_id": tx.id,
+            },
+        )
+        if event.state == "dead":
+            event.state = "pending"
+            event.attempt_count = 0
+            event.available_at = utc_now()
+            event.last_error = None
+            event.completed_at = None
+        record_audit(
+            self.db,
+            workspace_id=tx.workspace_id,
+            user_id=self._actor_user_id(),
+            event_type="financial_operation_queued",
+            resource_type="financial_operation",
+            resource_id=str(operation.id),
+            request_id=get_trace_id(),
+            metadata={
+                "transaction_id": tx.id,
+                "action": operation.action,
+                "outcome": "queued",
+                "channel": self._interaction_channel(),
+            },
+        )
+        self.db.commit()
+        self.db.refresh(tx)
 
     def _acquire_operation_lease(
         self, operation: FinancialOperation

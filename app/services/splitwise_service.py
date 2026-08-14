@@ -23,10 +23,12 @@ class SplitwiseAPIError(RuntimeError):
         response_data: dict[str, Any] | None = None,
         *,
         ambiguous: bool = False,
+        retry_after_seconds: int | None = None,
     ):
         super().__init__(message)
         self.response_data = response_data or {}
         self.ambiguous = ambiguous
+        self.retry_after_seconds = retry_after_seconds
 
 
 class SplitwiseService:
@@ -170,7 +172,9 @@ class SplitwiseService:
             )
         if response.status_code >= 400:
             raise SplitwiseAPIError(
-                f"Splitwise request failed: HTTP {response.status_code}", _safe_json(response)
+                f"Splitwise request failed: HTTP {response.status_code}",
+                _safe_json(response),
+                retry_after_seconds=_retry_after_seconds(response),
             )
         return _safe_json(response)
 
@@ -393,6 +397,16 @@ def _safe_json(response: requests.Response) -> dict[str, Any]:
         return data if isinstance(data, dict) else {"data": data}
     except ValueError:
         return {"text": response.text}
+
+
+def _retry_after_seconds(response: requests.Response) -> int | None:
+    value = str(response.headers.get("Retry-After") or "").strip()
+    if not value:
+        return None
+    try:
+        return max(0, int(value))
+    except ValueError:
+        return None
 
 
 def _payload_user_shares(payload: dict[str, Any]) -> dict[str, tuple[str, str]]:

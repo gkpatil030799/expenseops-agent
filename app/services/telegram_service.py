@@ -21,6 +21,12 @@ logger = logging.getLogger(__name__)
 _SCENARIO_TRACE_PATTERN = re.compile(r"\[trace:scenario_([^_\]]+(?:_[^_\]]+)*)_\d{8}_[a-f0-9]+\]")
 
 
+class TelegramDeliveryError(RuntimeError):
+    def __init__(self, message: str, *, retry_after_seconds: int | None = None):
+        super().__init__(message)
+        self.retry_after_seconds = retry_after_seconds
+
+
 class TelegramService:
     def __init__(self, settings: Settings | None = None):
         self.settings = settings or get_settings()
@@ -71,6 +77,7 @@ class TelegramService:
             )
             return True
         except Exception as exc:
+            retry_after_seconds = self._retry_after_seconds(exc)
             log_event(
                 logger,
                 "telegram_message_failed",
@@ -79,6 +86,11 @@ class TelegramService:
                 safe_error=self._safe_error(exc),
                 chat_id=target_chat_id,
             )
+            if self.settings.is_production_mode:
+                raise TelegramDeliveryError(
+                    "Telegram delivery failed",
+                    retry_after_seconds=retry_after_seconds,
+                ) from exc
             return False
 
     def download_file(self, file_id: str) -> tuple[bytes, str]:
@@ -98,7 +110,10 @@ class TelegramService:
                 response.raise_for_status()
             return response.content, file_path
         except Exception as exc:
-            raise ValueError("telegram_file_download_failed") from exc
+            raise TelegramDeliveryError(
+                "Telegram file download failed",
+                retry_after_seconds=self._retry_after_seconds(exc),
+            ) from exc
 
     def edit_message(
         self,
@@ -152,6 +167,20 @@ class TelegramService:
         if self.settings.telegram_bot_token:
             message = message.replace(self.settings.telegram_bot_token, "[redacted-bot-token]")
         return message
+
+    @staticmethod
+    def _retry_after_seconds(exc: Exception) -> int | None:
+        if not isinstance(exc, httpx.HTTPStatusError):
+            return None
+        response = exc.response
+        header = str(response.headers.get("Retry-After") or "").strip()
+        if header.isdigit():
+            return int(header)
+        try:
+            value = (response.json().get("parameters") or {}).get("retry_after")
+            return int(value) if value is not None else None
+        except (TypeError, ValueError):
+            return None
 
 
 def format_ask_user_transaction_message(tx: ExpenseTransaction) -> str:

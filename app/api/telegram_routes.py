@@ -39,6 +39,7 @@ from app.services.llm_ai_chat_parser import AIChatIntent, AICustomValue, LLMAICh
 from app.services.llm_conversation_parser import LLMConversationIntent, LLMConversationParser
 from app.services.llm_split_parser import LLMSplitParser
 from app.services.managed_auth_service import record_audit, record_audit_once
+from app.services.outbox_service import enqueue_outbox_event
 from app.services.receipt_ingestion_service import ReceiptIngestionService
 from app.services.share_calculator import (
     CustomSplitInput,
@@ -137,33 +138,11 @@ async def telegram_webhook(
     update_record = _claim_telegram_update(db, update)
     if update.get("update_id") is not None and update_record is None:
         return {"ok": True}
-    try:
-        if _handle_telegram_connect(update, db):
-            _complete_telegram_update(db, update_record)
+    if update_record is not None and get_settings().environment == "production":
+        if _queue_telegram_update(db, update_record, update):
             return {"ok": True}
-        _resolve_telegram_tenant(update, db)
-        if update_record is not None:
-            update_record.workspace_id = db.info.get("workspace_id")
-            update_record.user_id = db.info.get("user_id")
-        with telegram_split_state_store.use_db(db):
-            log_event(
-                logger,
-                "telegram_webhook_received",
-                has_callback=bool(update.get("callback_query")),
-                has_message=bool(update.get("message")),
-            )
-            callback_query = update.get("callback_query")
-            if callback_query:
-                result = _handle_callback_query(callback_query, db)
-                _complete_telegram_update(db, update_record)
-                return result
-
-            message = update.get("message")
-            if message:
-                if not _handle_receipt_attachment(message, db):
-                    _handle_text_message(message, db)
-        _complete_telegram_update(db, update_record)
-        return {"ok": True}
+    try:
+        return _process_telegram_update(db, update, update_record)
     except Exception as exc:
         _fail_telegram_update(db, update_record, exc)
         raise
@@ -187,7 +166,9 @@ def _claim_telegram_update(
         lease_active = existing.lease_expires_at and _aware_datetime(
             existing.lease_expires_at
         ) > now
-        if existing.state == "processed" or (existing.state == "processing" and lease_active):
+        if existing.state in {"processed", "queued"} or (
+            existing.state == "processing" and lease_active
+        ):
             return None
         existing.state = "processing"
         existing.attempt_count += 1
@@ -210,6 +191,97 @@ def _claim_telegram_update(
         return None
     db.refresh(record)
     return record
+
+
+def _queue_telegram_update(
+    db: DbSession,
+    record: TelegramWebhookUpdate,
+    update: dict,
+) -> bool:
+    context = _telegram_update_queue_context(db, update)
+    if context is None:
+        # Invalid connection codes and unauthorized senders stay on the short
+        # synchronous path so Telegram receives useful feedback immediately.
+        return False
+    workspace_id, user_id = context
+    record.workspace_id = workspace_id
+    record.user_id = user_id
+    record.state = "queued"
+    record.lease_expires_at = None
+    enqueue_outbox_event(
+        db,
+        workspace_id=workspace_id,
+        event_type="telegram.process_update",
+        aggregate_type="telegram_webhook_update",
+        aggregate_id=record.id,
+        dedupe_key=f"telegram-update:{record.update_id}",
+        payload={"update_record_id": record.id, "update": update},
+    )
+    db.commit()
+    return True
+
+
+def _telegram_update_queue_context(db: DbSession, update: dict) -> tuple[int, int] | None:
+    message = update.get("message") or {}
+    callback_query = update.get("callback_query") or {}
+    from_user = callback_query.get("from") or message.get("from") or {}
+    chat = (callback_query.get("message") or {}).get("chat") or message.get("chat") or {}
+    telegram_user_id = str(from_user.get("id") or "")
+    chat_id = str(chat.get("id") or "")
+    identity = db.scalar(
+        select(TelegramIdentity)
+        .execution_options(skip_tenant_scope=True)
+        .where(
+            TelegramIdentity.telegram_user_id == telegram_user_id,
+            TelegramIdentity.chat_id == chat_id,
+            TelegramIdentity.enabled.is_(True),
+        )
+    )
+    if identity is not None:
+        return identity.workspace_id, identity.user_id
+    code = _telegram_connect_code(str(message.get("text") or "").strip())
+    if code is None:
+        return None
+    link = db.scalar(
+        select(TelegramLinkCode)
+        .execution_options(skip_tenant_scope=True)
+        .where(TelegramLinkCode.code_hash == hash_api_token(code))
+    )
+    if link is None or link.used_at is not None or _aware_datetime(link.expires_at) <= utc_now():
+        return None
+    return link.workspace_id, link.user_id
+
+
+def _process_telegram_update(
+    db: DbSession,
+    update: dict,
+    update_record: TelegramWebhookUpdate | None,
+) -> dict[str, bool]:
+    if _handle_telegram_connect(update, db):
+        _complete_telegram_update(db, update_record)
+        return {"ok": True}
+    _resolve_telegram_tenant(update, db)
+    if update_record is not None:
+        update_record.workspace_id = db.info.get("workspace_id")
+        update_record.user_id = db.info.get("user_id")
+    with telegram_split_state_store.use_db(db):
+        log_event(
+            logger,
+            "telegram_webhook_received",
+            has_callback=bool(update.get("callback_query")),
+            has_message=bool(update.get("message")),
+        )
+        callback_query = update.get("callback_query")
+        if callback_query:
+            result = _handle_callback_query(callback_query, db)
+            _complete_telegram_update(db, update_record)
+            return result
+
+        message = update.get("message")
+        if message and not _handle_receipt_attachment(message, db):
+            _handle_text_message(message, db)
+    _complete_telegram_update(db, update_record)
+    return {"ok": True}
 
 
 def _complete_telegram_update(

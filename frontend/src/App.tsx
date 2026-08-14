@@ -81,12 +81,18 @@ type PlaidWindow = Window & {
 type LinkTokenResponse = { link_token: string };
 type ExchangeResponse = { item_id: string; plaid_item_db_id: number };
 type SplitResponse = { splitwise_expense_id: string | null; splitwise_response: unknown };
+type TransactionActionResponse = { message: string };
 type AccountContext = {
   user: { id: number; email: string; display_name: string; avatar_url?: string | null };
   workspace: { id: number; name: string; workspace_type: string };
 };
 type WorkspaceView = "expenses" | "household" | "promotions" | "settings";
 type ActionNotice = { tone: "success" | "error"; text: string; correlationId?: string };
+
+function splitResponseQueued(response: SplitResponse): boolean {
+  const value = response.splitwise_response;
+  return Boolean(value && typeof value === "object" && "queued" in value && value.queued);
+}
 
 function App() {
   if (
@@ -276,7 +282,7 @@ function DashboardApp() {
   }: {
     id: number;
     label: string;
-    success?: string;
+    success?: string | ((data: T) => string);
     action: () => Promise<T>;
     reload?: boolean;
   }) {
@@ -292,7 +298,10 @@ function DashboardApp() {
       const data = await action();
       setLog(data);
       if (success) {
-        setReviewNotice({ tone: "success", text: success });
+        setReviewNotice({
+          tone: "success",
+          text: typeof success === "function" ? success(data) : success,
+        });
       }
       if (reload) await refreshReviewData();
     } catch (error) {
@@ -490,8 +499,8 @@ function DashboardApp() {
     await runTransactionAction({
       id,
       label: "Reconciling with Splitwise…",
-      success: "Financial operation recovered.",
-      action: () => api(`/transactions/${id}/recovery/retry`, { method: "POST", body: "{}" }),
+      success: (data: TransactionActionResponse) => data.message,
+      action: () => api<TransactionActionResponse>(`/transactions/${id}/recovery/retry`, { method: "POST", body: "{}" }),
     });
   }
 
@@ -503,7 +512,12 @@ function DashboardApp() {
     await runTransactionAction({
       id,
       label: confirm ? "Posting split…" : "Saving draft…",
-      success: confirm ? "Split posted to Splitwise." : "Split saved as a draft.",
+      success: (data: SplitResponse) =>
+        confirm && splitResponseQueued(data)
+          ? "Split queued securely. ExpenseOps will confirm it with Splitwise in the background."
+          : confirm
+            ? "Split posted to Splitwise."
+            : "Split saved as a draft.",
       action: () =>
         api<SplitResponse>(`/transactions/${id}/split/equal`, {
           method: "POST",
@@ -544,7 +558,12 @@ function DashboardApp() {
     await runTransactionAction({
       id: txId,
       label: confirm ? "Posting split…" : "Checking split…",
-      success: confirm ? "Split posted to Splitwise." : "Split calculation checked.",
+      success: (data: SplitResponse) =>
+        confirm && splitResponseQueued(data)
+          ? "Split queued securely. ExpenseOps will confirm it with Splitwise in the background."
+          : confirm
+            ? "Split posted to Splitwise."
+            : "Split calculation checked.",
       action: () =>
         api<SplitResponse>(`/transactions/${txId}/split/custom`, {
           method: "POST",
