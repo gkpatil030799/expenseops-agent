@@ -681,7 +681,7 @@ test("primary mobile destinations keep touch targets at least 44px", async ({ pa
   await page.getByRole("button", { name: /insights/i, exact: true }).click();
   await expect(page.getByRole("heading", { name: "Spending Insights" })).toBeVisible();
   await expectMobileTouchTargets(page);
-  await page.getByText("Refine view", { exact: true }).click();
+  await page.getByText("Filters", { exact: true }).click();
   await page.getByRole("combobox", { name: "Account", exact: true }).selectOption("Chase checking");
   await expect(page.getByRole("button", { name: "Remove Account: Chase checking" })).toBeVisible();
   await expectMobileTouchTargets(page);
@@ -810,6 +810,12 @@ test("insights tell a scoped, accessible spending story", async ({ page }) => {
   await expect(page.getByText("Compared with Jun 14–Jul 13, 2026 · USD only · no currency conversion")).toBeVisible();
   await expect(page.getByLabel("Spending overview").getByText("$1,285", { exact: true })).toBeVisible();
   await expect(page.getByRole("heading", { name: "What changed" })).toBeVisible();
+  await page.locator("[data-chart-point]").first().hover();
+  await expect(page.getByRole("tooltip")).toContainText("transactions");
+  await page.locator("[data-chart-point]").first().focus();
+  await expect(page.getByRole("tooltip")).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(page.getByRole("tooltip")).toBeHidden();
   await expect(page).toHaveScreenshot("spending-insights.png", { fullPage: true, timeout: 15_000 });
 
   const results = await new AxeBuilder({ page }).withTags(["wcag2a", "wcag2aa"]).analyze();

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useState, type CSSProperties, type ReactNode } from "react";
 import {
   ArrowDownRight,
   ArrowUpRight,
@@ -101,17 +101,22 @@ type Insights = {
   };
 };
 
-const presets: [DatePreset, string][] = [
+const primaryPresets: [DatePreset, string][] = [
   ["7d", "7D"],
   ["30d", "30D"],
-  ["this_month", "This month"],
-  ["last_month", "Last month"],
-  ["90d", "90D"],
-  ["this_quarter", "This quarter"],
-  ["last_quarter", "Last quarter"],
+  ["90d", "3M"],
   ["ytd", "YTD"],
   ["custom", "Custom"],
 ];
+
+const secondaryPresets: [DatePreset, string][] = [
+  ["this_month", "This month"],
+  ["last_month", "Last month"],
+  ["this_quarter", "This quarter"],
+  ["last_quarter", "Last quarter"],
+];
+
+const presets = [...primaryPresets, ...secondaryPresets];
 
 export function InsightsDashboard() {
   const initial = useMemo(() => dateRangeForPreset("30d"), []);
@@ -298,12 +303,13 @@ function InsightsControls(props: ControlsProps) {
     props.data?.scope.currency || "USD",
     ...(props.data?.scope.available_currencies || []),
   ])).sort();
+  const secondaryPreset = secondaryPresets.find(([value]) => value === props.preset);
   return (
-    <Card variant="primary" className="z-10 bg-white/95 backdrop-blur lg:sticky lg:top-2 lg:shadow-md">
-      <CardContent className="space-y-3 p-4">
-        <div className="flex items-center justify-between gap-3">
-          <div className="flex min-w-0 gap-2 overflow-x-auto pb-1" aria-label="Date range presets">
-            {presets.map(([value, label]) => (
+    <Card variant="primary" className="relative z-20 overflow-visible bg-white">
+      <CardContent className="space-y-3 p-3 pt-3 sm:p-3 sm:pt-3">
+        <div className="flex flex-wrap items-center gap-2">
+          <div className="flex min-w-0 flex-1 gap-1.5 overflow-x-auto" aria-label="Date range presets">
+            {primaryPresets.map(([value, label]) => (
               <button
                 key={value}
                 type="button"
@@ -318,7 +324,43 @@ function InsightsControls(props: ControlsProps) {
                 {label}
               </button>
             ))}
+            <details className="group relative shrink-0">
+              <summary className={`flex min-h-11 cursor-pointer list-none items-center gap-1 rounded-lg border px-3 text-xs font-semibold transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500 focus-visible:ring-offset-2 ${secondaryPreset ? "border-indigo-600 bg-indigo-50 text-indigo-800" : "border-slate-200 bg-white text-slate-700 hover:border-indigo-300 hover:bg-indigo-50"}`}>
+                {secondaryPreset?.[1] || "More ranges"}
+                <ChevronDown className="h-3.5 w-3.5 transition-transform group-open:rotate-180" />
+              </summary>
+              <div className="absolute left-0 top-full z-30 mt-2 min-w-44 rounded-xl border border-slate-200 bg-white p-1.5 shadow-xl">
+                {secondaryPresets.map(([value, label]) => (
+                  <button key={value} type="button" aria-pressed={props.preset === value} onClick={() => props.choosePreset(value)} className="flex min-h-11 w-full items-center rounded-lg px-3 text-left text-sm font-medium text-slate-700 hover:bg-indigo-50 hover:text-indigo-800 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500">
+                    {label}
+                  </button>
+                ))}
+              </div>
+            </details>
           </div>
+          <label className="sr-only" htmlFor="insights-spending-basis">Spending basis</label>
+          <select id="insights-spending-basis" className="h-11 rounded-lg border border-slate-200 bg-white px-3 text-xs font-semibold text-slate-700 hover:border-indigo-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500" value={props.basis} onChange={(event) => props.setBasis(event.target.value)}>
+            <option value="card">Card spend</option>
+            <option value="actual_share">My actual share</option>
+          </select>
+          <details className="group relative shrink-0">
+            <summary className="flex min-h-11 cursor-pointer list-none items-center justify-between gap-2 rounded-lg border border-slate-200 bg-white px-3 text-xs font-semibold text-slate-700 hover:border-indigo-300 hover:bg-indigo-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500 focus-visible:ring-offset-2">
+              <span className="flex items-center gap-2">
+                <Filter className="h-4 w-4 text-slate-500" /> Filters
+                {props.activeFilterCount ? <span className="rounded-full bg-indigo-100 px-1.5 py-0.5 text-[11px] text-indigo-800">{props.activeFilterCount}</span> : null}
+              </span>
+              <ChevronDown className="h-4 w-4 text-slate-500 transition-transform group-open:rotate-180" />
+            </summary>
+            <div className="absolute right-0 top-full z-30 mt-2 w-[min(42rem,calc(100vw-2rem))] rounded-xl border border-slate-200 bg-white p-4 shadow-xl">
+              <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+                <Select label="Account" value={props.account} onChange={props.setAccount} options={props.data?.accounts || []} all="All accounts" />
+                <Select label="Category" value={props.category} onChange={props.setCategory} options={props.data?.categories || []} all="All categories" />
+                <label className="grid gap-1 text-xs font-semibold text-slate-700">Merchant<Input value={props.merchantInput} onChange={(event) => props.setMerchantInput(event.target.value)} placeholder="All merchants" /></label>
+                <Select label="Currency" value={props.currency || props.data?.scope.currency || "USD"} onChange={props.setCurrency} options={currencyOptions} all="Currency" includeAll={false} />
+                <Select label="Type" value={props.reviewType} onChange={props.setReviewType} options={["personal", "shared"]} all="All types" />
+              </div>
+            </div>
+          </details>
         </div>
 
         {props.preset === "custom" ? (
@@ -331,47 +373,6 @@ function InsightsControls(props: ControlsProps) {
             ) : null}
           </div>
         ) : null}
-
-        <details className="group rounded-xl border border-slate-200 bg-slate-50/70">
-          <summary className="flex min-h-11 cursor-pointer list-none items-center justify-between gap-3 rounded-xl px-3 text-sm font-semibold text-slate-800 hover:bg-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500 focus-visible:ring-offset-2">
-            <span className="flex items-center gap-2">
-              <Filter className="h-4 w-4 text-slate-500" />
-              Refine view
-              {props.activeFilterCount ? (
-                <span className="rounded-full bg-indigo-100 px-2 py-0.5 text-xs text-indigo-800">
-                  {props.activeFilterCount} active
-                </span>
-              ) : null}
-            </span>
-            <ChevronDown className="h-4 w-4 text-slate-500 transition-transform group-open:rotate-180" />
-          </summary>
-          <div className="border-t border-slate-200 p-3">
-            <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-6">
-              <Select label="Account" value={props.account} onChange={props.setAccount} options={props.data?.accounts || []} all="All accounts" />
-              <Select label="Category" value={props.category} onChange={props.setCategory} options={props.data?.categories || []} all="All categories" />
-              <label className="grid gap-1 text-xs font-semibold text-slate-700">
-                Merchant
-                <Input value={props.merchantInput} onChange={(event) => props.setMerchantInput(event.target.value)} placeholder="All merchants" />
-              </label>
-              <Select
-                label="Currency"
-                value={props.currency || props.data?.scope.currency || "USD"}
-                onChange={props.setCurrency}
-                options={currencyOptions}
-                all="Currency"
-                includeAll={false}
-              />
-              <Select label="Type" value={props.reviewType} onChange={props.setReviewType} options={["personal", "shared"]} all="All types" />
-              <label className="grid gap-1 text-xs font-semibold text-slate-700">
-                Spending basis
-                <select className="h-11 rounded-lg border border-slate-300 bg-white px-3 text-sm sm:h-10" value={props.basis} onChange={(event) => props.setBasis(event.target.value)}>
-                  <option value="card">Card spend</option>
-                  <option value="actual_share">My actual share</option>
-                </select>
-              </label>
-            </div>
-          </div>
-        </details>
 
         {props.filtered ? (
           <div className="flex flex-wrap items-center gap-2" aria-label="Active insight filters">
@@ -412,6 +413,20 @@ function InsightsContent(props: ContentProps) {
   const currentRange = formatRange(data.range.start_date, data.range.end_date);
   const previousRange = formatRange(data.range.previous_start_date, data.range.previous_end_date);
   const sharedItems = props.sharedMode === "people" ? data.shared_people : data.shared_groups;
+  const dataNotes = [
+    data.scope.excluded_other_currency_transactions
+      ? `${data.scope.excluded_other_currency_transactions} transaction${data.scope.excluded_other_currency_transactions === 1 ? " is" : "s are"} excluded because this view is limited to ${currency}.`
+      : "",
+    data.data_quality.unreviewed_cents
+      ? `${money(data.data_quality.unreviewed_cents, currency)} is unreviewed and shown separately from Personal and Shared.`
+      : "",
+    data.summary.refund_cents
+      ? `${money(Math.abs(data.summary.refund_cents), currency)} in refunds is included as a credit in Total spend.`
+      : "",
+    data.data_quality.pending_transactions_excluded
+      ? "Bank-pending transactions are excluded. Personal and Shared include only classified transactions."
+      : "",
+  ].filter(Boolean);
 
   return (
     <div className="space-y-5">
@@ -431,22 +446,21 @@ function InsightsContent(props: ContentProps) {
       {props.basis === "actual_share" && !data.scope.viewer_share_identity_connected ? (
         <DataNotice tone="warning">Connect and verify your own Splitwise account to calculate My actual share. ExpenseOps will not guess from another payer.</DataNotice>
       ) : null}
-      {data.scope.excluded_other_currency_transactions ? (
-        <DataNotice>{data.scope.excluded_other_currency_transactions} transaction{data.scope.excluded_other_currency_transactions === 1 ? " is" : "s are"} excluded because this view is limited to {currency}.</DataNotice>
-      ) : null}
-      {data.data_quality.unreviewed_cents ? (
-        <DataNotice>{money(data.data_quality.unreviewed_cents, currency)} is unreviewed and shown separately from Personal and Shared.</DataNotice>
-      ) : null}
-      {data.summary.refund_cents ? (
-        <DataNotice>{money(Math.abs(data.summary.refund_cents), currency)} in refunds is included as a credit in Total spend.</DataNotice>
-      ) : null}
-      {data.data_quality.pending_transactions_excluded ? (
-        <p className="text-xs text-slate-500">Bank-pending transactions are excluded. Personal and Shared include only classified transactions.</p>
+      {dataNotes.length ? (
+        <details className="group rounded-xl border border-slate-200 bg-white">
+          <summary className="flex min-h-11 cursor-pointer list-none items-center justify-between gap-3 rounded-xl px-4 text-sm font-medium text-slate-700 hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500">
+            <span>Data notes <span className="ml-1 rounded-full bg-slate-100 px-2 py-0.5 text-xs text-slate-600">{dataNotes.length}</span></span>
+            <ChevronDown className="h-4 w-4 text-slate-500 transition-transform group-open:rotate-180" />
+          </summary>
+          <ul className="space-y-2 border-t border-slate-100 px-4 py-3 text-sm text-slate-600">
+            {dataNotes.map((note) => <li key={note} className="flex gap-2"><span aria-hidden="true">•</span><span>{note}</span></li>)}
+          </ul>
+        </details>
       ) : null}
 
       <section aria-labelledby="insights-overview-heading">
         <h2 id="insights-overview-heading" className="sr-only">Spending overview</h2>
-        <div className="grid gap-3 lg:grid-cols-[minmax(0,1.35fr)_minmax(0,2fr)]">
+        <div className="grid gap-3 sm:grid-cols-4 xl:grid-cols-12">
           <Kpi
             label="Total spend"
             value={data.summary.total_cents}
@@ -455,34 +469,35 @@ function InsightsContent(props: ContentProps) {
             comparisonRange={previousRange}
             currency={currency}
           />
-          <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-            <Kpi label="Personal" value={data.summary.personal_cents} previous={data.comparison.personal_cents} comparisonRange={previousRange} currency={currency} />
-            <Kpi label="Shared" value={data.summary.shared_cents} previous={data.comparison.shared_cents} comparisonRange={previousRange} currency={currency} />
-            <Kpi label="Unreviewed" value={data.summary.unreviewed_cents} previous={data.comparison.unreviewed_cents} comparisonRange={previousRange} currency={currency} />
-            <Kpi label="Transactions" raw={String(data.summary.transaction_count)} previousRaw={data.comparison.transaction_count} comparisonRange={previousRange} currency={currency} />
-          </div>
+          <Kpi label="Personal" value={data.summary.personal_cents} previous={data.comparison.personal_cents} comparisonRange={previousRange} currency={currency} />
+          <Kpi label="Shared" value={data.summary.shared_cents} previous={data.comparison.shared_cents} comparisonRange={previousRange} currency={currency} />
+          <Kpi label="Unreviewed" value={data.summary.unreviewed_cents} previous={data.comparison.unreviewed_cents} comparisonRange={previousRange} currency={currency} />
+          <Kpi label="Transactions" raw={String(data.summary.transaction_count)} previousRaw={data.comparison.transaction_count} comparisonRange={previousRange} currency={currency} />
         </div>
-        <p className="mt-2 text-xs text-slate-600">
-          Total {money(data.summary.total_cents, currency)} = Personal {money(data.summary.personal_cents, currency)} + Shared {money(data.summary.shared_cents, currency)} + Unreviewed {money(data.summary.unreviewed_cents, currency)}. Refunds are already netted.
-        </p>
+        <details className="mt-2 text-xs text-slate-600">
+          <summary className="flex min-h-11 cursor-pointer items-center rounded-md font-medium hover:text-slate-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500">How this total is calculated</summary>
+          <p className="mt-1">Total {money(data.summary.total_cents, currency)} = Personal {money(data.summary.personal_cents, currency)} + Shared {money(data.summary.shared_cents, currency)} + Unreviewed {money(data.summary.unreviewed_cents, currency)}. Refunds are already netted.</p>
+        </details>
       </section>
 
       <ChartCard title="What changed" eyebrow={`Compared with ${previousRange}`}>
         <Changes items={data.notable_changes} />
       </ChartCard>
 
-      <ChartCard
-        title="Spending over time"
-        eyebrow={`${currentRange} · ${data.range.granularity} view`}
-        action={<Toggle values={["total", "split"]} labels={["Total", "Personal / shared"]} value={props.trendMode} onChange={(value) => props.setTrendMode(value as "total" | "split")} />}
-      >
-        <LineChart values={data.trend} split={props.trendMode === "split"} granularity={data.range.granularity} currency={currency} />
-      </ChartCard>
-
-      <div className="grid gap-5 xl:grid-cols-[minmax(0,1.15fr)_minmax(0,0.85fr)]">
+      <div className="grid items-start gap-5 xl:grid-cols-[minmax(0,1.35fr)_minmax(22rem,0.65fr)]">
+        <ChartCard
+          title="Spending over time"
+          eyebrow={`${currentRange} · ${data.range.granularity} view`}
+          action={<Toggle values={["total", "split"]} labels={["Total", "Personal / shared"]} value={props.trendMode} onChange={(value) => props.setTrendMode(value as "total" | "split")} />}
+        >
+          <LineChart values={data.trend} split={props.trendMode === "split"} granularity={data.range.granularity} currency={currency} />
+        </ChartCard>
         <ChartCard title="Where the money went" eyebrow="Category composition">
           <Donut items={data.category_breakdown} total={data.summary.total_cents} onSelect={props.setCategory} currency={currency} />
         </ChartCard>
+      </div>
+
+      <div className="grid items-start gap-5 xl:grid-cols-[minmax(0,1.15fr)_minmax(0,0.85fr)]">
         <ChartCard
           title="Top merchants"
           eyebrow="Largest totals in this view"
@@ -494,6 +509,9 @@ function InsightsContent(props: ContentProps) {
             onSelect={(value) => { props.setMerchant(value); props.setMerchantInput(value); }}
             currency={currency}
           />
+        </ChartCard>
+        <ChartCard title="Personal and shared" eyebrow="Classified card spend">
+          <StackedSplit values={data.personal_shared} onSelect={props.setReviewType} currency={currency} />
         </ChartCard>
       </div>
 
@@ -507,10 +525,7 @@ function InsightsContent(props: ContentProps) {
         <CategoryTrend values={data.category_trend} granularity={data.range.granularity} currency={currency} />
       </ChartCard>
 
-      <section className="grid gap-5 lg:grid-cols-2" aria-label="Shared spending detail">
-        <ChartCard title="Personal and shared" eyebrow="Classified card spend">
-          <StackedSplit values={data.personal_shared} onSelect={props.setReviewType} currency={currency} />
-        </ChartCard>
+      <section aria-label="Shared spending detail">
         <ChartCard
           title="Shared with"
           eyebrow={props.sharedMode === "people" ? "People in confirmed splits" : "Groups in confirmed splits"}
@@ -550,13 +565,13 @@ function Kpi({
   const prior = previous ?? previousRaw;
   const comparison = prior === undefined ? null : raw ? countComparison(current, prior) : comparisonText(current, prior, currency);
   return (
-    <Card variant={featured ? "command" : "primary"} className={featured ? "overflow-hidden" : ""}>
-      <CardContent className={featured ? "flex min-h-40 flex-col justify-between p-5" : "min-h-32 p-4"}>
-        <p className={`text-xs font-semibold uppercase tracking-[0.12em] ${featured ? "text-indigo-200" : "text-slate-600"}`}>{label}</p>
-        <p className={`mt-2 font-semibold tabular-nums ${featured ? "text-4xl sm:text-5xl" : "text-2xl text-slate-950"}`}>{raw || money(value || 0, currency)}</p>
-        <div className={`mt-2 text-xs ${featured ? "text-slate-300" : "text-slate-600"}`}>
+    <Card variant="primary" className={featured ? "overflow-hidden border-indigo-200 bg-gradient-to-br from-indigo-50 via-white to-white sm:col-span-4 xl:col-span-4" : "sm:col-span-2 xl:col-span-2"}>
+      <CardContent className={featured ? "flex min-h-40 flex-col justify-between p-5 pt-5 sm:p-5 sm:pt-5" : "min-h-32 p-4 pt-4 sm:p-4 sm:pt-4"}>
+        <p className={`text-xs font-semibold uppercase tracking-[0.12em] ${featured ? "text-indigo-700" : "text-slate-600"}`}>{label}</p>
+        <p className={`mt-2 font-semibold tabular-nums text-slate-950 ${featured ? "text-4xl sm:text-[2.75rem]" : "text-2xl"}`}>{raw || money(value || 0, currency)}</p>
+        <div className="mt-2 text-xs text-slate-600">
           {comparison ? (
-            <p>{comparison.primary}{comparison.secondary ? ` ${comparison.secondary}` : ""}</p>
+            <p className="inline-flex rounded-full bg-slate-100 px-2 py-1">{comparison.primary}{comparison.secondary ? ` ${comparison.secondary}` : ""}</p>
           ) : (
             <p>No comparison available</p>
           )}
@@ -629,6 +644,7 @@ function Bars({
 }
 
 function Donut({ items, total, onSelect, currency }: { items: Breakdown[]; total: number; onSelect: (name: string) => void; currency: string }) {
+  const [activeName, setActiveName] = useState<string | null>(null);
   const grouped = groupSmallCategories(items);
   const groupedTotal = grouped.reduce((sum, item) => sum + Math.abs(item.amount_cents), 0);
   let offset = 0;
@@ -637,14 +653,17 @@ function Donut({ items, total, onSelect, currency }: { items: Breakdown[]; total
     offset += groupedTotal ? Math.abs(item.amount_cents) / groupedTotal * 100 : 0;
     return `${categoryColor(item.name)} ${start}% ${offset}%`;
   }).join(",");
+  const activeItem = grouped.find((item) => item.name === activeName);
+  const activePercentage = activeItem && groupedTotal ? Math.round(Math.abs(activeItem.amount_cents) / groupedTotal * 100) : 0;
 
   return (
     <div className="grid items-center gap-5 sm:grid-cols-[180px_1fr]">
-      <div className="relative mx-auto h-40 w-40 rounded-full" style={{ background: `conic-gradient(${gradient})` }} role="img" aria-label={`Category composition. ${money(total, currency)} total.`}>
+      <div className="relative mx-auto h-40 w-40 rounded-full transition-transform duration-200 motion-reduce:transition-none" style={{ background: `conic-gradient(${gradient})`, transform: activeItem ? "scale(1.035)" : "scale(1)" }} role="img" aria-label={`Category composition. ${money(total, currency)} total.`}>
         <div className="absolute inset-6 flex flex-col items-center justify-center rounded-full bg-white text-center">
-          <strong className="text-lg tabular-nums text-slate-950">{money(total, currency)}</strong>
-          <span className="text-xs text-slate-500">Total</span>
+          <strong className="text-lg tabular-nums text-slate-950">{money(activeItem?.amount_cents ?? total, currency)}</strong>
+          <span className="max-w-24 truncate text-xs text-slate-500">{activeItem ? (activeItem.name === "Other" ? "Other categories" : activeItem.name) : "Total"}</span>
         </div>
+        {activeItem ? <ChartTooltip className="bottom-full left-1/2 mb-2 -translate-x-1/2" title={activeItem.name === "Other" ? "Other categories" : activeItem.name} lines={[`${money(activeItem.amount_cents, currency)} · ${activePercentage}% of spend`]} /> : null}
       </div>
       <div className="space-y-1">
         {grouped.map((item) => {
@@ -652,9 +671,9 @@ function Donut({ items, total, onSelect, currency }: { items: Breakdown[]; total
           const label = item.name === "Other" ? "Other categories" : item.name;
           const content = <><span className="flex min-w-0 items-center gap-2"><span className="h-2.5 w-2.5 shrink-0 rounded-sm" style={{ backgroundColor: categoryColor(item.name) }} /><span className="truncate">{label}</span></span><span className="shrink-0 tabular-nums text-slate-600">{money(item.amount_cents, currency)} · {percentage}%</span></>;
           return item.name === "Other" ? (
-            <div key={item.name} className="flex min-h-11 w-full items-center justify-between gap-3 rounded-lg px-2 text-sm">{content}</div>
+            <div key={item.name} tabIndex={0} onFocus={() => setActiveName(item.name)} onBlur={() => setActiveName(null)} onPointerEnter={() => setActiveName(item.name)} onPointerLeave={() => setActiveName(null)} className="flex min-h-11 w-full items-center justify-between gap-3 rounded-lg px-2 text-sm outline-none hover:bg-slate-50 focus-visible:ring-2 focus-visible:ring-indigo-500" aria-label={`${label}, ${money(item.amount_cents, currency)}, ${percentage}%. Grouped from smaller categories.`}>{content}</div>
           ) : (
-            <button key={item.name} type="button" onClick={() => onSelect(item.name)} className="flex min-h-11 w-full items-center justify-between gap-3 rounded-lg px-2 text-sm hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500" aria-label={`${item.name}, ${money(item.amount_cents, currency)}, ${percentage}%. Filter by category.`}>{content}</button>
+            <button key={item.name} type="button" onClick={() => onSelect(item.name)} onFocus={() => setActiveName(item.name)} onBlur={() => setActiveName(null)} onPointerEnter={() => setActiveName(item.name)} onPointerLeave={() => setActiveName(null)} className={`flex min-h-11 w-full items-center justify-between gap-3 rounded-lg px-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500 ${activeName === item.name ? "bg-indigo-50" : "hover:bg-slate-50"}`} aria-label={`${item.name}, ${money(item.amount_cents, currency)}, ${percentage}%. Filter by category.`}>{content}</button>
           );
         })}
       </div>
@@ -663,6 +682,7 @@ function Donut({ items, total, onSelect, currency }: { items: Breakdown[]; total
 }
 
 function LineChart({ values, split, granularity, currency }: { values: Trend[]; split: boolean; granularity: "day" | "week" | "month"; currency: string }) {
+  const [activeIndex, setActiveIndex] = useState<number | null>(null);
   const plottedValues = values.flatMap((value) => split
     ? [value.personal_cents, value.shared_cents]
     : [value.total_cents]);
@@ -678,35 +698,56 @@ function LineChart({ values, split, granularity, currency }: { values: Trend[]; 
   const x = (index: number) => values.length === 1 ? (left + right) / 2 : left + index / (values.length - 1) * (right - left);
   const y = (amount: number) => bottom - (amount - floor) / (ceiling - floor) * (bottom - top);
   const points = (key: keyof Trend) => values.map((value, index) => `${x(index)},${y(Number(value[key]))}`).join(" ");
-  const dateTicks = xTickIndexes(values.length);
+  const dateTicks = xTickIndexes(values.length, 5);
+  const activeValue = activeIndex === null ? null : values[activeIndex];
+  const activeY = activeValue
+    ? Math.min(y(activeValue.total_cents), y(activeValue.personal_cents), y(activeValue.shared_cents))
+    : top;
+  const totalArea = values.length
+    ? `${left},${bottom} ${points("total_cents")} ${right},${bottom}`
+    : "";
 
   return (
-    <div>
+    <div onPointerLeave={() => setActiveIndex(null)}>
       <div className="mb-3 flex flex-wrap gap-4 text-xs text-slate-600" aria-label="Chart legend">
         {split ? (
           <><Legend color="#475569" label="Personal" /><Legend color="#4f46e5" label="Shared" /></>
         ) : <Legend color="#4f46e5" label="Total spend" />}
       </div>
-      <div className="min-h-[260px] w-full overflow-hidden">
+      <div className="relative min-h-[240px] w-full overflow-hidden">
         <svg viewBox="0 0 640 280" className="h-[260px] w-full sm:h-[300px]" role="img" aria-label={`Spend over time, ${split ? "personal and shared series" : "total series"}`}>
-          {ticks.map((tick) => <g key={tick}><line x1={left} x2={right} y1={y(tick)} y2={y(tick)} stroke="#e2e8f0" /><text x={left - 8} y={y(tick) + 4} textAnchor="end" fontSize="11" fill="#64748b">{money(tick, currency)}</text></g>)}
+          <defs><linearGradient id="insights-total-area" x1="0" x2="0" y1="0" y2="1"><stop offset="0%" stopColor="#4f46e5" stopOpacity="0.18" /><stop offset="100%" stopColor="#4f46e5" stopOpacity="0" /></linearGradient></defs>
+          {ticks.map((tick) => <g key={tick}><line x1={left} x2={right} y1={y(tick)} y2={y(tick)} stroke="#e2e8f0" /><text x={left - 8} y={y(tick) + 4} textAnchor="end" fontSize="11" fill="#64748b">{compactMoney(tick, currency)}</text></g>)}
+          {!split && totalArea ? <polygon points={totalArea} fill="url(#insights-total-area)" /> : null}
           {split ? (
-            <><polyline points={points("personal_cents")} fill="none" stroke="#475569" strokeWidth="3" /><polyline points={points("shared_cents")} fill="none" stroke="#4f46e5" strokeWidth="3" /></>
-          ) : <polyline points={points("total_cents")} fill="none" stroke="#4f46e5" strokeWidth="3" />}
+            <><polyline points={points("personal_cents")} fill="none" stroke="#475569" strokeWidth="2" strokeDasharray="6 5" /><polyline points={points("shared_cents")} fill="none" stroke="#4f46e5" strokeWidth="2" /></>
+          ) : <polyline points={points("total_cents")} fill="none" stroke="#4f46e5" strokeWidth="2" />}
+          {activeIndex !== null ? <line x1={x(activeIndex)} x2={x(activeIndex)} y1={top} y2={bottom} stroke="#6366f1" strokeDasharray="3 4" strokeWidth="1" /> : null}
           {values.map((value, index) => {
             const label = split
               ? `${dateLabel(value.period, granularity, true)}. Personal ${money(value.personal_cents, currency)}. Shared ${money(value.shared_cents, currency)}. Total ${money(value.total_cents, currency)}. ${value.transactions} transactions.`
               : `${dateLabel(value.period, granularity, true)}. Total spend ${money(value.total_cents, currency)}. ${value.transactions} transactions.`;
             return (
-              <g key={value.period} role="img" tabIndex={0} aria-label={label} className="outline-none focus:[&_circle]:stroke-indigo-950 focus:[&_circle]:stroke-[3px]">
+              <g key={value.period} data-chart-point={value.period} role="img" tabIndex={0} aria-label={label} onFocus={() => setActiveIndex(index)} onBlur={() => setActiveIndex(null)} onPointerEnter={() => setActiveIndex(index)} onClick={() => setActiveIndex(index)} onKeyDown={(event) => { if (event.key === "Escape") setActiveIndex(null); }} className="cursor-crosshair outline-none focus:[&_circle]:stroke-indigo-950 focus:[&_circle]:stroke-[3px]">
+                <rect x={Math.max(left, x(index) - 14)} y={top} width="28" height={bottom - top} fill="transparent" />
                 {split ? (
-                  <><circle cx={x(index)} cy={y(value.personal_cents)} r="4" fill="#475569" stroke="white" strokeWidth="1.5" /><circle cx={x(index)} cy={y(value.shared_cents)} r="4" fill="#4f46e5" stroke="white" strokeWidth="1.5" /></>
-                ) : <circle cx={x(index)} cy={y(value.total_cents)} r="4" fill="#4f46e5" stroke="white" strokeWidth="1.5" />}
+                  <><circle cx={x(index)} cy={y(value.personal_cents)} r={activeIndex === index ? 5 : 3.5} fill="#475569" stroke="white" strokeWidth="1.5" /><circle cx={x(index)} cy={y(value.shared_cents)} r={activeIndex === index ? 5 : 3.5} fill="#4f46e5" stroke="white" strokeWidth="1.5" /></>
+                ) : <circle cx={x(index)} cy={y(value.total_cents)} r={activeIndex === index ? 5 : 3.5} fill="#4f46e5" stroke="white" strokeWidth="1.5" />}
               </g>
             );
           })}
           {dateTicks.map((index) => <text key={values[index].period} x={x(index)} y="264" textAnchor="middle" fontSize="10" fill="#64748b">{dateLabel(values[index].period, granularity)}</text>)}
         </svg>
+        {activeValue ? (
+          <ChartTooltip
+            className={`${activeIndex !== null && activeIndex > values.length / 2 ? "-translate-x-full -ml-2" : "ml-2"}`}
+            style={{ left: `${x(activeIndex || 0) / 640 * 100}%`, top: `${Math.max(2, activeY / 280 * 100)}%` }}
+            title={dateLabel(activeValue.period, granularity, true)}
+            lines={split
+              ? [`Personal ${money(activeValue.personal_cents, currency)}`, `Shared ${money(activeValue.shared_cents, currency)}`, `${activeValue.transactions} transactions`]
+              : [`Total ${money(activeValue.total_cents, currency)}`, `${activeValue.transactions} transactions`]}
+          />
+        ) : null}
       </div>
       <DataTable summary="View spending data table" headers={["Period", "Total", "Personal", "Shared", "Transactions"]} rows={values.map((value) => [dateLabel(value.period, granularity, true), money(value.total_cents, currency), money(value.personal_cents, currency), money(value.shared_cents, currency), String(value.transactions)])} />
     </div>
@@ -733,6 +774,7 @@ function StackedSplit({ values, onSelect, currency }: { values: { personal: numb
 }
 
 function CategoryTrend({ values, granularity, currency }: { values: { period: string; categories: Record<string, number> }[]; granularity: "day" | "week" | "month"; currency: string }) {
+  const [activeIndex, setActiveIndex] = useState<number | null>(null);
   const aggregate = new Map<string, number>();
   values.forEach((value) => Object.entries(value.categories).forEach(([name, amount]) => aggregate.set(name, (aggregate.get(name) || 0) + amount)));
   const grouped = groupSmallCategories([...aggregate].map(([name, amount_cents]) => ({ name, amount_cents })), 6);
@@ -750,22 +792,32 @@ function CategoryTrend({ values, granularity, currency }: { values: { period: st
   const totals = normalized.map((value) => Object.values(value.categories).reduce((sum, amount) => sum + amount, 0));
   const magnitudes = normalized.map((value) => Object.values(value.categories).reduce((sum, amount) => sum + Math.abs(amount), 0));
   const max = Math.max(1, ...magnitudes);
+  const activeValue = activeIndex === null ? null : normalized[activeIndex];
 
   if (!values.length) return <p className="py-8 text-center text-sm text-slate-600">No category trend is available for this period.</p>;
   return (
     <div>
-      <div className="hidden h-72 items-end gap-1.5 sm:flex" role="img" aria-label="Stacked category composition over time">
+      <div className="relative hidden h-72 items-end gap-1.5 pt-16 sm:flex" role="img" aria-label="Stacked category composition over time" onPointerLeave={() => setActiveIndex(null)}>
+        <span className="pointer-events-none absolute inset-x-0 bottom-6 top-16 flex flex-col justify-between" aria-hidden="true">{[100, 75, 50, 25, 0].map((tick) => <span key={tick} className="border-t border-dashed border-slate-200" />)}</span>
         {normalized.map((value, index) => {
           const label = [dateLabel(value.period, granularity, true), ...names.filter((name) => value.categories[name]).map((name) => `${name}: ${money(value.categories[name], currency)}`), `Total: ${money(totals[index], currency)}`].join(". ");
           return (
-            <div key={value.period} tabIndex={0} className="group flex h-full min-w-0 flex-1 flex-col justify-end rounded-sm outline-none focus-visible:ring-2 focus-visible:ring-indigo-500" aria-label={label}>
-              <span className="flex w-full flex-col-reverse overflow-hidden rounded-t" style={{ height: `${magnitudes[index] / max * 100}%` }}>
-                {names.map((name) => <span key={name} style={{ height: `${magnitudes[index] ? Math.abs(value.categories[name] || 0) / magnitudes[index] * 100 : 0}%`, backgroundColor: categoryColor(name) }} />)}
+            <div key={value.period} data-category-period={value.period} tabIndex={0} onFocus={() => setActiveIndex(index)} onBlur={() => setActiveIndex(null)} onPointerEnter={() => setActiveIndex(index)} onClick={() => setActiveIndex(index)} onKeyDown={(event) => { if (event.key === "Escape") setActiveIndex(null); }} className="group relative z-10 flex h-full min-w-0 flex-1 cursor-crosshair flex-col justify-end rounded-sm outline-none focus-visible:ring-2 focus-visible:ring-indigo-500" aria-label={label}>
+              <span className={`flex w-full flex-col-reverse overflow-hidden rounded-t transition-opacity motion-reduce:transition-none ${activeIndex !== null && activeIndex !== index ? "opacity-45" : "opacity-100"}`} style={{ height: `${magnitudes[index] / max * 100}%` }}>
+                {names.map((name) => <span key={name} className="transition-[filter] motion-reduce:transition-none group-hover:brightness-110" style={{ height: `${magnitudes[index] ? Math.abs(value.categories[name] || 0) / magnitudes[index] * 100 : 0}%`, backgroundColor: categoryColor(name) }} />)}
               </span>
               <span className="mt-1 truncate text-center text-[10px] text-slate-500">{dateLabel(value.period, granularity)}</span>
             </div>
           );
         })}
+        {activeValue && activeIndex !== null ? (
+          <ChartTooltip
+            className={activeIndex > normalized.length / 2 ? "-translate-x-full" : ""}
+            style={{ left: `${normalized.length === 1 ? 50 : activeIndex / (normalized.length - 1) * 92 + 4}%`, top: 0 }}
+            title={dateLabel(activeValue.period, granularity, true)}
+            lines={[...names.filter((name) => activeValue.categories[name]).map((name) => `${name}: ${money(activeValue.categories[name], currency)}`), `Total: ${money(totals[activeIndex], currency)}`]}
+          />
+        ) : null}
       </div>
       <div className="space-y-2 sm:hidden" role="list" aria-label="Category trend summary">
         {normalized.map((value, index) => {
@@ -803,6 +855,15 @@ function Changes({ items }: { items: Insights["notable_changes"] }) {
           <div><p className="text-sm font-semibold text-slate-900">No major changes detected</p><p className="text-xs text-slate-600">Spending stayed within the material-change thresholds for this comparison.</p></div>
         </div>
       )}
+    </div>
+  );
+}
+
+function ChartTooltip({ title: heading, lines, className = "", style }: { title: string; lines: string[]; className?: string; style?: CSSProperties }) {
+  return (
+    <div role="tooltip" className={`pointer-events-none absolute z-30 w-max max-w-56 rounded-lg bg-slate-950 px-3 py-2 text-left text-xs text-white shadow-xl ${className}`} style={style}>
+      <strong className="block font-semibold">{heading}</strong>
+      {lines.map((line) => <span key={line} className="mt-0.5 block text-slate-200">{line}</span>)}
     </div>
   );
 }
@@ -862,6 +923,15 @@ function formatRange(start: string, end: string) {
   const startLabel = startDate.toLocaleDateString("en-US", { month: "short", day: "numeric", year: sameYear ? undefined : "numeric" });
   const endLabel = endDate.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
   return `${startLabel}–${endLabel}`;
+}
+
+function compactMoney(cents: number, currency: string) {
+  return new Intl.NumberFormat("en-US", {
+    style: "currency",
+    currency,
+    notation: "compact",
+    maximumFractionDigits: 1,
+  }).format(cents / 100);
 }
 
 function title(value: string) {
