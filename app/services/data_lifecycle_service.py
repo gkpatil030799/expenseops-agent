@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import timedelta
 
-from sqlalchemy import delete, func, select, update
+from sqlalchemy import String, cast, delete, exists, func, literal, select, update
 from sqlalchemy.orm import Session
 
 from app.config import Settings, get_settings
@@ -16,12 +16,14 @@ from app.models import (
     OAuthState,
     OutboxEvent,
     PlaidItem,
+    PlaidWebhookEvent,
     PromotionMessage,
     PurchaseReceipt,
     RateLimitEvent,
     SplitwiseIntegration,
     TelegramIdentity,
     TelegramLinkCode,
+    TelegramSession,
     TelegramWebhookUpdate,
     User,
     WorkspaceMembership,
@@ -197,18 +199,72 @@ class DataLifecycleService:
             ),
         )
         purge(
+            "completed_outbox_events",
+            delete(OutboxEvent).where(
+                OutboxEvent.state == "succeeded",
+                OutboxEvent.completed_at
+                < now - timedelta(days=self.settings.retention_completed_outbox_days),
+            ),
+        )
+        replayable_telegram_delivery = exists(
+            select(OutboxEvent.id).where(
+                OutboxEvent.event_type == "telegram.process_update",
+                OutboxEvent.aggregate_type == "telegram_webhook_update",
+                OutboxEvent.aggregate_id == cast(TelegramWebhookUpdate.id, String),
+                OutboxEvent.state.not_in(("succeeded", "discarded")),
+            )
+        )
+        purge(
             "telegram_webhook_updates",
             delete(TelegramWebhookUpdate).where(
                 TelegramWebhookUpdate.received_at
-                < now - timedelta(days=self.settings.retention_webhook_days)
+                < now - timedelta(days=self.settings.retention_webhook_days),
+                ~replayable_telegram_delivery,
+            ),
+        )
+        replayable_plaid_delivery = exists(
+            select(OutboxEvent.id).where(
+                OutboxEvent.event_type == "plaid.sync_item",
+                OutboxEvent.dedupe_key
+                == literal("plaid-webhook:") + cast(PlaidWebhookEvent.id, String),
+                OutboxEvent.state.not_in(("succeeded", "discarded")),
+            )
+        )
+        purge(
+            "plaid_webhook_events",
+            delete(PlaidWebhookEvent).where(
+                PlaidWebhookEvent.received_at
+                < now - timedelta(days=self.settings.retention_webhook_days),
+                ~replayable_plaid_delivery,
+            ),
+        )
+        # Dead Telegram deliveries retain their raw update briefly for manual
+        # recovery. Once that recovery window closes, keep only operational
+        # metadata and make the event explicitly non-replayable so private
+        # messages, file identifiers, and connection codes are not retained
+        # indefinitely.
+        outbox_cutoff = now - timedelta(days=self.settings.retention_completed_outbox_days)
+        purge(
+            "discarded_telegram_outbox_payloads",
+            update(OutboxEvent)
+            .where(
+                OutboxEvent.event_type == "telegram.process_update",
+                OutboxEvent.state == "dead",
+                OutboxEvent.updated_at < outbox_cutoff,
+            )
+            .values(
+                payload_json={},
+                state="discarded",
+                completed_at=func.coalesce(OutboxEvent.completed_at, OutboxEvent.updated_at),
+                updated_at=now,
+                last_error="retention_scrubbed",
             ),
         )
         purge(
-            "completed_outbox_events",
-            delete(OutboxEvent).where(
-                OutboxEvent.state == "completed",
-                OutboxEvent.completed_at
-                < now - timedelta(days=self.settings.retention_completed_outbox_days),
+            "telegram_sessions",
+            delete(TelegramSession).where(
+                TelegramSession.updated_at
+                < now - timedelta(days=self.settings.retention_telegram_session_days)
             ),
         )
         purge(
@@ -248,6 +304,7 @@ def operational_retention_summary(settings: Settings) -> dict[str, int]:
         "authentication_sessions_days": settings.retention_auth_session_days,
         "webhook_delivery_metadata_days": settings.retention_webhook_days,
         "completed_delivery_events_days": settings.retention_completed_outbox_days,
+        "telegram_conversation_sessions_days": settings.retention_telegram_session_days,
         "promotion_messages_days": settings.retention_promotion_message_days,
         "ignored_receipts_days": settings.retention_ignored_receipt_days,
         "financial_audit_events_days": settings.retention_audit_event_days,

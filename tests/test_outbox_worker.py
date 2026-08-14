@@ -1,10 +1,16 @@
 from __future__ import annotations
 
+import json
 from datetime import UTC, timedelta
 
+import pytest
+from cryptography.fernet import Fernet
 from sqlalchemy import create_engine, select
-from sqlalchemy.orm import sessionmaker
+from sqlalchemy.orm import Session, sessionmaker
 
+from app import db as app_db
+from app import security
+from app.api import plaid_routes
 from app.config import Settings
 from app.db import Base
 from app.jobs import outbox as outbox_job
@@ -13,6 +19,7 @@ from app.models import (
     FinancialOperation,
     OutboxEvent,
     PlaidItem,
+    PlaidWebhookEvent,
     SplitwiseIntegration,
     TelegramIdentity,
     TelegramWebhookUpdate,
@@ -22,6 +29,7 @@ from app.models import (
     WorkspaceMembership,
     utc_now,
 )
+from app.services import splitwise_service as splitwise_module
 from app.services.outbox_service import (
     claim_outbox_batch,
     enqueue_outbox_event,
@@ -30,7 +38,16 @@ from app.services.outbox_service import (
 )
 from app.services.splitwise_service import SplitwiseAPIError
 from app.services.transaction_service import TransactionService
-from app.tenancy import TenantContext, set_session_tenant
+from app.tenancy import (
+    TenantContext,
+    get_active_user_id,
+    get_active_workspace_id,
+    reset_active_user,
+    reset_active_workspace,
+    set_active_user,
+    set_active_workspace,
+    set_session_tenant,
+)
 
 
 def _database(tmp_path):
@@ -108,6 +125,31 @@ def test_review_notification_is_deduplicated_before_delivery(tmp_path):
         events = list(db.scalars(select(OutboxEvent)))
         assert len(events) == 1
         assert events[0].dedupe_key == f"telegram-review:{tx_id}"
+        assert tx.review_notification_queued_at is not None
+        assert tx.review_notification_sent_at is None
+    engine.dispose()
+
+
+def test_app_env_production_defers_review_notification_to_outbox(tmp_path, monkeypatch):
+    monkeypatch.setenv("APP_ENV", "production")
+    effective_production = Settings(
+        environment="local",
+        app_secret_key="configured-fernet-key",
+        _env_file=None,
+    )
+    engine, factory, context, tx_id = _database(tmp_path)
+
+    with factory() as db:
+        set_session_tenant(db, context)
+        tx = db.get(ExpenseTransaction, tx_id)
+        service = TransactionService(db, settings=effective_production)
+
+        assert service._attempt_review_notification(tx) is True  # noqa: SLF001
+
+        event = db.scalar(select(OutboxEvent))
+        assert event is not None
+        assert event.event_type == "telegram.review_transaction"
+        assert event.state == "pending"
         assert tx.review_notification_queued_at is not None
         assert tx.review_notification_sent_at is None
     engine.dispose()
@@ -250,6 +292,7 @@ def test_production_splitwise_create_is_queued_and_crash_reconciled(
 ):
     from app.services import transaction_service as transaction_module
 
+    monkeypatch.setenv("APP_ENV", "production")
     engine, factory, context, tx_id = _database(tmp_path)
 
     class Splitwise:
@@ -270,11 +313,18 @@ def test_production_splitwise_create_is_queued_and_crash_reconciled(
             return None
 
     splitwise = Splitwise()
-    production = Settings(environment="production")
+    production = Settings(
+        environment="local",
+        app_secret_key="configured-fernet-key",
+        database_url="postgresql://expenseops@db.example/expenseops",
+        enable_postgres_rls=True,
+        rate_limit_backend="postgres",
+        _env_file=None,
+    )
     monkeypatch.setattr(transaction_module, "get_settings", lambda: production)
     monkeypatch.setattr(transaction_module, "SplitwiseService", lambda _settings: splitwise)
     monkeypatch.setattr(outbox_job, "SessionLocal", factory)
-    monkeypatch.setattr(outbox_job, "get_settings", lambda: Settings())
+    monkeypatch.setattr(outbox_job, "get_settings", lambda: production)
 
     with factory() as db:
         set_session_tenant(db, context)
@@ -318,6 +368,446 @@ def test_production_splitwise_create_is_queued_and_crash_reconciled(
         assert tx.status == TransactionStatus.POSTED.value
         assert tx.splitwise_expense_id == "expense-durable"
         assert operation.state == "succeeded"
+    engine.dispose()
+
+
+def test_worker_scopes_splitwise_credentials_and_restores_context(tmp_path, monkeypatch):
+    from app.services import transaction_service as transaction_module
+
+    engine, factory, context, tx_id = _database(tmp_path)
+    encryption_settings = Settings(
+        app_secret_key=Fernet.generate_key().decode(),
+        _env_file=None,
+    )
+    monkeypatch.setattr(security, "get_settings", lambda: encryption_settings)
+    credentials = security.encrypt_secret(
+        json.dumps({"splitwise_api_key": "workspace-specific-key"})
+    )
+    with factory() as db:
+        integration = db.scalar(
+            select(SplitwiseIntegration).where(
+                SplitwiseIntegration.workspace_id == context.workspace_id,
+                SplitwiseIntegration.user_id == context.user_id,
+            )
+        )
+        assert integration is not None
+        integration.credentials_encrypted = credentials
+        db.commit()
+
+    production = Settings(
+        environment="production",
+        app_secret_key=encryption_settings.app_secret_key,
+        _env_file=None,
+    )
+    monkeypatch.setattr(transaction_module, "get_settings", lambda: production)
+    monkeypatch.setattr(splitwise_module, "SessionLocal", factory)
+    monkeypatch.setattr(outbox_job, "SessionLocal", factory)
+    monkeypatch.setattr(outbox_job, "get_settings", lambda: Settings(_env_file=None))
+
+    requests_seen: list[tuple[str | None, int | None, int | None]] = []
+
+    class Response:
+        status_code = 200
+        headers: dict[str, str] = {}
+
+        @staticmethod
+        def json():
+            return {"expenses": [{"id": "expense-tenant-scoped"}]}
+
+    def request(_method, _url, **kwargs):
+        requests_seen.append(
+            (
+                kwargs.get("headers", {}).get("Authorization"),
+                get_active_workspace_id(),
+                get_active_user_id(),
+            )
+        )
+        return Response()
+
+    monkeypatch.setattr(splitwise_module.requests, "request", request)
+
+    with factory() as db:
+        set_session_tenant(db, context)
+        service = TransactionService(db, settings=production)
+        _tx, response = service.create_equal_split_expense(
+            tx_id=tx_id,
+            friend_user_ids=[222],
+            group_id=None,
+            description=None,
+            details=None,
+            currency_code=None,
+            confirm=True,
+            post_pending=False,
+        )
+        assert response["queued"] is True
+
+    stale_workspace_token = set_active_workspace(987_654)
+    stale_user_token = set_active_user(876_543)
+    try:
+        outcome = outbox_job.run_once()
+        assert get_active_workspace_id() == 987_654
+        assert get_active_user_id() == 876_543
+    finally:
+        reset_active_user(stale_user_token)
+        reset_active_workspace(stale_workspace_token)
+
+    assert outcome == {"claimed": 1, "succeeded": 1, "retried": 0, "dead": 0}
+    assert requests_seen == [
+        ("Bearer workspace-specific-key", context.workspace_id, context.user_id)
+    ]
+    with factory() as db:
+        set_session_tenant(db, context)
+        tx = db.get(ExpenseTransaction, tx_id)
+        assert tx is not None
+        assert tx.splitwise_expense_id == "expense-tenant-scoped"
+        assert tx.status == TransactionStatus.POSTED.value
+    engine.dispose()
+
+
+def test_durable_plaid_worker_scopes_fresh_session_before_item_lookup(
+    tmp_path, monkeypatch
+):
+    engine, factory, context, _tx_id = _database(tmp_path)
+    with factory() as db:
+        set_session_tenant(db, context)
+        item = db.scalar(
+            select(PlaidItem).where(PlaidItem.workspace_id == context.workspace_id)
+        )
+        assert item is not None
+        webhook = PlaidWebhookEvent(
+            workspace_id=context.workspace_id,
+            webhook_type="TRANSACTIONS",
+            webhook_code="SYNC_UPDATES_AVAILABLE",
+            plaid_item_id=item.item_id,
+            item_id=item.id,
+            processing_status="queued",
+        )
+        db.add(webhook)
+        db.flush()
+        enqueue_outbox_event(
+            db,
+            workspace_id=context.workspace_id,
+            event_type="plaid.sync_item",
+            aggregate_type="plaid_item",
+            aggregate_id=item.id,
+            dedupe_key=f"plaid-webhook:{webhook.id}",
+            payload={"item_id": item.id, "webhook_event_id": webhook.id},
+        )
+        db.commit()
+        item_id = item.id
+        webhook_id = webhook.id
+
+    class RestrictedSession(Session):
+        """Model the visibility rule enforced by PostgreSQL RLS in unit tests."""
+
+        def get(self, entity, ident, **kwargs):
+            if entity is PlaidItem and self.info.get("workspace_id") is None:
+                return None
+            return super().get(entity, ident, **kwargs)
+
+    restricted_factory = sessionmaker(
+        bind=engine,
+        class_=RestrictedSession,
+        expire_on_commit=False,
+    )
+    synced: list[tuple[int, int | None, int | None, int | None]] = []
+
+    class TransactionServiceForTest:
+        def __init__(self, db):
+            self.db = db
+
+        def sync_item(self, item):
+            synced.append(
+                (
+                    item.id,
+                    self.db.info.get("workspace_id"),
+                    self.db.info.get("user_id"),
+                    get_active_user_id(),
+                )
+            )
+            return {
+                "added": 1,
+                "modified": 0,
+                "removed": 0,
+                "notification_eligible": 0,
+                "notification_sent": 0,
+                "notification_skipped": 0,
+            }
+
+    monkeypatch.setattr(outbox_job, "SessionLocal", restricted_factory)
+    monkeypatch.setattr(app_db, "SessionLocal", restricted_factory)
+    monkeypatch.setattr(plaid_routes, "TransactionService", TransactionServiceForTest)
+    monkeypatch.setattr(
+        plaid_routes,
+        "sandbox_sync_guard_start",
+        lambda *_args, **_kwargs: (False, None),
+    )
+    monkeypatch.setattr(plaid_routes, "sandbox_sync_guard_finish", lambda _guard: None)
+    monkeypatch.setattr(outbox_job, "get_settings", lambda: Settings(_env_file=None))
+
+    outcome = outbox_job.run_once()
+
+    assert outcome == {"claimed": 1, "succeeded": 1, "retried": 0, "dead": 0}
+    assert synced == [
+        (item_id, context.workspace_id, context.user_id, context.user_id)
+    ]
+    with factory() as db:
+        webhook = db.get(PlaidWebhookEvent, webhook_id)
+        event = db.scalar(select(OutboxEvent).where(OutboxEvent.event_type == "plaid.sync_item"))
+        assert webhook is not None
+        assert webhook.processing_status == "processed"
+        assert event is not None
+        assert event.state == "succeeded"
+    engine.dispose()
+
+
+@pytest.mark.parametrize("owner_integration_state", ["missing", "invalid"])
+def test_durable_plaid_worker_never_uses_another_members_splitwise_credentials(
+    tmp_path,
+    monkeypatch,
+    owner_integration_state,
+):
+    from app.services import transaction_service as transaction_module
+
+    engine, factory, context, _tx_id = _database(tmp_path)
+    encryption_settings = Settings(
+        app_secret_key=Fernet.generate_key().decode(),
+        _env_file=None,
+    )
+    monkeypatch.setattr(security, "get_settings", lambda: encryption_settings)
+    other_credentials = security.encrypt_secret(
+        json.dumps({"splitwise_api_key": "other-members-secret"})
+    )
+    with factory() as db:
+        set_session_tenant(db, context)
+        owner_integration = db.scalar(
+            select(SplitwiseIntegration).where(
+                SplitwiseIntegration.user_id == context.user_id
+            )
+        )
+        assert owner_integration is not None
+        if owner_integration_state == "missing":
+            db.delete(owner_integration)
+        else:
+            owner_integration.credentials_encrypted = "invalid-ciphertext"
+        other_user = User(email="other-member@example.test", display_name="Other member")
+        db.add(other_user)
+        db.flush()
+        other_user_id = other_user.id
+        db.add_all(
+            [
+                WorkspaceMembership(
+                    workspace_id=context.workspace_id,
+                    user_id=other_user_id,
+                    role="member",
+                ),
+                SplitwiseIntegration(
+                    workspace_id=context.workspace_id,
+                    user_id=other_user_id,
+                    credentials_encrypted=other_credentials,
+                    splitwise_user_id="222",
+                    display_name="Other member",
+                    verified_at=utc_now(),
+                ),
+            ]
+        )
+        item = db.scalar(select(PlaidItem).where(PlaidItem.owner_user_id == context.user_id))
+        assert item is not None
+        webhook = PlaidWebhookEvent(
+            workspace_id=context.workspace_id,
+            webhook_type="TRANSACTIONS",
+            webhook_code="SYNC_UPDATES_AVAILABLE",
+            plaid_item_id=item.item_id,
+            item_id=item.id,
+            processing_status="queued",
+        )
+        db.add(webhook)
+        db.flush()
+        enqueue_outbox_event(
+            db,
+            workspace_id=context.workspace_id,
+            event_type="plaid.sync_item",
+            aggregate_type="plaid_item",
+            aggregate_id=item.id,
+            dedupe_key=f"plaid-webhook:{webhook.id}",
+            payload={"item_id": item.id, "webhook_event_id": webhook.id},
+        )
+        db.commit()
+
+    observed: list[dict[str, int | str | None]] = []
+
+    class InspectingTransactionService(TransactionService):
+        def sync_item(self, item):
+            owner_service = self._splitwise_service_for_item_owner(item)  # noqa: SLF001
+            observed.append(
+                {
+                    "db_user_id": self.db.info.get("user_id"),
+                    "active_user_id": get_active_user_id(),
+                    "initial_api_key": self.splitwise_service.settings.splitwise_api_key,
+                    "owner_api_key": owner_service.settings.splitwise_api_key,
+                }
+            )
+            return {
+                "added": 0,
+                "modified": 0,
+                "removed": 0,
+                "notification_eligible": 0,
+                "notification_sent": 0,
+                "notification_skipped": 0,
+            }
+
+    base_settings = Settings(_env_file=None)
+    monkeypatch.setattr(transaction_module, "get_settings", lambda: base_settings)
+    monkeypatch.setattr(splitwise_module, "SessionLocal", factory)
+    monkeypatch.setattr(outbox_job, "SessionLocal", factory)
+    monkeypatch.setattr(app_db, "SessionLocal", factory)
+    monkeypatch.setattr(plaid_routes, "TransactionService", InspectingTransactionService)
+    monkeypatch.setattr(
+        plaid_routes,
+        "sandbox_sync_guard_start",
+        lambda *_args, **_kwargs: (False, None),
+    )
+    monkeypatch.setattr(plaid_routes, "sandbox_sync_guard_finish", lambda _guard: None)
+    monkeypatch.setattr(outbox_job, "get_settings", lambda: base_settings)
+
+    stale_user_token = set_active_user(987_654)
+    try:
+        outcome = outbox_job.run_once()
+        assert get_active_user_id() == 987_654
+    finally:
+        reset_active_user(stale_user_token)
+
+    assert outcome == {"claimed": 1, "succeeded": 1, "retried": 0, "dead": 0}
+    assert observed == [
+        {
+            "db_user_id": context.user_id,
+            "active_user_id": context.user_id,
+            "initial_api_key": "",
+            "owner_api_key": "",
+        }
+    ]
+    assert other_user_id != context.user_id
+    engine.dispose()
+
+
+def test_plaid_sync_restores_owner_context_when_transaction_sync_fails(
+    tmp_path,
+    monkeypatch,
+):
+    engine, factory, context, _tx_id = _database(tmp_path)
+    with factory() as db:
+        set_session_tenant(db, context)
+        item = db.scalar(select(PlaidItem).where(PlaidItem.owner_user_id == context.user_id))
+        assert item is not None
+        webhook = PlaidWebhookEvent(
+            workspace_id=context.workspace_id,
+            webhook_type="TRANSACTIONS",
+            webhook_code="SYNC_UPDATES_AVAILABLE",
+            plaid_item_id=item.item_id,
+            item_id=item.id,
+            processing_status="queued",
+        )
+        db.add(webhook)
+        db.commit()
+        item_id = item.id
+        webhook_id = webhook.id
+
+    closed_session_info: list[dict] = []
+
+    class TrackingSession(Session):
+        def close(self):
+            closed_session_info.append(dict(self.info))
+            super().close()
+
+    tracking_factory = sessionmaker(
+        bind=engine,
+        class_=TrackingSession,
+        expire_on_commit=False,
+        info={"user_id": 765_432},
+    )
+    seen_during_sync: list[tuple[int | None, int | None]] = []
+
+    class FailingTransactionService:
+        def __init__(self, db):
+            self.db = db
+
+        def sync_item(self, _item):
+            seen_during_sync.append(
+                (self.db.info.get("user_id"), get_active_user_id())
+            )
+            raise RuntimeError("forced-sync-failure")
+
+    monkeypatch.setattr(app_db, "SessionLocal", tracking_factory)
+    monkeypatch.setattr(plaid_routes, "TransactionService", FailingTransactionService)
+    monkeypatch.setattr(
+        plaid_routes,
+        "sandbox_sync_guard_start",
+        lambda *_args, **_kwargs: (False, None),
+    )
+    monkeypatch.setattr(plaid_routes, "sandbox_sync_guard_finish", lambda _guard: None)
+
+    stale_user_token = set_active_user(654_321)
+    try:
+        plaid_routes._sync_item_by_db_id(  # noqa: SLF001
+            item_id,
+            webhook_id,
+            workspace_id=context.workspace_id,
+        )
+        assert get_active_user_id() == 654_321
+    finally:
+        reset_active_user(stale_user_token)
+
+    assert seen_during_sync == [(context.user_id, context.user_id)]
+    assert closed_session_info[-1]["user_id"] == 765_432
+    with factory() as db:
+        webhook = db.get(PlaidWebhookEvent, webhook_id)
+        assert webhook is not None
+        assert webhook.processing_status == "failed"
+        assert webhook.error_message == "RuntimeError"
+    engine.dispose()
+
+
+def test_plaid_sync_fails_closed_when_item_owner_is_missing(tmp_path, monkeypatch):
+    engine, factory, context, _tx_id = _database(tmp_path)
+    with factory() as db:
+        set_session_tenant(db, context)
+        item = db.scalar(select(PlaidItem).where(PlaidItem.owner_user_id == context.user_id))
+        assert item is not None
+        item.owner_user_id = None
+        webhook = PlaidWebhookEvent(
+            workspace_id=context.workspace_id,
+            webhook_type="TRANSACTIONS",
+            webhook_code="SYNC_UPDATES_AVAILABLE",
+            plaid_item_id=item.item_id,
+            item_id=item.id,
+            processing_status="queued",
+        )
+        db.add(webhook)
+        db.commit()
+        item_id = item.id
+        webhook_id = webhook.id
+
+    service_construction_attempts: list[bool] = []
+
+    class UnexpectedTransactionService:
+        def __init__(self, _db):
+            service_construction_attempts.append(True)
+
+    monkeypatch.setattr(app_db, "SessionLocal", factory)
+    monkeypatch.setattr(plaid_routes, "TransactionService", UnexpectedTransactionService)
+
+    plaid_routes._sync_item_by_db_id(  # noqa: SLF001
+        item_id,
+        webhook_id,
+        workspace_id=context.workspace_id,
+    )
+
+    assert service_construction_attempts == []
+    with factory() as db:
+        webhook = db.get(PlaidWebhookEvent, webhook_id)
+        assert webhook is not None
+        assert webhook.processing_status == "failed"
+        assert webhook.error_message == "RuntimeError"
     engine.dispose()
 
 

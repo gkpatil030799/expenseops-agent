@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from alembic.config import Config
+from alembic.script import ScriptDirectory
 from sqlalchemy import create_engine, inspect, text
 
 from alembic import command
@@ -139,6 +140,77 @@ def test_tenant_scoped_unique_keys_allow_same_values_in_two_workspaces(tmp_path,
         ]
         == 1
     )
+
+
+def test_telegram_binding_migration_repairs_duplicates_before_unique_index(
+    tmp_path, monkeypatch
+):
+    database_url = f"sqlite:///{tmp_path / 'telegram-bindings.db'}"
+    _upgrade(monkeypatch, database_url, "20260813_0023")
+    engine = create_engine(database_url)
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                "INSERT INTO telegram_identities "
+                "(workspace_id, user_id, telegram_user_id, chat_id, enabled, created_at) "
+                "VALUES "
+                "(1, 1, 'older-user', 'older-chat', true, CURRENT_TIMESTAMP), "
+                "(1, 1, 'newer-user', 'newer-chat', true, CURRENT_TIMESTAMP)"
+            )
+        )
+
+    _upgrade(monkeypatch, database_url, "head")
+
+    with engine.connect() as connection:
+        bindings = connection.execute(
+            text(
+                "SELECT telegram_user_id, enabled FROM telegram_identities "
+                "WHERE user_id = 1 ORDER BY id"
+            )
+        ).all()
+    assert bindings == [("older-user", 0), ("newer-user", 1)]
+    index = next(
+        value
+        for value in inspect(engine).get_indexes("telegram_identities")
+        if value["name"] == "uq_telegram_identity_user_active"
+    )
+    assert index["unique"] == 1
+
+
+def test_telegram_binding_migration_enables_transaction_local_rls_bypass(monkeypatch):
+    migration = ScriptDirectory.from_config(Config("alembic.ini")).get_revision(
+        "20260814_0024"
+    ).module
+    operations: list[tuple[str, str]] = []
+
+    class FakeOp:
+        @staticmethod
+        def get_bind():
+            return type("Bind", (), {"dialect": type("Dialect", (), {"name": "postgresql"})()})()
+
+        @staticmethod
+        def execute(statement):
+            operations.append(("execute", str(statement)))
+
+        @staticmethod
+        def create_index(name, *_args, **_kwargs):
+            operations.append(("create_index", name))
+
+    monkeypatch.setattr(migration, "op", FakeOp())
+
+    migration.upgrade()
+
+    assert [operation for operation, _value in operations] == [
+        "execute",
+        "execute",
+        "execute",
+        "execute",
+        "create_index",
+    ]
+    assert "set_config('expenseops.bypass_rls', 'on', true)" in operations[0][1]
+    assert "LOCK TABLE telegram_identities IN SHARE ROW EXCLUSIVE MODE" in operations[1][1]
+    assert "UPDATE telegram_identities" in operations[2][1]
+    assert "set_config('expenseops.bypass_rls', 'off', true)" in operations[3][1]
 
 
 def test_alembic_head_matches_sqlalchemy_metadata(tmp_path, monkeypatch):

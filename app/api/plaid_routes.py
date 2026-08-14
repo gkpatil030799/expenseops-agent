@@ -6,11 +6,14 @@ from hashlib import sha256
 
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
+from starlette.concurrency import run_in_threadpool
 
 from app.api.deps import CurrentUser, CurrentWorkspaceOwner, DbSession
 from app.config import get_settings
 from app.logging_config import log_event
 from app.models import PlaidItem, PlaidWebhookEvent, utc_now
+from app.rate_limit import rate_limiter
 from app.schemas import (
     LinkTokenResponse,
     PublicTokenExchangeRequest,
@@ -21,6 +24,8 @@ from app.security import encrypt_secret
 from app.services.managed_auth_service import record_audit
 from app.services.outbox_service import enqueue_outbox_event
 from app.services.plaid_service import (
+    PLAID_WEBHOOK_MAX_KEY_ID_CHARS,
+    PLAID_WEBHOOK_MAX_VERIFICATION_HEADER_BYTES,
     PlaidConfigurationError,
     PlaidRequestError,
     PlaidService,
@@ -37,6 +42,9 @@ from sandbox.backend.webhook_hooks import (
 
 router = APIRouter(prefix="/plaid", tags=["plaid"])
 logger = logging.getLogger(__name__)
+PLAID_WEBHOOK_MAX_BODY_BYTES = 1024 * 1024
+PLAID_WEBHOOK_RATE_LIMIT = 120
+PLAID_WEBHOOK_RATE_WINDOW_SECONDS = 60
 
 
 @router.post("/link-token", response_model=LinkTokenResponse)
@@ -137,26 +145,32 @@ async def plaid_webhook(
 ) -> WebhookAck:
     from app.tenancy import clear_session_tenant
 
-    raw_body = await request.body()
-    _verify_plaid_webhook_if_enabled(request, raw_body, db)
+    await run_in_threadpool(
+        rate_limiter.check,
+        _plaid_webhook_rate_limit_key(request),
+        limit=PLAID_WEBHOOK_RATE_LIMIT,
+        window_seconds=PLAID_WEBHOOK_RATE_WINDOW_SECONDS,
+    )
+    raw_body = await _read_bounded_plaid_webhook_body(request)
+    delivery_fingerprint = await _verify_plaid_webhook_if_enabled(request, raw_body)
     # This verified provider endpoint must resolve an external item identifier
     # before its workspace is known. The scope narrows immediately after lookup.
     clear_session_tenant(db)
-    try:
-        payload = json.loads(raw_body)
-    except json.JSONDecodeError as exc:
-        raise HTTPException(status_code=400, detail="Invalid Plaid webhook JSON") from exc
-
-    webhook_type = payload.get("webhook_type")
-    webhook_code = payload.get("webhook_code")
-    item_id = payload.get("item_id")
-    maybe_log_sandbox_webhook(payload)
-    event = _create_plaid_webhook_event(
+    webhook_type, webhook_code, item_id = _parse_plaid_webhook_payload(raw_body)
+    maybe_log_sandbox_webhook(
+        {
+            "webhook_type": webhook_type,
+            "webhook_code": webhook_code,
+            "item_id": item_id,
+        }
+    )
+    event, replayed = _accept_plaid_webhook_event(
         db,
-        webhook_type=str(webhook_type or "unknown"),
-        webhook_code=str(webhook_code or "unknown"),
-        plaid_item_id=str(item_id) if item_id else None,
+        webhook_type=webhook_type,
+        webhook_code=webhook_code,
+        plaid_item_id=item_id,
         payload_hash=sha256(raw_body).hexdigest(),
+        delivery_fingerprint=delivery_fingerprint,
     )
     log_event(
         logger,
@@ -164,6 +178,15 @@ async def plaid_webhook(
         webhook_type=webhook_type,
         webhook_code=webhook_code,
     )
+    if replayed:
+        log_event(
+            logger,
+            "plaid_webhook_replay_ignored",
+            webhook_type=webhook_type,
+            webhook_code=webhook_code,
+            webhook_event_id=event.id,
+        )
+        return WebhookAck(ok=True, message="Webhook already accepted")
 
     if webhook_type != "TRANSACTIONS" or webhook_code != "SYNC_UPDATES_AVAILABLE":
         log_event(
@@ -204,7 +227,7 @@ async def plaid_webhook(
 
     event.item_id = item.id
     event.processing_status = "queued"
-    if get_settings().environment == "production" and event.id is not None:
+    if get_settings().is_production_mode and event.id is not None:
         enqueue_outbox_event(
             db,
             workspace_id=item.workspace_id,
@@ -217,89 +240,133 @@ async def plaid_webhook(
         _safe_commit(db)
     else:
         _safe_commit(db)
-        background_tasks.add_task(_sync_item_by_db_id, item.id, event.id)
+        if item.workspace_id is None:
+            # Only possible for legacy/pre-migration test data. Persisted
+            # tenant-owned Plaid items always carry a workspace.
+            background_tasks.add_task(_sync_item_by_db_id, item.id, event.id)
+        else:
+            background_tasks.add_task(
+                _sync_item_by_db_id,
+                item.id,
+                event.id,
+                workspace_id=item.workspace_id,
+            )
     return WebhookAck(ok=True, message="Queued transactions sync")
 
 
-def _sync_item_by_db_id(item_db_id: int, webhook_event_id: int | None = None) -> None:
+def _sync_item_by_db_id(
+    item_db_id: int,
+    webhook_event_id: int | None = None,
+    *,
+    workspace_id: int | None = None,
+) -> None:
     from app.db import SessionLocal
-    from app.tenancy import set_trusted_workspace
+    from app.tenancy import reset_active_user, set_active_user, set_trusted_workspace
 
     db = SessionLocal()
     try:
+        # Durable workers and background tasks open a fresh session. Establish
+        # the trusted workspace before the first tenant-scoped lookup so a
+        # restricted PostgreSQL role can see the intended Plaid item under RLS.
+        if workspace_id is not None:
+            set_trusted_workspace(db, workspace_id)
         item = db.get(PlaidItem, item_db_id)
+        if item:
+            if workspace_id is not None and item.workspace_id != workspace_id:
+                item = None
         if item:
             set_trusted_workspace(db, item.workspace_id)
         event = db.get(PlaidWebhookEvent, webhook_event_id) if webhook_event_id else None
         if item:
-            if event:
-                event.processing_status = "syncing"
-                event.sync_started_at = utc_now()
-                db.commit()
-            skipped, sync_guard = sandbox_sync_guard_start(
-                item.item_id,
-                source_action="webhook_handler",
+            if item.owner_user_id is None:
+                raise RuntimeError("plaid_item_owner_missing")
+            owner_user_id = int(item.owner_user_id)
+            session_info = getattr(db, "info", None)
+            missing_db_user = object()
+            previous_db_user_id = (
+                session_info.get("user_id", missing_db_user)
+                if session_info is not None
+                else missing_db_user
             )
-            if skipped:
-                if event:
-                    event.processing_status = "ignored"
-                    event.processed_at = utc_now()
-                    db.commit()
-                return
-            if sync_guard:
-                SandboxEventStore().append(
-                    trace_id=sync_guard.trace_id,
-                    event_type="plaid_transactions_sync_started",
-                    status="started",
-                    payload={
-                        "source_action": "webhook_handler",
-                        "item_id": sync_guard.plaid_item_id,
-                        "source": "plaid_webhook",
-                    },
-                    plaid_item_id=sync_guard.plaid_item_id,
-                )
-            log_event(
-                logger,
-                "plaid_webhook_sync_started",
-                plaid_item_db_id=item.id,
-                webhook_event_id=webhook_event_id,
-            )
+            owner_token = set_active_user(owner_user_id)
             try:
-                result = TransactionService(db).sync_item(item)
-            finally:
-                sandbox_sync_guard_finish(sync_guard)
-            if sync_guard:
-                SandboxEventStore().append(
-                    trace_id=sync_guard.trace_id,
-                    event_type="plaid_transactions_sync_completed",
-                    status="succeeded",
-                    payload={
-                        "source_action": "webhook_handler",
-                        "item_id": sync_guard.plaid_item_id,
-                        "source": "plaid_webhook",
-                        "added_count": result.get("added", 0),
-                        "modified_count": result.get("modified", 0),
-                        "removed_count": result.get("removed", 0),
-                    },
-                    plaid_item_id=sync_guard.plaid_item_id,
+                if session_info is not None:
+                    session_info["user_id"] = owner_user_id
+                if event:
+                    event.processing_status = "syncing"
+                    event.sync_started_at = utc_now()
+                    db.commit()
+                skipped, sync_guard = sandbox_sync_guard_start(
+                    item.item_id,
+                    source_action="webhook_handler",
                 )
-            if event:
-                event.processing_status = "processed"
-                event.sync_completed_at = utc_now()
-                event.processed_at = event.sync_completed_at
-                db.commit()
-            log_event(
-                logger,
-                "plaid_webhook_sync_completed",
-                plaid_item_db_id=item.id,
-                webhook_event_id=webhook_event_id,
-                added=result.get("added", 0),
-                modified=result.get("modified", 0),
-                removed=result.get("removed", 0),
-                notification_eligible=result.get("notification_eligible", 0),
-                notification_sent=result.get("notification_sent", 0),
-                notification_skipped=result.get("notification_skipped", 0),
-            )
+                if skipped:
+                    if event:
+                        event.processing_status = "ignored"
+                        event.processed_at = utc_now()
+                        db.commit()
+                    return
+                if sync_guard:
+                    SandboxEventStore().append(
+                        trace_id=sync_guard.trace_id,
+                        event_type="plaid_transactions_sync_started",
+                        status="started",
+                        payload={
+                            "source_action": "webhook_handler",
+                            "item_id": sync_guard.plaid_item_id,
+                            "source": "plaid_webhook",
+                        },
+                        plaid_item_id=sync_guard.plaid_item_id,
+                    )
+                log_event(
+                    logger,
+                    "plaid_webhook_sync_started",
+                    plaid_item_db_id=item.id,
+                    webhook_event_id=webhook_event_id,
+                )
+                try:
+                    result = TransactionService(db).sync_item(item)
+                finally:
+                    sandbox_sync_guard_finish(sync_guard)
+                if sync_guard:
+                    SandboxEventStore().append(
+                        trace_id=sync_guard.trace_id,
+                        event_type="plaid_transactions_sync_completed",
+                        status="succeeded",
+                        payload={
+                            "source_action": "webhook_handler",
+                            "item_id": sync_guard.plaid_item_id,
+                            "source": "plaid_webhook",
+                            "added_count": result.get("added", 0),
+                            "modified_count": result.get("modified", 0),
+                            "removed_count": result.get("removed", 0),
+                        },
+                        plaid_item_id=sync_guard.plaid_item_id,
+                    )
+                if event:
+                    event.processing_status = "processed"
+                    event.sync_completed_at = utc_now()
+                    event.processed_at = event.sync_completed_at
+                    db.commit()
+                log_event(
+                    logger,
+                    "plaid_webhook_sync_completed",
+                    plaid_item_db_id=item.id,
+                    webhook_event_id=webhook_event_id,
+                    added=result.get("added", 0),
+                    modified=result.get("modified", 0),
+                    removed=result.get("removed", 0),
+                    notification_eligible=result.get("notification_eligible", 0),
+                    notification_sent=result.get("notification_sent", 0),
+                    notification_skipped=result.get("notification_skipped", 0),
+                )
+            finally:
+                if session_info is not None:
+                    if previous_db_user_id is missing_db_user:
+                        session_info.pop("user_id", None)
+                    else:
+                        session_info["user_id"] = previous_db_user_id
+                reset_active_user(owner_token)
         else:
             if event:
                 event.processing_status = "failed"
@@ -342,6 +409,7 @@ def _create_plaid_webhook_event(
     webhook_code: str,
     plaid_item_id: str | None,
     payload_hash: str,
+    delivery_fingerprint: str | None = None,
 ) -> PlaidWebhookEvent:
     linked_item = None
     if plaid_item_id and hasattr(db, "execute"):
@@ -353,6 +421,7 @@ def _create_plaid_webhook_event(
         webhook_code=webhook_code,
         plaid_item_id=plaid_item_id,
         payload_hash=payload_hash,
+        delivery_fingerprint=delivery_fingerprint,
         workspace_id=linked_item.workspace_id if linked_item else None,
     )
     if not all(hasattr(db, attr) for attr in ("add", "flush")):
@@ -360,6 +429,60 @@ def _create_plaid_webhook_event(
     db.add(event)
     db.flush()
     return event
+
+
+def _accept_plaid_webhook_event(
+    db: DbSession,
+    *,
+    webhook_type: str,
+    webhook_code: str,
+    plaid_item_id: str | None,
+    payload_hash: str,
+    delivery_fingerprint: str | None,
+) -> tuple[PlaidWebhookEvent, bool]:
+    if not delivery_fingerprint or not all(
+        hasattr(db, attr) for attr in ("execute", "begin_nested")
+    ):
+        return (
+            _create_plaid_webhook_event(
+                db,
+                webhook_type=webhook_type,
+                webhook_code=webhook_code,
+                plaid_item_id=plaid_item_id,
+                payload_hash=payload_hash,
+                delivery_fingerprint=delivery_fingerprint,
+            ),
+            False,
+        )
+
+    existing = db.execute(
+        select(PlaidWebhookEvent).where(
+            PlaidWebhookEvent.delivery_fingerprint == delivery_fingerprint
+        )
+    ).scalar_one_or_none()
+    if existing is not None:
+        return existing, True
+
+    try:
+        with db.begin_nested():
+            event = _create_plaid_webhook_event(
+                db,
+                webhook_type=webhook_type,
+                webhook_code=webhook_code,
+                plaid_item_id=plaid_item_id,
+                payload_hash=payload_hash,
+                delivery_fingerprint=delivery_fingerprint,
+            )
+    except IntegrityError:
+        existing = db.execute(
+            select(PlaidWebhookEvent).where(
+                PlaidWebhookEvent.delivery_fingerprint == delivery_fingerprint
+            )
+        ).scalar_one_or_none()
+        if existing is None:
+            raise
+        return existing, True
+    return event, False
 
 
 def _mark_webhook_event_ignored(db: DbSession, event: PlaidWebhookEvent) -> None:
@@ -379,26 +502,95 @@ def _mark_webhook_event_failed(
     _safe_commit(db)
 
 
-def _mark_webhook_event_verification_failed(
-    db: DbSession,
-    event: PlaidWebhookEvent,
-    error_message: str,
-) -> None:
-    event.processing_status = "verification_failed"
-    event.error_message = error_message
-    event.processed_at = utc_now()
-    _safe_commit(db)
-
-
 def _safe_commit(db: DbSession) -> None:
     if hasattr(db, "commit"):
         db.commit()
 
 
-def _verify_plaid_webhook_if_enabled(request: Request, raw_body: bytes, db: DbSession) -> None:
+async def _read_bounded_plaid_webhook_body(request: Request) -> bytes:
+    content_length = request.headers.get("Content-Length")
+    if content_length is not None:
+        try:
+            declared_length = int(content_length)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail="Invalid Content-Length") from exc
+        if declared_length < 0:
+            raise HTTPException(status_code=400, detail="Invalid Content-Length")
+        if declared_length > PLAID_WEBHOOK_MAX_BODY_BYTES:
+            raise HTTPException(status_code=413, detail="Plaid webhook payload too large")
+
+    body = bytearray()
+    async for chunk in request.stream():
+        if len(body) + len(chunk) > PLAID_WEBHOOK_MAX_BODY_BYTES:
+            raise HTTPException(status_code=413, detail="Plaid webhook payload too large")
+        body.extend(chunk)
+    return bytes(body)
+
+
+def _plaid_webhook_rate_limit_key(request: Request) -> str:
+    client_host = request.client.host if request.client else "unknown"
+    client_fingerprint = sha256(client_host.encode("utf-8", errors="replace")).hexdigest()[:32]
+    return f"plaid-webhook:{client_fingerprint}"
+
+
+def _parse_plaid_webhook_payload(raw_body: bytes) -> tuple[str, str, str | None]:
+    try:
+        payload = json.loads(raw_body)
+    except (ValueError, UnicodeDecodeError, RecursionError) as exc:
+        raise HTTPException(status_code=400, detail="Invalid Plaid webhook JSON") from exc
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="Invalid Plaid webhook JSON")
+
+    webhook_type = _validated_plaid_webhook_string(
+        payload,
+        "webhook_type",
+        max_length=64,
+        required=True,
+    )
+    webhook_code = _validated_plaid_webhook_string(
+        payload,
+        "webhook_code",
+        max_length=128,
+        required=True,
+    )
+    item_id = _validated_plaid_webhook_string(
+        payload,
+        "item_id",
+        max_length=128,
+        required=False,
+    )
+    assert webhook_type is not None
+    assert webhook_code is not None
+    return webhook_type, webhook_code, item_id
+
+
+def _validated_plaid_webhook_string(
+    payload: dict[str, object],
+    field_name: str,
+    *,
+    max_length: int,
+    required: bool,
+) -> str | None:
+    value = payload.get(field_name)
+    if value is None and not required:
+        return None
+    if (
+        not isinstance(value, str)
+        or not value
+        or len(value) > max_length
+        or "\x00" in value
+    ):
+        raise HTTPException(status_code=400, detail="Invalid Plaid webhook fields")
+    return value
+
+
+async def _verify_plaid_webhook_if_enabled(
+    request: Request,
+    raw_body: bytes,
+) -> str | None:
     settings = get_settings()
     if not settings.plaid_webhook_verification_required:
-        return
+        return None
 
     metadata = _safe_webhook_metadata(raw_body)
     verification_header = request.headers.get("Plaid-Verification", "")
@@ -416,17 +608,18 @@ def _verify_plaid_webhook_if_enabled(request: Request, raw_body: bytes, db: DbSe
     )
     if not verification_header:
         _handle_plaid_webhook_verification_failure(
-            db,
-            raw_body,
+            metadata=metadata,
             reason="missing_plaid_verification_header",
             settings=settings,
             header_present=verification_metadata["header_present"],
             kid_present=verification_metadata["kid_present"],
         )
-        return
+        return None
 
     try:
-        PlaidService(settings=settings).verify_webhook_signature(
+        service = PlaidService(settings=settings)
+        await run_in_threadpool(
+            service.verify_webhook_signature,
             raw_body=raw_body,
             verification_header=verification_header,
         )
@@ -437,40 +630,37 @@ def _verify_plaid_webhook_if_enabled(request: Request, raw_body: bytes, db: DbSe
             payload=verification_metadata,
         )
         log_event(logger, "plaid_webhook_verified")
+        return sha256(verification_header.encode("utf-8") + b"\x00" + raw_body).hexdigest()
     except PlaidWebhookVerificationError as exc:
         _handle_plaid_webhook_verification_failure(
-            db,
-            raw_body,
+            metadata=metadata,
             reason=exc.reason,
             settings=settings,
             header_present=verification_metadata["header_present"],
             kid_present=verification_metadata["kid_present"],
         )
-        return
+        return None
     except (PlaidConfigurationError, PlaidRequestError) as exc:
         _handle_plaid_webhook_verification_failure(
-            db,
-            raw_body,
+            metadata=metadata,
             reason="webhook_key_fetch_failed",
             settings=settings,
             error_type=type(exc).__name__,
             header_present=verification_metadata["header_present"],
             kid_present=verification_metadata["kid_present"],
         )
-        return
+        return None
 
 
 def _handle_plaid_webhook_verification_failure(
-    db: DbSession,
-    raw_body: bytes,
     *,
+    metadata: dict[str, str | None],
     reason: str,
     settings,
     error_type: str | None = None,
     header_present: bool | None = None,
     kid_present: bool | None = None,
 ) -> None:
-    metadata = _safe_webhook_metadata(raw_body)
     verification_payload = {
         "plaid_env": settings.plaid_env,
         "verification_required": True,
@@ -493,19 +683,11 @@ def _handle_plaid_webhook_verification_failure(
         metadata=metadata,
         payload=verification_payload,
     )
-    event = _create_plaid_webhook_event(
-        db,
-        webhook_type=metadata["webhook_type"],
-        webhook_code=metadata["webhook_code"],
-        plaid_item_id=metadata["item_id"],
-        payload_hash=sha256(raw_body).hexdigest(),
-    )
-    _mark_webhook_event_verification_failed(db, event, reason)
     log_kwargs = {
         "reason": reason,
         "webhook_type": metadata["webhook_type"],
         "webhook_code": metadata["webhook_code"],
-        "plaid_item_id": metadata["item_id"],
+        "plaid_item_id_present": bool(metadata["item_id"]),
     }
     if error_type:
         log_kwargs["error_type"] = error_type
@@ -546,26 +728,60 @@ def _allow_unverified_plaid_webhook_for_local_test(settings, verification_reason
 def _safe_webhook_metadata(raw_body: bytes) -> dict[str, str | None]:
     try:
         payload = json.loads(raw_body)
-    except json.JSONDecodeError:
+    except (ValueError, UnicodeDecodeError, RecursionError):
+        payload = None
+    if not isinstance(payload, dict):
         return {
             "webhook_type": "unknown",
             "webhook_code": "unknown",
             "item_id": None,
         }
     return {
-        "webhook_type": str(payload.get("webhook_type") or "unknown"),
-        "webhook_code": str(payload.get("webhook_code") or "unknown"),
-        "item_id": str(payload.get("item_id")) if payload.get("item_id") else None,
+        "webhook_type": _bounded_webhook_metadata_value(
+            payload.get("webhook_type"),
+            default="unknown",
+            max_length=64,
+        ),
+        "webhook_code": _bounded_webhook_metadata_value(
+            payload.get("webhook_code"),
+            default="unknown",
+            max_length=128,
+        ),
+        "item_id": _bounded_webhook_metadata_value(
+            payload.get("item_id"),
+            default=None,
+            max_length=128,
+        ),
     }
+
+
+def _bounded_webhook_metadata_value(
+    value: object,
+    *,
+    default: str | None,
+    max_length: int,
+) -> str | None:
+    if not isinstance(value, (str, int, float)) or isinstance(value, bool):
+        return default
+    text = str(value).strip()
+    return text[:max_length] if text else default
 
 
 def _plaid_verification_kid_present(verification_header: str) -> bool:
     if not verification_header:
         return False
+    if len(verification_header.encode("utf-8")) > PLAID_WEBHOOK_MAX_VERIFICATION_HEADER_BYTES:
+        return False
     try:
         import jwt
 
-        return bool(jwt.get_unverified_header(verification_header).get("kid"))
+        key_id = jwt.get_unverified_header(verification_header).get("kid")
+        return bool(
+            isinstance(key_id, str)
+            and key_id.isascii()
+            and len(key_id) <= PLAID_WEBHOOK_MAX_KEY_ID_CHARS
+            and all(character.isalnum() or character in "-_" for character in key_id)
+        )
     except Exception:
         return False
 
@@ -590,7 +806,7 @@ def _log_plaid_webhook_verification_event(
         event_type,
         webhook_type=metadata["webhook_type"],
         webhook_code=metadata["webhook_code"],
-        plaid_item_id=metadata["item_id"],
+        plaid_item_id_present=bool(metadata["item_id"]),
         **safe_payload,
     )
     maybe_log_sandbox_webhook_verification_event(
@@ -598,6 +814,6 @@ def _log_plaid_webhook_verification_event(
         status=status,
         webhook_type=metadata["webhook_type"],
         webhook_code=metadata["webhook_code"],
-        item_id=metadata["item_id"],
+        item_id=None,
         payload=safe_payload,
     )

@@ -8,6 +8,7 @@ from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import func, select
 
 from app.api.deps import CurrentUser, CurrentWorkspace, DbSession
+from app.logging_config import get_trace_id
 from app.models import (
     AuthSession,
     User,
@@ -193,7 +194,7 @@ def invite(
         user_id=user.id,
         event_type="member_invited",
         resource_type="invitation",
-        request_id=request.headers.get("X-Request-ID"),
+        request_id=get_trace_id(),
         metadata={"email_domain": payload.email.rpartition("@")[2]},
     )
     db.commit()
@@ -262,7 +263,7 @@ def accept_invitation(
         event_type="invitation_accepted",
         resource_type="invitation",
         resource_id=str(invitation.id),
-        request_id=request.headers.get("X-Request-ID"),
+        request_id=get_trace_id(),
     )
     db.commit()
     set_trusted_workspace(db, original_workspace)

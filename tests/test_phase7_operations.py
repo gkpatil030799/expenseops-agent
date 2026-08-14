@@ -15,14 +15,19 @@ from app.models import (
     DataConsent,
     GmailAccount,
     OAuthState,
+    OutboxEvent,
+    PlaidWebhookEvent,
     PurchaseReceipt,
     RateLimitEvent,
+    TelegramSession,
+    TelegramWebhookUpdate,
     User,
     WorkspaceMembership,
     utc_now,
 )
 from app.security_middleware import SecurityHeadersMiddleware, install_safe_exception_handler
 from app.services.data_lifecycle_service import DataLifecycleService, gmail_consent_granted
+from app.services.outbox_service import complete_outbox_event, replay_dead_outbox_events
 from app.tenancy import ensure_default_tenancy, set_session_tenant
 
 
@@ -198,9 +203,29 @@ def test_retention_job_purges_only_expired_ephemeral_rows(tmp_path):
     engine = create_engine(f"sqlite:///{tmp_path / 'retention.db'}")
     Base.metadata.create_all(engine)
     with Session(engine) as db:
-        ensure_default_tenancy(db)
+        context = ensure_default_tenancy(db)
         old = utc_now() - timedelta(days=3)
         current = utc_now() + timedelta(days=1)
+        expired_telegram_update = TelegramWebhookUpdate(
+            update_id=7001,
+            payload_hash="a" * 64,
+            state="processed",
+            received_at=old,
+            processed_at=old,
+        )
+        replayable_telegram_update = TelegramWebhookUpdate(
+            update_id=7002,
+            workspace_id=context.workspace_id,
+            user_id=context.user_id,
+            payload_hash="b" * 64,
+            state="failed",
+            received_at=old,
+        )
+        db.add_all([expired_telegram_update, replayable_telegram_update])
+        db.flush()
+        expired_telegram_update_id = expired_telegram_update.id
+        replayable_telegram_update_id = replayable_telegram_update.id
+        replayable_telegram_provider_update_id = replayable_telegram_update.update_id
         db.add_all(
             [
                 OAuthState(
@@ -222,12 +247,251 @@ def test_retention_job_purges_only_expired_ephemeral_rows(tmp_path):
                     request_count=1,
                     created_at=old,
                 ),
+                PlaidWebhookEvent(
+                    webhook_type="TRANSACTIONS",
+                    webhook_code="SYNC_UPDATES_AVAILABLE",
+                    processing_status="processed",
+                    received_at=old,
+                    processed_at=old,
+                    created_at=old,
+                ),
+                PlaidWebhookEvent(
+                    webhook_type="TRANSACTIONS",
+                    webhook_code="SYNC_UPDATES_AVAILABLE",
+                    processing_status="processed",
+                    received_at=current,
+                    processed_at=current,
+                    created_at=old,
+                ),
+                OutboxEvent(
+                    workspace_id=context.workspace_id,
+                    event_type="telegram.process_update",
+                    aggregate_type="telegram_webhook_update",
+                    aggregate_id="expired",
+                    dedupe_key="retention-expired",
+                    payload_json={"message": "sensitive transient content"},
+                    state="succeeded",
+                    completed_at=old,
+                    created_at=old,
+                    updated_at=old,
+                ),
+                OutboxEvent(
+                    workspace_id=context.workspace_id,
+                    event_type="telegram.process_update",
+                    aggregate_type="telegram_webhook_update",
+                    aggregate_id=str(replayable_telegram_update_id),
+                    dedupe_key="retention-dead-current",
+                    payload_json={
+                        "update_record_id": replayable_telegram_update_id,
+                        "update": {"update_id": replayable_telegram_provider_update_id},
+                    },
+                    state="dead",
+                    created_at=old,
+                    updated_at=current,
+                ),
+                OutboxEvent(
+                    workspace_id=context.workspace_id,
+                    event_type="telegram.process_update",
+                    aggregate_type="telegram_webhook_update",
+                    aggregate_id="current",
+                    dedupe_key="retention-current",
+                    payload_json={"message": "still within retention"},
+                    state="succeeded",
+                    completed_at=current,
+                    created_at=old,
+                    updated_at=current,
+                ),
+                OutboxEvent(
+                    workspace_id=context.workspace_id,
+                    event_type="telegram.process_update",
+                    aggregate_type="telegram_webhook_update",
+                    aggregate_id="dead",
+                    dedupe_key="retention-dead",
+                    payload_json={"message": "requires operator recovery"},
+                    state="dead",
+                    completed_at=old,
+                    created_at=old,
+                    updated_at=old,
+                ),
+                TelegramSession(
+                    workspace_id=context.workspace_id,
+                    chat_id="old-chat",
+                    user_id="old-user",
+                    state_data={"last_ai_message": "expired private conversation"},
+                    created_at=old,
+                    updated_at=old,
+                ),
+                TelegramSession(
+                    workspace_id=context.workspace_id,
+                    chat_id="current-chat",
+                    user_id="current-user",
+                    state_data={"mode": "people"},
+                    created_at=old,
+                    updated_at=current,
+                ),
             ]
         )
         db.commit()
 
-        counts = DataLifecycleService(db, Settings(_env_file=None)).purge_expired()
+        counts = DataLifecycleService(
+            db,
+            Settings(
+                retention_completed_outbox_days=1,
+                retention_webhook_days=1,
+                retention_telegram_session_days=1,
+                _env_file=None,
+            ),
+        ).purge_expired()
 
         assert counts["oauth_states"] == 1
         assert counts["rate_limits"] == 1
+        assert counts["telegram_webhook_updates"] == 1
+        assert counts["plaid_webhook_events"] == 1
+        assert counts["completed_outbox_events"] == 1
+        assert counts["discarded_telegram_outbox_payloads"] == 1
+        assert counts["telegram_sessions"] == 1
         assert db.scalar(select(OAuthState).where(OAuthState.state_hash == "current")) is not None
+        assert db.scalar(select(PlaidWebhookEvent.id)) is not None
+        assert (
+            db.scalar(
+                select(TelegramWebhookUpdate.id).where(
+                    TelegramWebhookUpdate.id == expired_telegram_update_id
+                )
+            )
+            is None
+        )
+        assert (
+            db.scalar(
+                select(TelegramWebhookUpdate.id).where(
+                    TelegramWebhookUpdate.id == replayable_telegram_update_id
+                )
+            )
+            == replayable_telegram_update_id
+        )
+        assert (
+            db.scalar(select(OutboxEvent).where(OutboxEvent.dedupe_key == "retention-expired"))
+            is None
+        )
+        assert (
+            db.scalar(select(OutboxEvent).where(OutboxEvent.dedupe_key == "retention-current"))
+            is not None
+        )
+        discarded = db.scalar(
+            select(OutboxEvent).where(OutboxEvent.dedupe_key == "retention-dead")
+        )
+        assert discarded is not None
+        assert discarded.state == "discarded"
+        assert discarded.payload_json == {}
+        assert discarded.last_error == "retention_scrubbed"
+        recoverable = db.scalar(
+            select(OutboxEvent).where(OutboxEvent.dedupe_key == "retention-dead-current")
+        )
+        assert recoverable is not None
+        assert recoverable.state == "dead"
+        assert recoverable.payload_json == {
+            "update_record_id": replayable_telegram_update_id,
+            "update": {"update_id": replayable_telegram_provider_update_id},
+        }
+        assert replay_dead_outbox_events(db, event_type="telegram.process_update") == 1
+        db.refresh(recoverable)
+        assert recoverable.state == "pending"
+        assert db.get(TelegramWebhookUpdate, replayable_telegram_update_id) is not None
+        assert (
+            db.scalar(select(TelegramSession).where(TelegramSession.chat_id == "old-chat"))
+            is None
+        )
+        assert (
+            db.scalar(select(TelegramSession).where(TelegramSession.chat_id == "current-chat"))
+            is not None
+        )
+
+
+def test_successful_telegram_outbox_delivery_discards_raw_update_payload(tmp_path):
+    engine = create_engine(f"sqlite:///{tmp_path / 'telegram-outbox-privacy.db'}")
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        context = ensure_default_tenancy(db)
+        event = OutboxEvent(
+            workspace_id=context.workspace_id,
+            event_type="telegram.process_update",
+            aggregate_type="telegram_webhook_update",
+            aggregate_id="42",
+            dedupe_key="telegram-update:42",
+            payload_json={
+                "update_record_id": 42,
+                "update": {"message": {"text": "/connect SECRET-CODE"}},
+            },
+            state="in_flight",
+            lease_token="lease-token",
+            lease_expires_at=utc_now() + timedelta(minutes=1),
+        )
+        db.add(event)
+        db.commit()
+
+        assert complete_outbox_event(db, event.id, "lease-token") is True
+        db.refresh(event)
+
+        assert event.state == "succeeded"
+        assert event.payload_json == {}
+
+
+def test_retention_preserves_plaid_webhook_required_for_dead_job_replay(tmp_path):
+    engine = create_engine(f"sqlite:///{tmp_path / 'plaid-replay-retention.db'}")
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        context = ensure_default_tenancy(db)
+        old = utc_now() - timedelta(days=3)
+        webhook = PlaidWebhookEvent(
+            workspace_id=context.workspace_id,
+            webhook_type="TRANSACTIONS",
+            webhook_code="SYNC_UPDATES_AVAILABLE",
+            processing_status="failed",
+            received_at=old,
+            processed_at=old,
+            created_at=old,
+        )
+        db.add(webhook)
+        db.flush()
+        outbox = OutboxEvent(
+            workspace_id=context.workspace_id,
+            event_type="plaid.sync_item",
+            aggregate_type="plaid_item",
+            aggregate_id="42",
+            dedupe_key=f"plaid-webhook:{webhook.id}",
+            payload_json={"item_id": 42, "webhook_event_id": webhook.id},
+            state="dead",
+            completed_at=old,
+            created_at=old,
+            updated_at=old,
+        )
+        db.add(outbox)
+        db.commit()
+        webhook_id = webhook.id
+        outbox_id = outbox.id
+
+        service = DataLifecycleService(
+            db,
+            Settings(
+                retention_completed_outbox_days=1,
+                retention_webhook_days=1,
+                _env_file=None,
+            ),
+        )
+        first_counts = service.purge_expired()
+
+        assert first_counts["plaid_webhook_events"] == 0
+        assert db.get(PlaidWebhookEvent, webhook_id) is not None
+        assert replay_dead_outbox_events(db, event_type="plaid.sync_item") == 1
+        db.refresh(outbox)
+        assert outbox.state == "pending"
+
+        outbox.state = "succeeded"
+        outbox.completed_at = old
+        outbox.updated_at = old
+        db.commit()
+        second_counts = service.purge_expired()
+
+        assert second_counts["completed_outbox_events"] == 1
+        assert second_counts["plaid_webhook_events"] == 1
+        assert db.get(OutboxEvent, outbox_id) is None
+        assert db.get(PlaidWebhookEvent, webhook_id) is None

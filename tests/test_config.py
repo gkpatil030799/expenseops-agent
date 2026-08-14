@@ -1,4 +1,5 @@
 import pytest
+from pydantic import ValidationError
 
 from app.config import Settings
 
@@ -39,6 +40,56 @@ def test_admin_user_emails_parse_csv():
     assert settings.admin_user_emails == ["a@example.test", "b@example.test"]
 
 
+def test_settings_repr_redacts_credentials_and_private_identifiers():
+    sentinel = "UNIT_TEST_CREDENTIAL_MUST_NOT_BE_RENDERED"
+    settings = Settings(
+        database_url=f"postgresql://expenseops:{sentinel}@db.example/expenseops",
+        app_secret_key=sentinel,
+        app_secret_key_previous=[sentinel],
+        dashboard_username=sentinel,
+        dashboard_password=sentinel,
+        dashboard_api_token=sentinel,
+        oidc_client_id=sentinel,
+        oidc_client_secret=sentinel,
+        oidc_bootstrap_email=sentinel,
+        admin_user_emails=[sentinel],
+        plaid_client_id=sentinel,
+        plaid_secret=sentinel,
+        splitwise_api_key=sentinel,
+        splitwise_access_token=sentinel,
+        splitwise_consumer_key=sentinel,
+        splitwise_consumer_secret=sentinel,
+        splitwise_oauth_token=sentinel,
+        splitwise_oauth_token_secret=sentinel,
+        telegram_bot_token=sentinel,
+        telegram_chat_id=sentinel,
+        telegram_webhook_secret=sentinel,
+        telegram_allowed_user_id=sentinel,
+        openai_api_key=sentinel,
+        gmail_client_id=sentinel,
+        gmail_client_secret=sentinel,
+        gmail_refresh_token=sentinel,
+        gmail_user_id=sentinel,
+        household_base_location=sentinel,
+        google_maps_api_key=sentinel,
+        _env_file=None,
+    )
+
+    assert sentinel not in repr(settings)
+    assert settings.openai_api_key == sentinel
+    assert sentinel in settings.database_url
+
+
+def test_settings_validation_errors_hide_sensitive_input():
+    sentinel = "UNIT_TEST_INVALID_CREDENTIAL_MUST_NOT_BE_RENDERED"
+
+    with pytest.raises(ValidationError) as caught:
+        Settings(openai_api_key={"credential": sentinel}, _env_file=None)
+
+    assert sentinel not in str(caught.value)
+    assert sentinel not in repr(caught.value)
+
+
 @pytest.mark.parametrize("scheme", ["postgres://", "postgresql://"])
 def test_database_url_uses_installed_psycopg3_driver(scheme):
     settings = Settings(database_url=f"{scheme}user:secret@db.example/expenseops")
@@ -56,6 +107,49 @@ def test_docs_can_be_enabled_in_production():
     settings = _safe_production_settings(enable_docs=True)
 
     assert settings.docs_enabled is True
+
+
+def test_app_env_production_disables_docs_when_environment_field_is_local(monkeypatch):
+    monkeypatch.setenv("APP_ENV", "production")
+    settings = Settings(
+        environment="local",
+        app_secret_key="configured-fernet-key",
+        enable_docs=False,
+        _env_file=None,
+    )
+
+    assert settings.is_production_mode is True
+    assert settings.docs_enabled is False
+
+
+def test_app_env_production_keeps_database_initialization_migration_managed(monkeypatch):
+    import app.db as app_db
+    import app.tenancy as tenancy
+
+    monkeypatch.setenv("APP_ENV", "production")
+    settings = Settings(
+        environment="local",
+        app_secret_key="configured-fernet-key",
+        _env_file=None,
+    )
+    create_all_calls = []
+    bootstrap_calls = []
+    monkeypatch.setattr(app_db, "settings", settings)
+    monkeypatch.setattr(
+        app_db.Base.metadata,
+        "create_all",
+        lambda **kwargs: create_all_calls.append(kwargs),
+    )
+    monkeypatch.setattr(
+        tenancy,
+        "ensure_default_tenancy",
+        lambda db: bootstrap_calls.append(db),
+    )
+
+    app_db.init_db()
+
+    assert create_all_calls == []
+    assert bootstrap_calls == []
 
 
 def test_production_config_rejects_missing_telegram_secret():

@@ -60,7 +60,7 @@ def get_db(request: Request) -> Generator[Session, None, None]:
 
 
 def init_db() -> None:
-    if settings.environment == "production":
+    if settings.is_production_mode:
         log_event(logger, "db_initialized", mode="migration_managed")
         return
 

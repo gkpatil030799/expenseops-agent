@@ -4,12 +4,15 @@ import io
 import json
 import logging
 
+import pytest
+
 from app.config import Settings
 from app.logging_config import (
     JsonStructuredFormatter,
     LocalStructuredFormatter,
     configure_logging,
     log_event,
+    normalize_external_trace_id,
     reset_trace_id,
     safe_preview,
     set_trace_id,
@@ -85,6 +88,31 @@ def test_safe_preview_collapses_whitespace_and_caps_length():
     assert len(preview) == 20
 
 
+@pytest.mark.parametrize(
+    "value",
+    [
+        "x" * 65,
+        "contains spaces",
+        "contains/slash",
+        "line-break\n",
+        "unicode-☃",
+        "",
+        None,
+    ],
+)
+def test_external_request_ids_are_replaced_when_not_bounded_and_log_safe(value):
+    normalized = normalize_external_trace_id(value)
+
+    assert normalized != value
+    assert len(normalized) <= 64
+    assert normalized.isalnum()
+
+
+def test_external_request_ids_preserve_common_safe_formats():
+    for value in ["trace-123", "request_123", "abc.def:123", "A" * 64]:
+        assert normalize_external_trace_id(value) == value
+
+
 def test_configure_logging_uses_json_in_production():
     configure_logging(
         Settings(
@@ -112,3 +140,19 @@ def test_configure_logging_uses_readable_logs_locally():
 
     assert isinstance(logging.getLogger().handlers[0].formatter, LocalStructuredFormatter)
     assert logging.getLogger().level == logging.DEBUG
+
+
+def test_app_env_production_uses_json_info_logging_with_local_environment_field(monkeypatch):
+    monkeypatch.setenv("APP_ENV", "production")
+    configure_logging(
+        Settings(
+            environment="local",
+            app_secret_key="configured-fernet-key",
+            _env_file=None,
+        )
+    )
+
+    root = logging.getLogger()
+    assert isinstance(root.handlers[0].formatter, JsonStructuredFormatter)
+    assert root.level == logging.INFO
+    assert root.handlers[0].level == logging.INFO

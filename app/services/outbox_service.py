@@ -107,6 +107,12 @@ def complete_outbox_event(db: Session, event_id: int, lease_token: str) -> bool:
     event.lease_token = None
     event.lease_expires_at = None
     event.last_error = None
+    # Telegram updates may contain message text, profile metadata, receipt file
+    # identifiers, and one-time connection codes. They are only needed while the
+    # durable handler is pending; the audit event and webhook-update row retain
+    # the non-sensitive delivery outcome after successful processing.
+    if event.event_type == "telegram.process_update":
+        event.payload_json = {}
     db.commit()
     return True
 

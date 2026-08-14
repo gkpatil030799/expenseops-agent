@@ -34,7 +34,12 @@ from app.api import (
 from app.auth import install_dashboard_auth
 from app.config import get_settings
 from app.db import engine, init_db
-from app.logging_config import configure_logging, new_trace_id, reset_trace_id, set_trace_id
+from app.logging_config import (
+    configure_logging,
+    normalize_external_trace_id,
+    reset_trace_id,
+    set_trace_id,
+)
 from app.models import TenantScoped
 from app.security_middleware import SecurityHeadersMiddleware, install_safe_exception_handler
 from sandbox.backend.router import router as sandbox_router
@@ -59,6 +64,7 @@ app = FastAPI(
     openapi_url="/openapi.json" if settings.docs_enabled else None,
 )
 
+install_dashboard_auth(app, settings)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.frontend_origin,
@@ -69,13 +75,12 @@ app.add_middleware(
 app.add_middleware(TrustedHostMiddleware, allowed_hosts=settings.trusted_hosts)
 app.add_middleware(SecurityHeadersMiddleware, settings=settings)
 
-install_dashboard_auth(app, settings)
 install_safe_exception_handler(app)
 
 
 @app.middleware("http")
 async def request_trace_middleware(request: Request, call_next) -> Response:
-    trace_id = request.headers.get("X-Request-ID") or new_trace_id()
+    trace_id = normalize_external_trace_id(request.headers.get("X-Request-ID"))
     token = set_trace_id(trace_id)
     try:
         response = await call_next(request)

@@ -1,7 +1,10 @@
 import base64
 import hashlib
 import logging
+import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
+from threading import Event
 
 import pytest
 from fastapi.testclient import TestClient
@@ -90,7 +93,10 @@ def test_plaid_webhook_signature_verifies_generated_jwt_with_raw_body_hash():
         "y": _base64url_uint(public_numbers.y),
     }
     token = jwt.encode(
-        {"request_body_sha256": hashlib.sha256(raw_body).hexdigest()},
+        {
+            "iat": int(time.time()),
+            "request_body_sha256": hashlib.sha256(raw_body).hexdigest(),
+        },
         private_pem,
         algorithm="ES256",
         headers={"kid": "test-kid"},
@@ -129,7 +135,10 @@ def test_plaid_webhook_signature_rejects_raw_body_hash_mismatch():
         "y": _base64url_uint(public_numbers.y),
     }
     token = jwt.encode(
-        {"request_body_sha256": hashlib.sha256(b"different-body").hexdigest()},
+        {
+            "iat": int(time.time()),
+            "request_body_sha256": hashlib.sha256(b"different-body").hexdigest(),
+        },
         private_pem,
         algorithm="ES256",
         headers={"kid": "test-kid"},
@@ -146,6 +155,193 @@ def test_plaid_webhook_signature_rejects_raw_body_hash_mismatch():
         service.verify_webhook_signature(raw_body=raw_body, verification_header=token)
 
     assert exc.value.reason == "request_body_hash_mismatch"
+
+
+@pytest.mark.parametrize(
+    ("issued_at", "expected_reason"),
+    [
+        (lambda now: now - 301, "jwt_iat_too_old"),
+        (lambda now: now + 61, "jwt_iat_in_future"),
+    ],
+)
+def test_plaid_webhook_signature_rejects_out_of_window_iat(issued_at, expected_reason):
+    raw_body = b'{"webhook_type":"TRANSACTIONS"}'
+    token, jwk = _signed_webhook_jwt(raw_body, issued_at=issued_at(int(time.time())))
+    service = object.__new__(PlaidService)
+    service.settings = Settings(
+        plaid_env="production",
+        plaid_client_id="client-id",
+        plaid_secret="secret",
+    )
+    service.get_webhook_verification_key = lambda key_id: {"key": jwk}
+
+    with pytest.raises(PlaidWebhookVerificationError) as exc:
+        service.verify_webhook_signature(raw_body=raw_body, verification_header=token)
+
+    assert exc.value.reason == expected_reason
+
+
+def test_plaid_webhook_signature_rejects_oversized_header_before_key_fetch():
+    fetched = []
+    service = object.__new__(PlaidService)
+    service.settings = Settings(
+        plaid_env="production",
+        plaid_client_id="client-id",
+        plaid_secret="secret",
+    )
+    service.get_webhook_verification_key = lambda key_id: fetched.append(key_id)
+
+    with pytest.raises(PlaidWebhookVerificationError) as exc:
+        service.verify_webhook_signature(
+            raw_body=b"{}",
+            verification_header="x" * 8193,
+        )
+
+    assert exc.value.reason == "verification_header_too_large"
+    assert fetched == []
+
+
+def test_plaid_webhook_signature_rejects_hostile_kid_before_key_fetch():
+    raw_body = b"{}"
+    token, _jwk = _signed_webhook_jwt(raw_body, key_id="../../provider-key")
+    fetched = []
+    service = object.__new__(PlaidService)
+    service.settings = Settings(
+        plaid_env="production",
+        plaid_client_id="client-id",
+        plaid_secret="secret",
+    )
+    service.get_webhook_verification_key = lambda key_id: fetched.append(key_id)
+
+    with pytest.raises(PlaidWebhookVerificationError) as exc:
+        service.verify_webhook_signature(raw_body=raw_body, verification_header=token)
+
+    assert exc.value.reason == "invalid_kid"
+    assert fetched == []
+
+
+def test_plaid_webhook_rejects_declared_oversized_body_before_verification(monkeypatch):
+    monkeypatch.setattr(plaid_routes, "PLAID_WEBHOOK_MAX_BODY_BYTES", 32)
+    monkeypatch.setattr(
+        plaid_routes,
+        "get_settings",
+        lambda: (_ for _ in ()).throw(AssertionError("verification must not start")),
+    )
+    app.dependency_overrides[get_db] = lambda: object()
+
+    try:
+        response = TestClient(app).post(
+            "/plaid/webhook",
+            headers={"Content-Length": "33", "Content-Type": "application/json"},
+            content=b"{}",
+        )
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 413
+    assert response.json()["detail"] == "Plaid webhook payload too large"
+
+
+def test_plaid_webhook_rejects_actual_oversized_body_with_small_declared_length(monkeypatch):
+    monkeypatch.setattr(plaid_routes, "PLAID_WEBHOOK_MAX_BODY_BYTES", 32)
+    monkeypatch.setattr(
+        plaid_routes,
+        "get_settings",
+        lambda: (_ for _ in ()).throw(AssertionError("verification must not start")),
+    )
+    app.dependency_overrides[get_db] = lambda: object()
+
+    try:
+        response = TestClient(app).post(
+            "/plaid/webhook",
+            headers={"Content-Length": "1", "Content-Type": "application/json"},
+            content=b"x" * 33,
+        )
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 413
+    assert response.json()["detail"] == "Plaid webhook payload too large"
+
+
+def test_plaid_webhook_rate_limit_rejects_before_body_or_key_work(monkeypatch):
+    calls = []
+
+    class RejectingRateLimiter:
+        def check(self, key, *, limit, window_seconds):
+            calls.append((key, limit, window_seconds))
+            raise plaid_routes.HTTPException(status_code=429, detail="Too many requests")
+
+    async def unexpected_body_read(_request):
+        raise AssertionError("rate limiting must happen before request body work")
+
+    class UnexpectedPlaidService:
+        def __init__(self, settings=None):
+            raise AssertionError("rate limiting must happen before Plaid key work")
+
+    monkeypatch.setattr(plaid_routes, "rate_limiter", RejectingRateLimiter())
+    monkeypatch.setattr(plaid_routes, "_read_bounded_plaid_webhook_body", unexpected_body_read)
+    monkeypatch.setattr(plaid_routes, "PlaidService", UnexpectedPlaidService)
+    app.dependency_overrides[get_db] = lambda: object()
+
+    try:
+        response = TestClient(app, raise_server_exceptions=False).post(
+            "/plaid/webhook",
+            headers={"Plaid-Verification": "attacker-controlled"},
+            content=b"{}",
+        )
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 429
+    assert response.json() == {"detail": "Too many requests"}
+    assert len(calls) == 1
+    key, limit, window_seconds = calls[0]
+    assert key.startswith("plaid-webhook:")
+    assert "testclient" not in key
+    assert limit == plaid_routes.PLAID_WEBHOOK_RATE_LIMIT
+    assert window_seconds == plaid_routes.PLAID_WEBHOOK_RATE_WINDOW_SECONDS
+
+
+def test_slow_plaid_verification_does_not_block_the_async_server(monkeypatch):
+    verification_started = Event()
+
+    monkeypatch.setattr(
+        plaid_routes,
+        "get_settings",
+        lambda: Settings(
+            plaid_env="sandbox",
+            plaid_verify_webhooks=True,
+            plaid_client_id="client-id",
+            plaid_secret="secret",
+            _env_file=None,
+        ),
+    )
+
+    class SlowPlaidService:
+        def __init__(self, settings=None):
+            pass
+
+        def verify_webhook_signature(self, *, raw_body, verification_header):
+            verification_started.set()
+            time.sleep(0.5)
+
+    monkeypatch.setattr(plaid_routes, "PlaidService", SlowPlaidService)
+
+    with TestClient(app) as client, ThreadPoolExecutor(max_workers=1) as executor:
+        webhook = executor.submit(
+            client.post,
+            "/plaid/webhook",
+            headers={"Plaid-Verification": "slow-but-valid"},
+            content=b"{}",
+        )
+        assert verification_started.wait(timeout=1)
+
+        health = client.get("/health")
+
+        assert health.status_code == 200
+        assert webhook.done() is False
+        assert webhook.result(timeout=2).status_code == 400
 
 
 def test_plaid_webhook_sandbox_verification_disabled_by_default(monkeypatch):
@@ -497,7 +693,12 @@ def test_plaid_webhook_key_fetch_failure_returns_403_with_sanitized_reason(
     )
 
 
-def test_plaid_webhook_verification_failure_is_audited(tmp_path, monkeypatch):
+def test_plaid_webhook_verification_failure_is_logged_without_persistence(
+    tmp_path,
+    monkeypatch,
+    caplog,
+):
+    caplog.set_level(logging.WARNING)
     db, SessionLocal = _plaid_route_test_db(tmp_path)
     db.close()
     monkeypatch.setattr(
@@ -521,17 +722,166 @@ def test_plaid_webhook_verification_failure_is_audited(tmp_path, monkeypatch):
             },
         )
         db = SessionLocal()
-        event = db.query(PlaidWebhookEvent).one()
+        event_count = db.query(PlaidWebhookEvent).count()
     finally:
         app.dependency_overrides.clear()
         db.close()
 
     assert response.status_code == 403
-    assert event.processing_status == "verification_failed"
-    assert event.error_message == "missing_plaid_verification_header"
-    assert event.webhook_type == "TRANSACTIONS"
-    assert event.webhook_code == "SYNC_UPDATES_AVAILABLE"
-    assert event.plaid_item_id == "item-1"
+    assert event_count == 0
+    failure = next(
+        record
+        for record in caplog.records
+        if getattr(record, "event", None) == "plaid_webhook_verification_failed"
+    )
+    assert failure.log_metadata["reason"] == "missing_plaid_verification_header"
+    assert failure.log_metadata["webhook_type"] == "TRANSACTIONS"
+    assert failure.log_metadata["webhook_code"] == "SYNC_UPDATES_AVAILABLE"
+    assert failure.log_metadata["plaid_item_id_present"] is True
+    assert "item-1" not in str(failure.log_metadata)
+
+
+def test_plaid_webhook_non_object_json_is_rejected_without_server_error(monkeypatch):
+    monkeypatch.setattr(
+        plaid_routes,
+        "get_settings",
+        lambda: Settings(
+            plaid_env="production",
+            plaid_client_id="client-id",
+            plaid_secret="secret",
+        ),
+    )
+    app.dependency_overrides[get_db] = lambda: object()
+
+    try:
+        response = TestClient(app).post(
+            "/plaid/webhook",
+            headers={"Content-Type": "application/json"},
+            content=b"[]",
+        )
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Plaid webhook verification failed"
+
+
+@pytest.mark.parametrize(
+    "raw_body",
+    [
+        b'{"value":' + (b"9" * 5_000) + b"}",
+        (b"[" * 1_500) + b"0" + (b"]" * 1_500),
+    ],
+    ids=["integer-over-interpreter-limit", "excessive-json-nesting"],
+)
+def test_plaid_webhook_json_parser_limits_return_bad_request(
+    tmp_path,
+    monkeypatch,
+    raw_body,
+):
+    db, SessionLocal = _plaid_route_test_db(tmp_path)
+    db.close()
+    monkeypatch.setattr(
+        plaid_routes,
+        "get_settings",
+        lambda: Settings(
+            plaid_env="production",
+            plaid_client_id="client-id",
+            plaid_secret="secret",
+        ),
+    )
+
+    class SuccessfulPlaidService:
+        def __init__(self, settings=None):
+            pass
+
+        def verify_webhook_signature(self, *, raw_body, verification_header):
+            assert verification_header == "verified-delivery"
+
+    monkeypatch.setattr(plaid_routes, "PlaidService", SuccessfulPlaidService)
+    app.dependency_overrides[get_db] = _override_db(SessionLocal)
+
+    try:
+        response = TestClient(app, raise_server_exceptions=False).post(
+            "/plaid/webhook",
+            headers={
+                "Content-Type": "application/json",
+                "Plaid-Verification": "verified-delivery",
+            },
+            content=raw_body,
+        )
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "Invalid Plaid webhook JSON"
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"webhook_type": ["ITEM"], "webhook_code": "ERROR"},
+        {"webhook_type": "ITEM", "webhook_code": {"value": "ERROR"}},
+        {
+            "webhook_type": "TRANSACTIONS",
+            "webhook_code": "SYNC_UPDATES_AVAILABLE",
+            "item_id": ["item-1"],
+        },
+        {"webhook_type": "T" * 65, "webhook_code": "ERROR"},
+        {"webhook_type": "ITEM", "webhook_code": "C" * 129},
+        {"webhook_type": "ITEM", "webhook_code": "ERROR", "item_id": "I" * 129},
+    ],
+    ids=[
+        "object-webhook-type",
+        "object-webhook-code",
+        "object-item-id",
+        "oversized-webhook-type",
+        "oversized-webhook-code",
+        "oversized-item-id",
+    ],
+)
+def test_plaid_webhook_rejects_invalid_bounded_fields(
+    tmp_path,
+    monkeypatch,
+    payload,
+):
+    db, SessionLocal = _plaid_route_test_db(tmp_path)
+    db.close()
+    monkeypatch.setattr(
+        plaid_routes,
+        "get_settings",
+        lambda: Settings(
+            plaid_env="production",
+            plaid_client_id="client-id",
+            plaid_secret="secret",
+        ),
+    )
+
+    class SuccessfulPlaidService:
+        def __init__(self, settings=None):
+            pass
+
+        def verify_webhook_signature(self, *, raw_body, verification_header):
+            assert verification_header == "verified-delivery"
+
+    monkeypatch.setattr(plaid_routes, "PlaidService", SuccessfulPlaidService)
+    app.dependency_overrides[get_db] = _override_db(SessionLocal)
+
+    try:
+        response = TestClient(app, raise_server_exceptions=False).post(
+            "/plaid/webhook",
+            headers={"Plaid-Verification": "verified-delivery"},
+            json=payload,
+        )
+        db = SessionLocal()
+        event_count = db.query(PlaidWebhookEvent).count()
+    finally:
+        app.dependency_overrides.clear()
+        db.close()
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "Invalid Plaid webhook fields"
+    assert event_count == 0
 
 
 def test_plaid_webhook_verification_enabled_accepts_valid_header(monkeypatch, caplog):
@@ -852,7 +1202,12 @@ def test_plaid_webhook_handles_sync_updates_available(monkeypatch):
 
 
 def test_plaid_webhook_background_sync_reuses_transaction_service(monkeypatch, caplog):
-    item = PlaidItem(id=123, item_id="item-1", access_token_encrypted="encrypted")
+    item = PlaidItem(
+        id=123,
+        item_id="item-1",
+        owner_user_id=456,
+        access_token_encrypted="encrypted",
+    )
     calls = []
 
     class FakeTransactionService:
@@ -963,6 +1318,7 @@ def test_plaid_webhook_event_queued_then_processed(monkeypatch, tmp_path):
     db, SessionLocal = _plaid_route_test_db(tmp_path)
     item = PlaidItem(
         item_id="item-1",
+        owner_user_id=1,
         access_token_encrypted="encrypted",
         institution_name="Test Bank",
     )
@@ -1007,6 +1363,7 @@ def test_plaid_webhook_event_queued_then_processed(monkeypatch, tmp_path):
 
 
 def test_production_plaid_webhook_is_durable_before_ack(monkeypatch, tmp_path):
+    monkeypatch.setenv("APP_ENV", "production")
     db, SessionLocal = _plaid_route_test_db(tmp_path)
     item = PlaidItem(
         item_id="item-1",
@@ -1022,7 +1379,7 @@ def test_production_plaid_webhook_is_durable_before_ack(monkeypatch, tmp_path):
         plaid_routes,
         "get_settings",
         lambda: Settings(
-            environment="production",
+            environment="local",
             app_secret_key="configured-fernet-key",
             _env_file=None,
         ),
@@ -1056,6 +1413,139 @@ def test_production_plaid_webhook_is_durable_before_ack(monkeypatch, tmp_path):
     assert outbox.event_type == "plaid.sync_item"
     assert outbox.state == "pending"
     assert outbox.payload_json == {"item_id": item_id, "webhook_event_id": webhook.id}
+
+
+def test_verified_plaid_webhook_replay_does_not_enqueue_duplicate_work(
+    monkeypatch,
+    tmp_path,
+):
+    db, SessionLocal = _plaid_route_test_db(tmp_path)
+    db.add(PlaidItem(item_id="item-1", access_token_encrypted="encrypted"))
+    db.commit()
+    db.close()
+    synced = []
+    monkeypatch.setattr(
+        plaid_routes,
+        "get_settings",
+        lambda: Settings(
+            plaid_env="sandbox",
+            plaid_verify_webhooks=True,
+            plaid_client_id="client-id",
+            plaid_secret="secret",
+        ),
+    )
+
+    class SuccessfulPlaidService:
+        def __init__(self, settings=None):
+            pass
+
+        def verify_webhook_signature(self, *, raw_body, verification_header):
+            assert raw_body
+            assert verification_header == "verified-delivery-one"
+
+    monkeypatch.setattr(plaid_routes, "PlaidService", SuccessfulPlaidService)
+    monkeypatch.setattr(
+        plaid_routes,
+        "_sync_item_by_db_id",
+        lambda item_id, event_id=None, **kwargs: synced.append((item_id, event_id)),
+    )
+    app.dependency_overrides[get_db] = _override_db(SessionLocal)
+    payload = {
+        "webhook_type": "TRANSACTIONS",
+        "webhook_code": "SYNC_UPDATES_AVAILABLE",
+        "item_id": "item-1",
+    }
+
+    try:
+        first = TestClient(app).post(
+            "/plaid/webhook",
+            headers={"Plaid-Verification": "verified-delivery-one"},
+            json=payload,
+        )
+        replay = TestClient(app).post(
+            "/plaid/webhook",
+            headers={"Plaid-Verification": "verified-delivery-one"},
+            json=payload,
+        )
+        db = SessionLocal()
+        events = db.query(PlaidWebhookEvent).all()
+    finally:
+        app.dependency_overrides.clear()
+        db.close()
+
+    assert first.status_code == 200
+    assert replay.status_code == 200
+    assert replay.json()["message"] == "Webhook already accepted"
+    assert len(events) == 1
+    assert events[0].delivery_fingerprint
+    assert len(synced) == 1
+
+
+def test_identical_plaid_payload_with_distinct_verified_jwts_remains_legitimate(
+    monkeypatch,
+    tmp_path,
+):
+    db, SessionLocal = _plaid_route_test_db(tmp_path)
+    db.add(PlaidItem(item_id="item-1", access_token_encrypted="encrypted"))
+    db.commit()
+    db.close()
+    synced = []
+    accepted_headers = {"verified-delivery-one", "verified-delivery-two"}
+    monkeypatch.setattr(
+        plaid_routes,
+        "get_settings",
+        lambda: Settings(
+            plaid_env="sandbox",
+            plaid_verify_webhooks=True,
+            plaid_client_id="client-id",
+            plaid_secret="secret",
+        ),
+    )
+
+    class SuccessfulPlaidService:
+        def __init__(self, settings=None):
+            pass
+
+        def verify_webhook_signature(self, *, raw_body, verification_header):
+            assert raw_body
+            assert verification_header in accepted_headers
+
+    monkeypatch.setattr(plaid_routes, "PlaidService", SuccessfulPlaidService)
+    monkeypatch.setattr(
+        plaid_routes,
+        "_sync_item_by_db_id",
+        lambda item_id, event_id=None, **kwargs: synced.append((item_id, event_id)),
+    )
+    app.dependency_overrides[get_db] = _override_db(SessionLocal)
+    payload = {
+        "webhook_type": "TRANSACTIONS",
+        "webhook_code": "SYNC_UPDATES_AVAILABLE",
+        "item_id": "item-1",
+    }
+
+    try:
+        responses = [
+            TestClient(app).post(
+                "/plaid/webhook",
+                headers={"Plaid-Verification": header},
+                json=payload,
+            )
+            for header in sorted(accepted_headers)
+        ]
+        db = SessionLocal()
+        events = db.query(PlaidWebhookEvent).all()
+    finally:
+        app.dependency_overrides.clear()
+        db.close()
+
+    assert [response.status_code for response in responses] == [200, 200]
+    assert [response.json()["message"] for response in responses] == [
+        "Queued transactions sync",
+        "Queued transactions sync",
+    ]
+    assert len(events) == 2
+    assert len({event.delivery_fingerprint for event in events}) == 2
+    assert len(synced) == 2
 
 
 def test_plaid_webhook_event_failed_sync(monkeypatch, tmp_path):
@@ -1123,7 +1613,12 @@ def _override_db(SessionLocal):
     return override
 
 
-def _signed_webhook_jwt(raw_body: bytes):
+def _signed_webhook_jwt(
+    raw_body: bytes,
+    *,
+    issued_at: int | None = None,
+    key_id: str = "test-kid",
+):
     import jwt
     from cryptography.hazmat.primitives import serialization
     from cryptography.hazmat.primitives.asymmetric import ec
@@ -1138,17 +1633,20 @@ def _signed_webhook_jwt(raw_body: bytes):
     jwk = {
         "kty": "EC",
         "crv": "P-256",
-        "kid": "test-kid",
+        "kid": key_id,
         "use": "sig",
         "alg": "ES256",
         "x": _base64url_uint(public_numbers.x),
         "y": _base64url_uint(public_numbers.y),
     }
     token = jwt.encode(
-        {"request_body_sha256": hashlib.sha256(raw_body).hexdigest()},
+        {
+            "iat": int(time.time()) if issued_at is None else issued_at,
+            "request_body_sha256": hashlib.sha256(raw_body).hexdigest(),
+        },
         private_pem,
         algorithm="ES256",
-        headers={"kid": "test-kid"},
+        headers={"kid": key_id},
     )
     return token, jwk
 

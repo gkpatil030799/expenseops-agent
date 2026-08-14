@@ -12,7 +12,7 @@ from sqlalchemy import select
 
 from app.api.deps import CurrentUser, CurrentWorkspace, CurrentWorkspaceOwner, DbSession
 from app.config import get_settings
-from app.logging_config import log_event
+from app.logging_config import get_trace_id, log_event
 from app.models import (
     GmailAccount,
     PlaidItem,
@@ -258,7 +258,7 @@ def gmail_callback(
             "gmail_connect_failed",
             level=logging.WARNING,
             error_class=type(exc).__name__,
-            request_id=request.headers.get("X-Request-ID"),
+            request_id=get_trace_id(),
         )
         raise HTTPException(status_code=400, detail="Gmail connection failed") from exc
     return RedirectResponse(url="/?workspace=settings", status_code=303)

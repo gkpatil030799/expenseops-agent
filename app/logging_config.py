@@ -21,10 +21,18 @@ _SENSITIVE_KEY_PATTERN = re.compile(
     re.IGNORECASE,
 )
 _MAX_VALUE_LENGTH = 240
+_EXTERNAL_TRACE_ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,63}\Z")
 
 
 def new_trace_id() -> str:
     return secrets.token_hex(8)
+
+
+def normalize_external_trace_id(value: str | None) -> str:
+    """Accept a bounded, log-safe client request ID or replace it with a server ID."""
+    if value is not None and _EXTERNAL_TRACE_ID_PATTERN.fullmatch(value):
+        return value
+    return new_trace_id()
 
 
 def set_trace_id(trace_id: str | None = None) -> Token[str | None]:
@@ -140,16 +148,15 @@ class JsonStructuredFormatter(logging.Formatter):
 
 def configure_logging(settings: Settings | None = None) -> None:
     settings = settings or get_settings()
+    production_mode = settings.is_production_mode
     root = logging.getLogger()
     root.handlers.clear()
-    root.setLevel(logging.DEBUG if settings.environment == "local" else logging.INFO)
+    root.setLevel(logging.INFO if production_mode else logging.DEBUG)
 
     handler = logging.StreamHandler()
-    handler.setLevel(logging.DEBUG if settings.environment == "local" else logging.INFO)
+    handler.setLevel(logging.INFO if production_mode else logging.DEBUG)
     handler.setFormatter(
-        JsonStructuredFormatter()
-        if settings.environment == "production"
-        else LocalStructuredFormatter()
+        JsonStructuredFormatter() if production_mode else LocalStructuredFormatter()
     )
     root.addHandler(handler)
     logging.getLogger("httpx").setLevel(logging.WARNING)

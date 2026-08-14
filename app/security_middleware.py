@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from urllib.parse import urlsplit, urlunsplit
 
 from fastapi import Request
 from fastapi.responses import JSONResponse, RedirectResponse
@@ -24,11 +25,16 @@ class SecurityHeadersMiddleware:
             return
         request = Request(scope, receive=receive)
         if self._must_redirect_https(request):
-            forwarded_host = request.headers.get("x-forwarded-host") or request.headers.get(
-                "host", ""
-            )
-            target = request.url.replace(scheme="https", netloc=forwarded_host)
-            await RedirectResponse(str(target), status_code=308)(scope, receive, send)
+            target = self._https_redirect_target(request)
+            if target is None:
+                response = JSONResponse(
+                    status_code=400,
+                    content={"detail": "Invalid host header"},
+                )
+            else:
+                response = RedirectResponse(target, status_code=308)
+            self._apply_headers(response, request)
+            await response(scope, receive, send)
             return
 
         async def send_with_headers(message) -> None:
@@ -48,6 +54,62 @@ class SecurityHeadersMiddleware:
         forwarded_proto = request.headers.get("x-forwarded-proto", "").split(",", 1)[0].strip()
         return (forwarded_proto or request.url.scheme).lower() != "https"
 
+    def _https_redirect_target(self, request: Request) -> str | None:
+        canonical_url = self.settings.app_public_url.strip()
+        try:
+            canonical = urlsplit(canonical_url)
+            _ = canonical.port
+        except ValueError:
+            canonical = None
+        if (
+            canonical is not None
+            and not any(ord(char) < 33 or ord(char) == 127 for char in canonical_url)
+            and canonical.scheme.casefold() == "https"
+            and canonical.hostname
+            and canonical.username is None
+            and canonical.password is None
+            and canonical.path in {"", "/"}
+            and not canonical.query
+            and not canonical.fragment
+        ):
+            netloc = canonical.netloc
+        else:
+            netloc = self._validated_request_host(request.headers.get("host", ""))
+        if not netloc:
+            return None
+        return urlunsplit(("https", netloc, request.url.path, request.url.query, ""))
+
+    def _validated_request_host(self, raw_host: str) -> str | None:
+        if not raw_host or raw_host != raw_host.strip():
+            return None
+        if any(ord(char) < 33 or ord(char) == 127 for char in raw_host):
+            return None
+        try:
+            parsed = urlsplit(f"//{raw_host}")
+            _ = parsed.port
+        except ValueError:
+            return None
+        hostname = parsed.hostname
+        if (
+            not hostname
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.path
+            or parsed.query
+            or parsed.fragment
+        ):
+            return None
+        hostname = hostname.casefold()
+        for pattern in self.settings.trusted_hosts:
+            allowed = pattern.casefold()
+            if allowed == "*":
+                return raw_host
+            if hostname == allowed or (
+                allowed.startswith("*.") and hostname.endswith(allowed[1:])
+            ):
+                return raw_host
+        return None
+
     def _headers(self, request: Request) -> list[tuple[bytes, bytes]]:
         values = {
             "content-security-policy": (
@@ -66,6 +128,12 @@ class SecurityHeadersMiddleware:
         if request.url.path.startswith(("/api/", "/auth/")):
             values["cache-control"] = "no-store"
         return [(name.encode("ascii"), value.encode("ascii")) for name, value in values.items()]
+
+    def _apply_headers(self, response, request: Request) -> None:
+        for raw_name, raw_value in self._headers(request):
+            name = raw_name.decode("ascii")
+            if name not in response.headers:
+                response.headers[name] = raw_value.decode("ascii")
 
 
 def install_safe_exception_handler(app) -> None:

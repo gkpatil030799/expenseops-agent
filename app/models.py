@@ -102,6 +102,13 @@ class TelegramIdentity(TenantScoped, Base):
     __tablename__ = "telegram_identities"
     __table_args__ = (
         UniqueConstraint("telegram_user_id", "chat_id", name="uq_telegram_identity_external"),
+        Index(
+            "uq_telegram_identity_user_active",
+            "user_id",
+            unique=True,
+            postgresql_where=text("enabled IS TRUE"),
+            sqlite_where=text("enabled = 1"),
+        ),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
@@ -412,6 +419,11 @@ class PlaidWebhookEvent(Base):
     __tablename__ = "plaid_webhook_events"
     __table_args__ = (
         Index("ix_plaid_webhook_processing_received", "processing_status", "received_at"),
+        Index(
+            "ux_plaid_webhook_events_delivery_fingerprint",
+            "delivery_fingerprint",
+            unique=True,
+        ),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
@@ -440,6 +452,7 @@ class PlaidWebhookEvent(Base):
     )
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     payload_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    delivery_fingerprint: Mapped[str | None] = mapped_column(String(64), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
     plaid_item: Mapped[PlaidItem | None] = relationship()

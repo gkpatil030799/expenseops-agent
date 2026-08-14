@@ -27,6 +27,35 @@ def test_plaid_token_environment_is_inferred_from_token_prefix():
     assert _plaid_token_environment("access-custom-token") is None
 
 
+def test_app_env_production_suppresses_local_transaction_detail_logging(
+    monkeypatch,
+    caplog,
+):
+    monkeypatch.setenv("APP_ENV", "production")
+    service = object.__new__(TransactionService)
+    service.settings = Settings(
+        environment="local",
+        app_secret_key="configured-fernet-key",
+        _env_file=None,
+    )
+    caplog.set_level(logging.INFO)
+
+    service._log_added_transaction_seen(  # noqa: SLF001
+        {
+            "transaction_id": "sensitive-transaction-id",
+            "name": "sensitive-merchant-name",
+            "merchant_name": "sensitive-merchant-name",
+            "amount": "123.45",
+        }
+    )
+
+    assert not any(
+        getattr(record, "event", None) == "plaid_sync_added_transaction_seen"
+        for record in caplog.records
+    )
+    assert "sensitive-merchant-name" not in caplog.text
+
+
 def test_sync_all_items_skips_items_from_different_plaid_environment(monkeypatch):
     sandbox_item = PlaidItem(
         item_id="sandbox-item",
