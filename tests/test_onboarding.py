@@ -342,6 +342,32 @@ def _invite(client: TestClient, workspace_id: int, email: str = "guest@example.t
     return response.json()["invite_token"]
 
 
+def test_request_id_is_sanitized_before_invitation_audit_is_persisted(onboarding_app):
+    client, database, contexts = onboarding_app
+    untrusted_request_id = "oversized-" + "x" * 100
+
+    response = client.post(
+        f"/api/workspaces/{contexts['owner'].workspace_id}/invitations",
+        headers={
+            "Authorization": "Bearer owner-token",
+            "X-Request-ID": untrusted_request_id,
+        },
+        json={"email": "audit@example.test", "role": "member"},
+    )
+
+    assert response.status_code == 201
+    sanitized_request_id = response.headers["x-request-id"]
+    assert sanitized_request_id != untrusted_request_id
+    assert len(sanitized_request_id) <= 64
+    with database() as db:
+        event = db.scalar(
+            select(AuditEvent)
+            .execution_options(skip_tenant_scope=True)
+            .where(AuditEvent.event_type == "member_invited")
+        )
+        assert event.request_id == sanitized_request_id
+
+
 def test_valid_invitation_is_single_use_and_does_not_accept_guessed_workspace(onboarding_app):
     client, database, contexts = onboarding_app
     token = _invite(client, contexts["owner"].workspace_id)
@@ -687,6 +713,123 @@ def test_telegram_link_code_is_hashed_and_can_only_be_consumed_once(database, mo
         assert len(identities) == 1
         assert "connected" in sent[0].lower()
         assert "invalid or expired" in sent[1].lower()
+
+
+def test_telegram_link_code_cannot_add_second_active_identity_for_app_user(database, monkeypatch):
+    from app.api import telegram_routes
+
+    sent: list[str] = []
+    monkeypatch.setattr(
+        telegram_routes.TelegramService,
+        "send_message",
+        lambda _self, text, **_kwargs: sent.append(text),
+    )
+    first_code = "FIRSTCODE"
+    second_code = "SECONDCODE"
+    with database() as db:
+        user = User(email="one-telegram@example.test", display_name="One Telegram")
+        db.add(user)
+        db.flush()
+        workspace = Workspace(name="One Telegram", created_by_user_id=user.id)
+        db.add(workspace)
+        db.flush()
+        db.add(WorkspaceMembership(user_id=user.id, workspace_id=workspace.id, role="owner"))
+        db.add_all(
+            [
+                TelegramLinkCode(
+                    workspace_id=workspace.id,
+                    user_id=user.id,
+                    code_hash=hash_api_token(first_code),
+                    expires_at=utc_now() + timedelta(minutes=5),
+                ),
+                TelegramLinkCode(
+                    workspace_id=workspace.id,
+                    user_id=user.id,
+                    code_hash=hash_api_token(second_code),
+                    expires_at=utc_now() + timedelta(minutes=5),
+                ),
+            ]
+        )
+        db.commit()
+
+        assert telegram_routes._handle_telegram_connect(
+            {
+                "message": {
+                    "text": f"/connect {first_code}",
+                    "from": {"id": 111},
+                    "chat": {"id": 111, "type": "private"},
+                }
+            },
+            db,
+        )
+        assert telegram_routes._handle_telegram_connect(
+            {
+                "message": {
+                    "text": f"/connect {second_code}",
+                    "from": {"id": 222},
+                    "chat": {"id": 222, "type": "private"},
+                }
+            },
+            db,
+        )
+
+        identities = list(
+            db.scalars(select(TelegramIdentity).execution_options(skip_tenant_scope=True))
+        )
+        second_link = db.scalar(
+            select(TelegramLinkCode)
+            .execution_options(skip_tenant_scope=True)
+            .where(TelegramLinkCode.code_hash == hash_api_token(second_code))
+        )
+        assert [(identity.telegram_user_id, identity.chat_id) for identity in identities] == [
+            ("111", "111")
+        ]
+        assert second_link.used_at is None
+        assert "already linked" in sent[-1].lower()
+
+
+def test_telegram_link_code_is_not_consumed_from_group_chat(database, monkeypatch):
+    from app.api import telegram_routes
+
+    monkeypatch.setattr(
+        telegram_routes.TelegramService,
+        "send_message",
+        lambda _self, _text, **_kwargs: pytest.fail("group connect must not send a reply"),
+    )
+    raw = "PRIVATEONLY"
+    with database() as db:
+        user = User(email="private-telegram@example.test", display_name="Private Telegram")
+        db.add(user)
+        db.flush()
+        workspace = Workspace(name="Private Telegram", created_by_user_id=user.id)
+        db.add(workspace)
+        db.flush()
+        db.add(WorkspaceMembership(user_id=user.id, workspace_id=workspace.id, role="owner"))
+        link = TelegramLinkCode(
+            workspace_id=workspace.id,
+            user_id=user.id,
+            code_hash=hash_api_token(raw),
+            expires_at=utc_now() + timedelta(minutes=5),
+        )
+        db.add(link)
+        db.commit()
+
+        assert telegram_routes._handle_telegram_connect(
+            {
+                "message": {
+                    "text": f"/connect {raw}",
+                    "from": {"id": 333},
+                    "chat": {"id": -333, "type": "group"},
+                }
+            },
+            db,
+        )
+
+        db.refresh(link)
+        assert link.used_at is None
+        assert not list(
+            db.scalars(select(TelegramIdentity).execution_options(skip_tenant_scope=True))
+        )
 
 
 def test_telegram_link_code_returns_direct_bot_link(database, monkeypatch):

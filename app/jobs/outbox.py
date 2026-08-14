@@ -26,7 +26,14 @@ from app.services.outbox_service import (
     fail_outbox_event,
     replay_dead_outbox_events,
 )
-from app.tenancy import clear_session_tenant, set_active_user, set_trusted_workspace
+from app.tenancy import (
+    clear_session_tenant,
+    reset_active_user,
+    reset_active_workspace,
+    set_active_user,
+    set_active_workspace,
+    set_trusted_workspace,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -91,30 +98,38 @@ def run_forever(*, max_events: int = 25, poll_seconds: float = 2.0) -> None:
 
 
 def _handle_event(db, claimed: ClaimedEvent) -> None:
-    event = db.get(
-        OutboxEvent,
-        claimed.id,
-        execution_options={"skip_tenant_scope": True},
-    )
-    if event is None:
-        raise RuntimeError("outbox_event_missing")
-    set_trusted_workspace(db, claimed.workspace_id)
-    if event.event_type == "plaid.sync_item":
-        _handle_plaid_sync(event)
-        return
-    if event.event_type == "telegram.review_transaction":
-        _handle_telegram_review(db, event)
-        return
-    if event.event_type == "telegram.splitwise_posted":
-        _handle_telegram_splitwise_posted(db, event)
-        return
-    if event.event_type == "splitwise.execute_operation":
-        _handle_splitwise_operation(db, event)
-        return
-    if event.event_type == "telegram.process_update":
-        _handle_telegram_update(db, event)
-        return
-    raise RuntimeError(f"unsupported_outbox_event:{event.event_type}")
+    workspace_token = set_active_workspace(claimed.workspace_id)
+    # A worker process handles events for many users. Start every event without
+    # an inherited actor and restore both ContextVars even when delivery fails.
+    user_token = set_active_user(None)
+    try:
+        event = db.get(
+            OutboxEvent,
+            claimed.id,
+            execution_options={"skip_tenant_scope": True},
+        )
+        if event is None:
+            raise RuntimeError("outbox_event_missing")
+        set_trusted_workspace(db, claimed.workspace_id)
+        if event.event_type == "plaid.sync_item":
+            _handle_plaid_sync(event)
+            return
+        if event.event_type == "telegram.review_transaction":
+            _handle_telegram_review(db, event)
+            return
+        if event.event_type == "telegram.splitwise_posted":
+            _handle_telegram_splitwise_posted(db, event)
+            return
+        if event.event_type == "splitwise.execute_operation":
+            _handle_splitwise_operation(db, event)
+            return
+        if event.event_type == "telegram.process_update":
+            _handle_telegram_update(db, event)
+            return
+        raise RuntimeError(f"unsupported_outbox_event:{event.event_type}")
+    finally:
+        reset_active_user(user_token)
+        reset_active_workspace(workspace_token)
 
 
 def _handle_plaid_sync(event: OutboxEvent) -> None:
@@ -123,11 +138,17 @@ def _handle_plaid_sync(event: OutboxEvent) -> None:
     item_id = int(event.payload_json["item_id"])
     webhook_event_id = int(event.payload_json["webhook_event_id"])
     with SessionLocal() as verification_db:
+        set_trusted_workspace(verification_db, event.workspace_id)
         webhook = verification_db.get(PlaidWebhookEvent, webhook_event_id)
         if webhook is not None and webhook.processing_status == "processed":
             return
-    _sync_item_by_db_id(item_id, webhook_event_id)
+    _sync_item_by_db_id(
+        item_id,
+        webhook_event_id,
+        workspace_id=event.workspace_id,
+    )
     with SessionLocal() as verification_db:
+        set_trusted_workspace(verification_db, event.workspace_id)
         webhook = verification_db.get(PlaidWebhookEvent, webhook_event_id)
         if webhook is None or webhook.processing_status != "processed":
             reason = webhook.error_message if webhook is not None else "webhook_event_missing"
@@ -198,30 +219,40 @@ def _handle_splitwise_operation(db, event: OutboxEvent) -> None:
         recipient_user_id = tx.plaid_item.owner_user_id
     if recipient_user_id is None:
         raise RuntimeError("splitwise_actor_missing")
-    db.info["user_id"] = int(recipient_user_id)
-    set_active_user(int(recipient_user_id))
-    db.info["durable_worker"] = True
-    db.info["interaction_channel"] = "worker"
-    service = TransactionService(db)
-    request = dict(operation.request_json or {})
-    if operation.action == "splitwise_create":
-        service._execute_splitwise_create(tx, request, operation=operation)  # noqa: SLF001
-        return
-    if operation.action == "splitwise_update":
-        payload = dict(request.get("payload") or {})
-        if not payload:
-            raise RuntimeError("splitwise_update_payload_missing")
-        service._execute_splitwise_update(tx, payload, operation=operation)  # noqa: SLF001
-        return
-    if operation.action in {"splitwise_delete", "splitwise_delete_removed"}:
-        service._execute_splitwise_delete(  # noqa: SLF001
-            tx,
-            operation=operation,
-            action=operation.action,
-            result_status=str(request.get("result_status") or TransactionStatus.ASK_USER.value),
-        )
-        return
-    raise RuntimeError(f"unsupported_financial_operation:{operation.action}")
+    actor_token = set_active_user(int(recipient_user_id))
+    previous_db_user_id = db.info.get("user_id")
+    try:
+        db.info["user_id"] = int(recipient_user_id)
+        db.info["durable_worker"] = True
+        db.info["interaction_channel"] = "worker"
+        service = TransactionService(db)
+        request = dict(operation.request_json or {})
+        if operation.action == "splitwise_create":
+            service._execute_splitwise_create(tx, request, operation=operation)  # noqa: SLF001
+            return
+        if operation.action == "splitwise_update":
+            payload = dict(request.get("payload") or {})
+            if not payload:
+                raise RuntimeError("splitwise_update_payload_missing")
+            service._execute_splitwise_update(tx, payload, operation=operation)  # noqa: SLF001
+            return
+        if operation.action in {"splitwise_delete", "splitwise_delete_removed"}:
+            service._execute_splitwise_delete(  # noqa: SLF001
+                tx,
+                operation=operation,
+                action=operation.action,
+                result_status=str(
+                    request.get("result_status") or TransactionStatus.ASK_USER.value
+                ),
+            )
+            return
+        raise RuntimeError(f"unsupported_financial_operation:{operation.action}")
+    finally:
+        if previous_db_user_id is None:
+            db.info.pop("user_id", None)
+        else:
+            db.info["user_id"] = previous_db_user_id
+        reset_active_user(actor_token)
 
 
 def _handle_telegram_update(db, event: OutboxEvent) -> None:

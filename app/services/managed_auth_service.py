@@ -14,7 +14,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.config import Settings, get_settings
-from app.logging_config import get_trace_id
+from app.logging_config import get_trace_id, normalize_external_trace_id
 from app.models import (
     AuditEvent,
     AuthIdentity,
@@ -308,7 +308,7 @@ def record_audit(
         event_type=event_type,
         resource_type=resource_type,
         resource_id=resource_id,
-        request_id=request_id or get_trace_id(),
+        request_id=normalize_external_trace_id(request_id or get_trace_id()),
         metadata_json=safe_metadata,
     )
     db.add(event)

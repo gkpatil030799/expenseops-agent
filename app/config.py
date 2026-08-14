@@ -15,7 +15,12 @@ def _csv(value: str | list[str]) -> list[str]:
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
+        hide_input_in_errors=True,
+    )
 
     app_name: str = "ExpenseOps Agent"
     environment: Literal["local", "production"] = "local"
@@ -23,31 +28,33 @@ class Settings(BaseSettings):
     frontend_origin: Annotated[list[str], NoDecode] = Field(
         default_factory=lambda: ["http://localhost:5173"]
     )
-    database_url: str = "sqlite:///./expenseops.db"
-    app_secret_key: str = ""
+    database_url: str = Field(default="sqlite:///./expenseops.db", repr=False)
+    app_secret_key: str = Field(default="", repr=False)
     app_secret_key_version: str = "v1"
-    app_secret_key_previous: Annotated[list[str], NoDecode] = Field(default_factory=list)
+    app_secret_key_previous: Annotated[list[str], NoDecode] = Field(
+        default_factory=list, repr=False
+    )
     trusted_hosts: Annotated[list[str], NoDecode] = Field(
         default_factory=lambda: ["localhost", "127.0.0.1", "testserver"]
     )
     enforce_https: bool = True
     support_email: str = "support@expenseops.invalid"
-    dashboard_username: str = ""
-    dashboard_password: str = ""
-    dashboard_api_token: str = ""
+    dashboard_username: str = Field(default="", repr=False)
+    dashboard_password: str = Field(default="", repr=False)
+    dashboard_api_token: str = Field(default="", repr=False)
     app_public_url: str = ""
     auth_mode: Literal["local", "oidc"] = "local"
     oidc_issuer: str = ""
     oidc_audience: str = ""
-    oidc_client_id: str = ""
-    oidc_client_secret: str = ""
+    oidc_client_id: str = Field(default="", repr=False)
+    oidc_client_secret: str = Field(default="", repr=False)
     oidc_redirect_uri: str = ""
     oidc_scopes: str = "openid profile email"
     oidc_algorithms: Annotated[list[str], NoDecode] = Field(default_factory=lambda: ["RS256"])
-    oidc_bootstrap_email: str = ""
+    oidc_bootstrap_email: str = Field(default="", repr=False)
     auth_session_cookie_name: str = "expenseops_session"
     auth_session_hours: int = Field(default=168, ge=1, le=720)
-    admin_user_emails: Annotated[list[str], NoDecode] = Field(default_factory=list)
+    admin_user_emails: Annotated[list[str], NoDecode] = Field(default_factory=list, repr=False)
     rate_limit_backend: Literal["memory", "postgres"] = "memory"
     enable_postgres_rls: bool = False
     database_pool_size: int = Field(default=5, ge=1, le=100)
@@ -59,14 +66,15 @@ class Settings(BaseSettings):
     retention_auth_session_days: int = Field(default=30, ge=1, le=365)
     retention_webhook_days: int = Field(default=30, ge=1, le=365)
     retention_completed_outbox_days: int = Field(default=30, ge=1, le=365)
+    retention_telegram_session_days: int = Field(default=7, ge=1, le=90)
     retention_promotion_message_days: int = Field(default=180, ge=30, le=730)
     retention_ignored_receipt_days: int = Field(default=365, ge=30, le=2555)
     retention_audit_event_days: int = Field(default=2555, ge=365, le=3650)
 
     allow_posting_pending_transactions: bool = False
 
-    plaid_client_id: str = ""
-    plaid_secret: str = ""
+    plaid_client_id: str = Field(default="", repr=False)
+    plaid_secret: str = Field(default="", repr=False)
     plaid_env: Literal["sandbox", "development", "production"] = "sandbox"
     plaid_webhook_url: str = ""
     plaid_country_codes: Annotated[list[str], NoDecode] = Field(default_factory=lambda: ["US"])
@@ -77,22 +85,22 @@ class Settings(BaseSettings):
     allow_unverified_plaid_webhooks_for_local_test: bool = False
 
     splitwise_base_url: str = "https://secure.splitwise.com/api/v3.0"
-    splitwise_api_key: str = ""
-    splitwise_access_token: str = ""
+    splitwise_api_key: str = Field(default="", repr=False)
+    splitwise_access_token: str = Field(default="", repr=False)
     splitwise_auth_scheme: str = "Bearer"
-    splitwise_consumer_key: str = ""
-    splitwise_consumer_secret: str = ""
-    splitwise_oauth_token: str = ""
-    splitwise_oauth_token_secret: str = ""
+    splitwise_consumer_key: str = Field(default="", repr=False)
+    splitwise_consumer_secret: str = Field(default="", repr=False)
+    splitwise_oauth_token: str = Field(default="", repr=False)
+    splitwise_oauth_token_secret: str = Field(default="", repr=False)
     splitwise_oauth_callback_url: str = ""
 
-    telegram_bot_token: str = ""
+    telegram_bot_token: str = Field(default="", repr=False)
     telegram_bot_username: str = ""
-    telegram_chat_id: str = ""
-    telegram_webhook_secret: str = ""
-    telegram_allowed_user_id: str = ""
+    telegram_chat_id: str = Field(default="", repr=False)
+    telegram_webhook_secret: str = Field(default="", repr=False)
+    telegram_allowed_user_id: str = Field(default="", repr=False)
 
-    openai_api_key: str = ""
+    openai_api_key: str = Field(default="", repr=False)
     openai_model: str = "gpt-4.1-mini"
 
     receipt_parser_provider: Literal["fallback", "openai"] = "fallback"
@@ -101,10 +109,10 @@ class Settings(BaseSettings):
     receipt_auto_match_confidence: float = Field(default=0.9, ge=0.0, le=1.0)
     receipt_possible_match_confidence: float = Field(default=0.65, ge=0.0, le=1.0)
     gmail_receipt_sync_enabled: bool = False
-    gmail_client_id: str = ""
-    gmail_client_secret: str = ""
-    gmail_refresh_token: str = ""
-    gmail_user_id: str = "me"
+    gmail_client_id: str = Field(default="", repr=False)
+    gmail_client_secret: str = Field(default="", repr=False)
+    gmail_refresh_token: str = Field(default="", repr=False)
+    gmail_user_id: str = Field(default="me", repr=False)
     gmail_receipt_query: str = (
         "newer_than:30d (subject:(receipt OR order OR purchase) "
         "OR from:(walmart.com target.com costco.com instacart.com amazon.com))"
@@ -131,11 +139,11 @@ class Settings(BaseSettings):
     replenishment_max_feedback_cadence_adjustment_pct: float = Field(default=25.0, ge=0.0, le=100.0)
     replenishment_weekly_schedule: str = "0 9 * * 0"
 
-    household_base_location: str = ""
+    household_base_location: str = Field(default="", repr=False)
     household_snooze_days: int = Field(default=7, ge=1, le=90)
     household_routing_provider: Literal["fallback", "google_maps"] = "fallback"
     household_place_search_provider: Literal["fallback", "google_places"] = "fallback"
-    google_maps_api_key: str = ""
+    google_maps_api_key: str = Field(default="", repr=False)
     household_max_incremental_minutes: int = Field(default=10, ge=0, le=120)
     household_probably_due_incremental_minutes: int = Field(default=5, ge=0, le=60)
     household_place_candidates_per_errand: int = Field(default=3, ge=1, le=8)
@@ -244,7 +252,7 @@ class Settings(BaseSettings):
 
     @property
     def docs_enabled(self) -> bool:
-        return self.environment != "production" or self.enable_docs
+        return not self.is_production_mode or self.enable_docs
 
     @property
     def uses_splitwise_oauth1(self) -> bool:
@@ -273,7 +281,7 @@ class Settings(BaseSettings):
     def allow_plaid_webhook_verification_bypass_for_local_test(self) -> bool:
         app_env = os.environ.get("APP_ENV", "").strip().lower()
         environment = self.environment.strip().lower()
-        if app_env == "production" or environment == "production":
+        if self.is_production_mode:
             return False
         return (
             self.plaid_env == "production"

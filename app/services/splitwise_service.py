@@ -11,9 +11,14 @@ from sqlalchemy.exc import OperationalError
 from app.config import Settings, get_settings
 from app.db import SessionLocal
 from app.models import SplitwiseIntegration, User, WorkspaceMembership
-from app.security import decrypt_secret
+from app.security import SecretConfigurationError, decrypt_secret
 from app.services.agent_service import friend_display_name
-from app.tenancy import DEFAULT_USER_EMAIL, get_active_user_id, get_active_workspace_id
+from app.tenancy import (
+    DEFAULT_USER_EMAIL,
+    get_active_user_id,
+    get_active_workspace_id,
+    set_trusted_workspace,
+)
 
 
 class SplitwiseAPIError(RuntimeError):
@@ -348,6 +353,10 @@ def _workspace_settings(settings: Settings) -> Settings:
         return settings
     try:
         with SessionLocal() as db:
+            # Credential resolution uses its own session. Scope it before the
+            # query so PostgreSQL RLS and ORM tenant criteria agree with the
+            # worker/request ContextVars.
+            set_trusted_workspace(db, workspace_id)
             active_user_id = get_active_user_id()
             filters = [
                 SplitwiseIntegration.workspace_id == workspace_id,
@@ -364,7 +373,14 @@ def _workspace_settings(settings: Settings) -> Settings:
             )
             integration = integrations[0] if len(integrations) == 1 else None
             if integration is not None:
-                credentials = json.loads(decrypt_secret(integration.credentials_encrypted))
+                try:
+                    credentials = json.loads(
+                        decrypt_secret(integration.credentials_encrypted)
+                    )
+                except (TypeError, ValueError, SecretConfigurationError):
+                    return _settings_without_splitwise_user_credentials(settings)
+                if not isinstance(credentials, dict):
+                    return _settings_without_splitwise_user_credentials(settings)
                 return settings.model_copy(update=credentials)
             is_legacy_default = (
                 db.query(WorkspaceMembership.id)
@@ -381,10 +397,16 @@ def _workspace_settings(settings: Settings) -> Settings:
         is_legacy_default = workspace_id == 1
     if is_legacy_default:
         return settings
+    return _settings_without_splitwise_user_credentials(settings)
+
+
+def _settings_without_splitwise_user_credentials(settings: Settings) -> Settings:
     return settings.model_copy(
         update={
             "splitwise_api_key": "",
             "splitwise_access_token": "",
+            "splitwise_consumer_key": "",
+            "splitwise_consumer_secret": "",
             "splitwise_oauth_token": "",
             "splitwise_oauth_token_secret": "",
         }

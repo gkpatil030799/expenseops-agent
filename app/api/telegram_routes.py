@@ -6,10 +6,12 @@ import re
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from hashlib import sha256
+from hmac import compare_digest
 from urllib.parse import quote
 
-from fastapi import APIRouter, Header, HTTPException, Query, Request
+from fastapi import APIRouter, Header, HTTPException, Request
 from sqlalchemy import select
+from sqlalchemy import update as sql_update
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
 from app.api.deps import DbSession
@@ -22,6 +24,7 @@ from app.models import (
     TelegramLinkCode,
     TelegramWebhookUpdate,
     TransactionStatus,
+    User,
     utc_now,
 )
 from app.services.agent_service import friend_display_name
@@ -122,23 +125,33 @@ router = APIRouter(prefix="/telegram", tags=["telegram"])
 async def telegram_webhook(
     request: Request,
     db: DbSession,
-    secret: str | None = Query(default=None),
     telegram_secret: str | None = Header(
         default=None,
         alias="X-Telegram-Bot-Api-Secret-Token",
     ),
 ) -> dict[str, bool]:
-    _verify_webhook_secret(telegram_secret or secret)
+    _verify_webhook_secret(telegram_secret)
     from app.tenancy import clear_session_tenant
 
     # A verified Telegram update may contain a one-time connection code, so its
     # workspace is intentionally unknown until the code or identity is resolved.
     clear_session_tenant(db)
     update = await request.json()
+    if not _is_private_telegram_interaction(update):
+        log_event(
+            logger,
+            "telegram_webhook_rejected",
+            level=logging.WARNING,
+            reason="non_private_chat",
+        )
+        # Acknowledge the update so Telegram does not retry it. ExpenseOps never
+        # links an account or performs an action from a group, supergroup, or
+        # channel, and it does not retain the rejected payload.
+        return {"ok": True}
     update_record = _claim_telegram_update(db, update)
     if update.get("update_id") is not None and update_record is None:
         return {"ok": True}
-    if update_record is not None and get_settings().environment == "production":
+    if update_record is not None and get_settings().is_production_mode:
         if _queue_telegram_update(db, update_record, update):
             return {"ok": True}
     try:
@@ -148,9 +161,7 @@ async def telegram_webhook(
         raise
 
 
-def _claim_telegram_update(
-    db: DbSession, update: dict
-) -> TelegramWebhookUpdate | None:
+def _claim_telegram_update(db: DbSession, update: dict) -> TelegramWebhookUpdate | None:
     raw_update_id = update.get("update_id")
     if raw_update_id is None or not hasattr(db, "scalar"):
         return None
@@ -163,9 +174,9 @@ def _claim_telegram_update(
         select(TelegramWebhookUpdate).where(TelegramWebhookUpdate.update_id == update_id)
     )
     if existing is not None:
-        lease_active = existing.lease_expires_at and _aware_datetime(
-            existing.lease_expires_at
-        ) > now
+        lease_active = (
+            existing.lease_expires_at and _aware_datetime(existing.lease_expires_at) > now
+        )
         if existing.state in {"processed", "queued"} or (
             existing.state == "processing" and lease_active
         ):
@@ -284,9 +295,7 @@ def _process_telegram_update(
     return {"ok": True}
 
 
-def _complete_telegram_update(
-    db: DbSession, record: TelegramWebhookUpdate | None
-) -> None:
+def _complete_telegram_update(db: DbSession, record: TelegramWebhookUpdate | None) -> None:
     if record is None:
         return
     record.state = "processed"
@@ -316,8 +325,52 @@ def _fail_telegram_update(
 
 def _verify_webhook_secret(incoming_secret: str | None) -> None:
     expected_secret = get_settings().telegram_webhook_secret
-    if expected_secret and incoming_secret != expected_secret:
+    if expected_secret and (
+        not incoming_secret
+        or not compare_digest(
+            incoming_secret.encode("utf-8"),
+            expected_secret.encode("utf-8"),
+        )
+    ):
         raise HTTPException(status_code=403, detail="Invalid Telegram webhook secret")
+
+
+def _is_private_telegram_interaction(update: dict) -> bool:
+    """Return false for every Telegram interaction carrying a non-private chat.
+
+    Telegram's Bot API always includes ``chat.type`` on message and callback
+    message objects. Missing chat metadata is tolerated only for non-actionable
+    service updates and legacy synthetic test payloads; no real Telegram group
+    type can pass this check.
+    """
+    callback_query = update.get("callback_query") or {}
+    chat_containers = [
+        callback_query.get("message") or {},
+        *(
+            update.get(key) or {}
+            for key in (
+                "message",
+                "edited_message",
+                "channel_post",
+                "edited_channel_post",
+                "my_chat_member",
+                "chat_member",
+                "chat_join_request",
+                "message_reaction",
+                "message_reaction_count",
+                "chat_boost",
+                "removed_chat_boost",
+            )
+        ),
+    ]
+    for container in chat_containers:
+        chat = container.get("chat") or {}
+        if not chat:
+            continue
+        chat_type = str(chat.get("type") or "").strip().casefold()
+        if chat_type and chat_type != "private":
+            return False
+    return True
 
 
 def _verify_allowed_telegram_user(update: dict) -> None:
@@ -363,14 +416,18 @@ def _handle_telegram_connect(update: dict, db: DbSession) -> bool:
     chat = message.get("chat") or {}
     telegram_user_id = str(from_user.get("id") or "")
     chat_id = str(chat.get("id") or "")
+    if not _is_private_telegram_interaction(update):
+        return True
     if not telegram_user_id or not chat_id:
         raise HTTPException(status_code=400, detail="Telegram identity is missing")
+    now = utc_now()
     link = db.scalar(
         select(TelegramLinkCode)
         .execution_options(skip_tenant_scope=True)
         .where(TelegramLinkCode.code_hash == hash_api_token(code))
+        .with_for_update()
     )
-    if link is None or link.used_at is not None or _aware_datetime(link.expires_at) <= utc_now():
+    if link is None or link.used_at is not None or _aware_datetime(link.expires_at) <= now:
         if link is not None:
             record_audit(
                 db,
@@ -386,6 +443,11 @@ def _handle_telegram_connect(update: dict, db: DbSession) -> bool:
             chat_id=chat_id,
         )
         return True
+
+    # Serialize all connection attempts for this ExpenseOps user, including
+    # attempts made with two independently generated link codes.
+    db.scalar(select(User.id).where(User.id == link.user_id).with_for_update())
+
     existing = db.scalar(
         select(TelegramIdentity)
         .execution_options(skip_tenant_scope=True)
@@ -393,6 +455,7 @@ def _handle_telegram_connect(update: dict, db: DbSession) -> bool:
             TelegramIdentity.telegram_user_id == telegram_user_id,
             TelegramIdentity.chat_id == chat_id,
         )
+        .with_for_update()
     )
     if existing is not None and (
         existing.user_id != link.user_id or existing.workspace_id != link.workspace_id
@@ -411,6 +474,54 @@ def _handle_telegram_connect(update: dict, db: DbSession) -> bool:
             chat_id=chat_id,
         )
         return True
+
+    active_for_user = db.scalar(
+        select(TelegramIdentity)
+        .execution_options(skip_tenant_scope=True)
+        .where(
+            TelegramIdentity.user_id == link.user_id,
+            TelegramIdentity.enabled.is_(True),
+        )
+        .with_for_update()
+    )
+    if active_for_user is not None and active_for_user.id != getattr(existing, "id", None):
+        record_audit(
+            db,
+            workspace_id=link.workspace_id,
+            user_id=link.user_id,
+            event_type="telegram_connect_failed",
+            resource_type="telegram_identity",
+            metadata={"reason": "user_already_linked"},
+        )
+        db.commit()
+        TelegramService().send_message(
+            "Your ExpenseOps account is already linked to another Telegram account. "
+            "Disconnect it in Settings before linking a different account.",
+            chat_id=chat_id,
+        )
+        return True
+
+    # The conditional update is the actual one-time-code claim. The row lock
+    # serializes PostgreSQL callers; the predicate also protects databases where
+    # SELECT FOR UPDATE has weaker/no semantics and makes stale claims fail closed.
+    claimed = db.execute(
+        sql_update(TelegramLinkCode)
+        .execution_options(skip_tenant_scope=True, synchronize_session=False)
+        .where(
+            TelegramLinkCode.id == link.id,
+            TelegramLinkCode.used_at.is_(None),
+            TelegramLinkCode.expires_at > now,
+        )
+        .values(used_at=now)
+    )
+    if claimed.rowcount != 1:
+        db.rollback()
+        TelegramService().send_message(
+            "That ExpenseOps link code is invalid or expired. Generate a new one in Settings.",
+            chat_id=chat_id,
+        )
+        return True
+
     set_trusted_workspace(db, link.workspace_id)
     if existing is None:
         db.add(
@@ -423,7 +534,6 @@ def _handle_telegram_connect(update: dict, db: DbSession) -> bool:
         )
     else:
         existing.enabled = True
-    link.used_at = utc_now()
     record_audit(
         db,
         workspace_id=link.workspace_id,
@@ -439,7 +549,18 @@ def _handle_telegram_connect(update: dict, db: DbSession) -> bool:
             user_id=link.user_id,
             event_type="onboarding_completed",
         )
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError:
+        # Database uniqueness is the final guard against simultaneous attempts
+        # to bind one app user or one Telegram identity twice.
+        db.rollback()
+        TelegramService().send_message(
+            "This ExpenseOps or Telegram account was linked by another request. "
+            "Check Settings before trying again.",
+            chat_id=chat_id,
+        )
+        return True
     TelegramService().send_message(
         "Telegram is connected to your ExpenseOps workspace.", chat_id=chat_id
     )
@@ -494,7 +615,7 @@ def _resolve_telegram_tenant(update: dict, db: DbSession) -> TelegramIdentity | 
     _verify_allowed_telegram_user(update)
     settings = get_settings()
     allowed_user_id = settings.telegram_allowed_user_id.strip()
-    if not allowed_user_id and settings.environment == "production":
+    if not allowed_user_id and settings.is_production_mode:
         raise HTTPException(status_code=403, detail="Unauthorized Telegram user")
     context = ensure_default_tenancy(db)
     set_trusted_workspace(db, context.workspace_id)

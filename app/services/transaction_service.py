@@ -28,7 +28,7 @@ from app.models import (
     WorkspaceMembership,
     utc_now,
 )
-from app.security import decrypt_secret
+from app.security import SecretConfigurationError, decrypt_secret
 from app.services.agent_service import (
     classify_transaction,
     friend_display_name,
@@ -584,7 +584,7 @@ class TransactionService:
         )
 
     def _attempt_review_notification(self, tx: ExpenseTransaction) -> bool:
-        if self.settings.environment == "production" and not self._notification_service_injected:
+        if self.settings.is_production_mode and not self._notification_service_injected:
             return self._enqueue_review_notification(tx)
         log_event(
             logger,
@@ -904,7 +904,7 @@ class TransactionService:
             return
 
     def _log_added_transaction_seen(self, tx_data: dict[str, Any]) -> None:
-        if self.settings.environment != "local":
+        if self.settings.is_production_mode:
             return
         log_event(
             logger,
@@ -1617,7 +1617,7 @@ class TransactionService:
     def _should_defer_splitwise_provider_action(self) -> bool:
         session_info = getattr(self.db, "info", {})
         return (
-            self.settings.environment == "production"
+            self.settings.is_production_mode
             and not self._splitwise_service_injected
             and not bool(session_info.get("durable_worker"))
         )
@@ -1827,7 +1827,7 @@ class TransactionService:
 
     def _splitwise_service_for_item_owner(self, item: PlaidItem) -> SplitwiseService:
         if item.owner_user_id is None:
-            return SplitwiseService(self.settings)
+            return self._splitwise_service_without_user_credentials()
         integration = self.db.scalar(
             select(SplitwiseIntegration).where(
                 SplitwiseIntegration.workspace_id == item.workspace_id,
@@ -1836,13 +1836,30 @@ class TransactionService:
             )
         )
         if integration is None:
-            return SplitwiseService(self.settings)
+            return self._splitwise_service_without_user_credentials()
         try:
             credentials = json.loads(decrypt_secret(integration.credentials_encrypted))
-        except (TypeError, ValueError):
-            return SplitwiseService(self.settings)
+        except (TypeError, ValueError, SecretConfigurationError):
+            return self._splitwise_service_without_user_credentials()
+        if not isinstance(credentials, dict):
+            return self._splitwise_service_without_user_credentials()
         return SplitwiseService(
             self.settings.model_copy(update=credentials),
+            resolve_workspace_credentials=False,
+        )
+
+    def _splitwise_service_without_user_credentials(self) -> SplitwiseService:
+        return SplitwiseService(
+            self.settings.model_copy(
+                update={
+                    "splitwise_api_key": "",
+                    "splitwise_access_token": "",
+                    "splitwise_consumer_key": "",
+                    "splitwise_consumer_secret": "",
+                    "splitwise_oauth_token": "",
+                    "splitwise_oauth_token_secret": "",
+                }
+            ),
             resolve_workspace_credentials=False,
         )
 

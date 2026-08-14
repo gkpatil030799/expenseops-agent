@@ -10,8 +10,15 @@ from app.api import telegram_routes
 from app.config import Settings
 from app.db import Base, get_db
 from app.main import app
-from app.models import ExpenseTransaction, PlaidItem, TelegramWebhookUpdate
+from app.models import (
+    ExpenseTransaction,
+    OutboxEvent,
+    PlaidItem,
+    TelegramIdentity,
+    TelegramWebhookUpdate,
+)
 from app.services.telegram_state_service import TelegramSessionStore
+from app.tenancy import ensure_default_tenancy
 
 
 @pytest.fixture(autouse=True)
@@ -254,6 +261,105 @@ def test_telegram_webhook_rejects_missing_or_incorrect_secret(monkeypatch):
     assert incorrect.status_code == 403
 
 
+def test_telegram_webhook_does_not_accept_secret_from_query_string(monkeypatch):
+    monkeypatch.setattr(
+        telegram_routes,
+        "get_settings",
+        lambda: Settings(telegram_webhook_secret="expected-secret"),
+    )
+
+    response = TestClient(app).post(
+        "/telegram/webhook?secret=expected-secret",
+        json={},
+    )
+
+    assert response.status_code == 403
+
+
+def test_telegram_webhook_uses_constant_time_secret_comparison(monkeypatch):
+    comparisons = []
+    monkeypatch.setattr(
+        telegram_routes,
+        "get_settings",
+        lambda: Settings(telegram_webhook_secret="expected-secret"),
+    )
+    monkeypatch.setattr(
+        telegram_routes,
+        "compare_digest",
+        lambda provided, expected: comparisons.append((provided, expected)) or True,
+    )
+
+    response = TestClient(app).post(
+        "/telegram/webhook",
+        headers={"X-Telegram-Bot-Api-Secret-Token": "provided-secret"},
+        json={},
+    )
+
+    assert response.status_code == 200
+    assert comparisons == [(b"provided-secret", b"expected-secret")]
+
+
+def test_telegram_webhook_rejects_non_ascii_secret_header_without_server_error(monkeypatch):
+    monkeypatch.setattr(
+        telegram_routes,
+        "get_settings",
+        lambda: Settings(telegram_webhook_secret="expected-secret"),
+    )
+
+    response = TestClient(app, raise_server_exceptions=False).post(
+        "/telegram/webhook",
+        headers=[(b"x-telegram-bot-api-secret-token", b"\xff")],
+        json={},
+    )
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Invalid Telegram webhook secret"
+
+
+@pytest.mark.parametrize(
+    "update",
+    [
+        {
+            "update_id": 101,
+            "message": {
+                "from": {"id": 123},
+                "chat": {"id": -1001, "type": "group"},
+                "text": "/connect SECRET",
+            },
+        },
+        {
+            "update_id": 102,
+            "callback_query": {
+                "id": "group-callback",
+                "from": {"id": 123},
+                "message": {
+                    "chat": {"id": -1002, "type": "supergroup"},
+                    "message_id": 1,
+                },
+                "data": "review:personal:123",
+            },
+        },
+        {
+            "update_id": 103,
+            "channel_post": {
+                "chat": {"id": -1003, "type": "channel"},
+                "text": "/connect SECRET",
+            },
+        },
+    ],
+)
+def test_telegram_webhook_ignores_non_private_chats_without_retaining_payload(
+    update,
+    isolate_telegram_route_tests,
+):
+    response = TestClient(app).post("/telegram/webhook", json=update)
+
+    assert response.status_code == 200
+    assert response.json() == {"ok": True}
+    with isolate_telegram_route_tests() as db:
+        assert db.query(TelegramWebhookUpdate).count() == 0
+
+
 def test_telegram_webhook_allows_configured_user(monkeypatch):
     monkeypatch.setattr(
         telegram_routes,
@@ -268,6 +374,93 @@ def test_telegram_webhook_allows_configured_user(monkeypatch):
 
     assert response.status_code == 200
     assert response.json() == {"ok": True}
+
+
+def test_app_env_production_durably_queues_known_telegram_user(
+    monkeypatch,
+    isolate_telegram_route_tests,
+):
+    monkeypatch.setenv("APP_ENV", "production")
+    monkeypatch.setattr(
+        telegram_routes,
+        "get_settings",
+        lambda: Settings(
+            environment="local",
+            app_secret_key="configured-fernet-key",
+            telegram_webhook_secret="expected-secret",
+            _env_file=None,
+        ),
+    )
+    with isolate_telegram_route_tests() as db:
+        context = ensure_default_tenancy(db)
+        db.add(
+            TelegramIdentity(
+                workspace_id=context.workspace_id,
+                user_id=context.user_id,
+                telegram_user_id="24680",
+                chat_id="24680",
+            )
+        )
+        db.commit()
+
+    update = {
+        "update_id": 24680,
+        "message": {
+            "from": {"id": 24680},
+            "chat": {"id": 24680, "type": "private"},
+            "text": "hello",
+        },
+    }
+    response = TestClient(app).post(
+        "/telegram/webhook",
+        headers={"X-Telegram-Bot-Api-Secret-Token": "expected-secret"},
+        json=update,
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"ok": True}
+    with isolate_telegram_route_tests() as db:
+        stored_update = db.query(TelegramWebhookUpdate).filter_by(update_id=24680).one()
+        outbox = db.query(OutboxEvent).one()
+        assert stored_update.state == "queued"
+        assert outbox.event_type == "telegram.process_update"
+        assert outbox.state == "pending"
+        assert outbox.payload_json == {
+            "update_record_id": stored_update.id,
+            "update": update,
+        }
+
+
+def test_app_env_production_rejects_unknown_legacy_telegram_user(
+    monkeypatch,
+):
+    monkeypatch.setenv("APP_ENV", "production")
+    monkeypatch.setattr(
+        telegram_routes,
+        "get_settings",
+        lambda: Settings(
+            environment="local",
+            app_secret_key="configured-fernet-key",
+            telegram_webhook_secret="expected-secret",
+            telegram_allowed_user_id="",
+            _env_file=None,
+        ),
+    )
+
+    response = TestClient(app).post(
+        "/telegram/webhook",
+        headers={"X-Telegram-Bot-Api-Secret-Token": "expected-secret"},
+        json={
+            "message": {
+                "from": {"id": 13579},
+                "chat": {"id": 13579, "type": "private"},
+                "text": "hello",
+            }
+        },
+    )
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Unauthorized Telegram user"
 
 
 def test_telegram_webhook_rejects_disallowed_user_without_sensitive_logs(monkeypatch, caplog):

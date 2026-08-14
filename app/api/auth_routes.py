@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import logging
-from urllib.parse import urlencode
+import posixpath
+from urllib.parse import unquote, urlencode, urlsplit
 
 import httpx
 from fastapi import APIRouter, HTTPException, Request
@@ -29,12 +30,41 @@ from app.services.oauth_state_service import (
 router = APIRouter(prefix="/auth", tags=["authentication"])
 logger = logging.getLogger(__name__)
 
+_MAX_REDIRECT_AFTER_LENGTH = 500
+
+
+def _safe_redirect_after(value: str | None) -> str:
+    """Return a normalized same-origin redirect path, or the application root."""
+    if not value or len(value) > _MAX_REDIRECT_AFTER_LENGTH or value != value.strip():
+        return "/"
+    candidate = value
+    for _ in range(4):
+        if any(ord(char) < 32 or ord(char) == 127 for char in candidate):
+            return "/"
+        if "\\" in candidate or not candidate.startswith("/") or candidate.startswith("//"):
+            return "/"
+        parsed = urlsplit(candidate)
+        path = parsed.path
+        if parsed.scheme or parsed.netloc or not path.startswith("/") or path.startswith("//"):
+            return "/"
+        normalized_path = posixpath.normpath(path)
+        if path.endswith("/") and normalized_path != "/":
+            normalized_path += "/"
+        if normalized_path != path:
+            return "/"
+        decoded = unquote(candidate)
+        if decoded == candidate:
+            return value
+        candidate = decoded
+    return "/"
+
 
 @router.get("/login")
 def login(request: Request, db: DbSession, redirect_after: str = "/") -> RedirectResponse:
     settings = get_settings()
+    safe_redirect = _safe_redirect_after(redirect_after)
     if settings.auth_mode != "oidc":
-        return RedirectResponse(url=redirect_after if redirect_after.startswith("/") else "/")
+        return RedirectResponse(url=safe_redirect)
     rate_limiter.check(
         f"auth-login:{request.client.host if request.client else 'unknown'}",
         limit=20,
@@ -45,7 +75,7 @@ def login(request: Request, db: DbSession, redirect_after: str = "/") -> Redirec
         provider="oidc",
         workspace_id=None,
         user_id=None,
-        redirect_after=redirect_after if redirect_after.startswith("/") else "/",
+        redirect_after=safe_redirect,
     )
     discovery = OIDCVerifier(settings).discovery()
     query = urlencode(
@@ -107,7 +137,7 @@ def callback(request: Request, code: str, state: str, db: DbSession) -> Redirect
             error_class=type(exc).__name__,
         )
         raise HTTPException(status_code=400, detail="Authentication failed") from exc
-    response = RedirectResponse(stored.redirect_after or "/")
+    response = RedirectResponse(_safe_redirect_after(stored.redirect_after))
     response.set_cookie(
         settings.auth_session_cookie_name,
         raw_session,

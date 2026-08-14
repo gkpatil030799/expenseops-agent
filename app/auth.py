@@ -82,7 +82,7 @@ def _default_context(settings: Settings) -> TenantContext:
         with SessionLocal() as db:
             return ensure_default_tenancy(db)
     except OperationalError:
-        if settings.environment == "production":
+        if settings.is_production_mode:
             raise
         # Some route unit tests intentionally run without application startup.
         # Never mutate an unmigrated developer database from authentication.
@@ -190,7 +190,7 @@ def _csrf_origin_allowed(request: Request, settings: Settings) -> bool:
 
 
 def _auth_not_required(settings: Settings) -> bool:
-    if settings.environment == "production":
+    if settings.is_production_mode:
         return False
     return not (
         settings.dashboard_api_token

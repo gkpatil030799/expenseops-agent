@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import re
+import time
 from dataclasses import dataclass
+from math import isfinite
 from typing import Any
 
 from app.config import Settings, get_settings
@@ -22,6 +25,13 @@ class PlaidWebhookVerificationError(RuntimeError):
 
 
 _WEBHOOK_VERIFICATION_KEY_CACHE: dict[tuple[str, str], dict[str, Any]] = {}
+
+PLAID_WEBHOOK_MAX_AGE_SECONDS = 5 * 60
+PLAID_WEBHOOK_FUTURE_SKEW_SECONDS = 60
+PLAID_WEBHOOK_MAX_VERIFICATION_HEADER_BYTES = 8 * 1024
+PLAID_WEBHOOK_MAX_KEY_ID_CHARS = 128
+PLAID_WEBHOOK_KEY_FETCH_TIMEOUT_SECONDS = (2.0, 3.0)
+_PLAID_WEBHOOK_KEY_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]+$")
 
 
 class PlaidService:
@@ -125,7 +135,8 @@ class PlaidService:
 
         try:
             response = self.client.webhook_verification_key_get(
-                WebhookVerificationKeyGetRequest(key_id=key_id)
+                WebhookVerificationKeyGetRequest(key_id=key_id),
+                _request_timeout=PLAID_WEBHOOK_KEY_FETCH_TIMEOUT_SECONDS,
             )
         except Exception as exc:
             raise PlaidRequestError(_plaid_error_message(exc)) from exc
@@ -137,6 +148,11 @@ class PlaidService:
         """Verify Plaid's webhook JWT and exact request-body hash."""
         if not verification_header:
             raise PlaidWebhookVerificationError("missing_plaid_verification_header")
+        if (
+            len(verification_header.encode("utf-8"))
+            > PLAID_WEBHOOK_MAX_VERIFICATION_HEADER_BYTES
+        ):
+            raise PlaidWebhookVerificationError("verification_header_too_large")
 
         try:
             import jwt
@@ -154,6 +170,12 @@ class PlaidService:
         key_id = unverified_header.get("kid")
         if not key_id:
             raise PlaidWebhookVerificationError("missing_kid")
+        if (
+            not isinstance(key_id, str)
+            or len(key_id) > PLAID_WEBHOOK_MAX_KEY_ID_CHARS
+            or _PLAID_WEBHOOK_KEY_ID_PATTERN.fullmatch(key_id) is None
+        ):
+            raise PlaidWebhookVerificationError("invalid_kid")
 
         try:
             key_response = self.get_webhook_verification_key(str(key_id))
@@ -168,12 +190,25 @@ class PlaidService:
                 verification_header,
                 jwt.PyJWK.from_dict(jwk).key,
                 algorithms=["ES256"],
-                options={"verify_aud": False},
+                options={"verify_aud": False, "verify_iat": False},
             )
         except Exception as exc:
             if type(exc).__name__ in {"ExpiredSignatureError", "JWTClaimsError"}:
                 raise PlaidWebhookVerificationError("jwt_expired_or_not_yet_valid") from exc
             raise PlaidWebhookVerificationError("jwt_signature_invalid") from exc
+
+        issued_at = claims.get("iat")
+        if (
+            isinstance(issued_at, bool)
+            or not isinstance(issued_at, (int, float))
+            or not isfinite(float(issued_at))
+        ):
+            raise PlaidWebhookVerificationError("jwt_iat_missing_or_invalid")
+        now = time.time()
+        if issued_at < now - PLAID_WEBHOOK_MAX_AGE_SECONDS:
+            raise PlaidWebhookVerificationError("jwt_iat_too_old")
+        if issued_at > now + PLAID_WEBHOOK_FUTURE_SKEW_SECONDS:
+            raise PlaidWebhookVerificationError("jwt_iat_in_future")
 
         expected_hash = claims.get("request_body_sha256")
         if not expected_hash:

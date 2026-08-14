@@ -58,6 +58,11 @@ def config(**values):
     )
 
 
+def persist_minimum_score(db, value: float) -> None:
+    PromotionRankingService(db, config(promotions_min_score=value)).settings()
+    db.commit()
+
+
 def message(
     message_id: str,
     subject: str,
@@ -422,6 +427,7 @@ def test_main_feed_enforces_minimum_score_but_keeps_saved_deals(db):
 
 
 def test_dismissed_offer_can_be_restored_to_active_feed(db):
+    persist_minimum_score(db, 0)
     service = GmailPromotionIngestionService(db, config(promotions_min_score=0))
     service.process_message(message("restore", "20% off laundry", "Today only"))
     offer = db.query(PromotionOffer).one()
@@ -435,6 +441,7 @@ def test_dismissed_offer_can_be_restored_to_active_feed(db):
 
 
 def test_promotion_page_reports_truthful_total_and_cursor(db):
+    persist_minimum_score(db, 0)
     service = GmailPromotionIngestionService(db, config(promotions_min_score=0))
     for index in range(3):
         service.process_message(message(f"page-{index}", f"{20 + index}% off", ""))

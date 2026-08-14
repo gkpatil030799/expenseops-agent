@@ -114,7 +114,9 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     if op.get_bind().dialect.name == "postgresql":
-        op.execute(sa.text('DROP POLICY IF EXISTS expenseops_workspace_isolation ON "data_consents"'))
+        op.execute(
+            sa.text('DROP POLICY IF EXISTS expenseops_workspace_isolation ON "data_consents"')
+        )
         op.execute(sa.text('ALTER TABLE "data_consents" DISABLE ROW LEVEL SECURITY'))
     for name, table in reversed((
         ("ix_auth_sessions_user_expiry", "auth_sessions"),
