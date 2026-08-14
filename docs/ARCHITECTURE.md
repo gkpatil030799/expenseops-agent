@@ -21,6 +21,9 @@ Splitwise create_expense API
 5. Splitwise posting is idempotent at the app layer: a transaction with a `splitwise_expense_id` cannot be posted again.
 6. Splitwise response bodies are checked for `errors`; HTTP 200 alone is not trusted.
 7. Webhooks trigger sync; `/transactions/sync` remains the source of truth.
+8. Tenant-scoped tables use PostgreSQL FORCE RLS in production, with a transaction-local
+   workspace context on customer requests and an explicit trusted scope for verified webhooks/jobs.
+9. Production rate limits use PostgreSQL counters shared by every web replica.
 
 ## Transaction states
 

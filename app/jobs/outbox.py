@@ -30,6 +30,7 @@ class ClaimedEvent:
 
 
 def run_once(max_events: int = 25) -> dict[str, int]:
+    get_settings().validate_worker_runtime()
     with SessionLocal() as db:
         clear_session_tenant(db)
         claimed = [

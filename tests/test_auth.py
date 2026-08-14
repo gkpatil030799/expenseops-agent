@@ -16,6 +16,9 @@ def _safe_production_settings(**overrides):
         "telegram_allowed_user_id": "12345",
         "dashboard_api_token": "configured-dashboard-token",
         "plaid_env": "production",
+        "database_url": "postgresql://expenseops@db.example/expenseops",
+        "enable_postgres_rls": True,
+        "rate_limit_backend": "postgres",
         "_env_file": None,
     }
     values.update(overrides)

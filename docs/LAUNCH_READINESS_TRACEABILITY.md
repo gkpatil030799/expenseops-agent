@@ -36,7 +36,7 @@ visual-foundation changes began.
 | V7 — Deals hierarchy | Complete (visual layer) | Value-first deal cards, merchant identity, trusted-domain disclosure, review interstitials for unverified links, visible Open/Save actions, feedback overflow, purposeful empty/disconnected states, and urgency-based expiry treatment |
 | V8 — visual/accessibility validation | Complete (automated gate) | Six-width responsive matrix, 44px touch-target audit across primary and expanded flows, keyboard skip/focus restoration, reduced motion, 200%-zoom-equivalent layout, mobile-nav clearance, edge-state fixtures, and four-project Playwright coverage |
 | Phase 2 — UX action integrity | Complete | Structured API client; global resilience surfaces; scoped Expense, Deals, Settings, and Splitwise actions; cross-browser failure-isolation gate; checkpoint on `agent/launch-readiness` |
-| Phase 3 — identity and tenancy | In progress | Tenant-safe uniqueness and schema parity; verified OIDC email; atomic OAuth state claims; invite return/switch/wrong-account recovery; owner/member API matrix; removal/transfer; per-user Telegram and Splitwise; explicit Plaid ownership; exact connected identities. PostgreSQL RLS/request-worker role rollout remains an open exit-gate item. |
+| Phase 3 — identity and tenancy | Complete (code gate) | Tenant-safe uniqueness and schema parity; verified OIDC identity and invite recovery; owner/member API matrix; per-user provider ownership; PostgreSQL FORCE RLS policies; transaction-local request scope; explicit verified-webhook/trusted-worker bypass; shared database rate limiting. Live production activation and restore evidence remain Phase 7 operations gates. |
 | Phase 4 — financial correctness | In progress | Durable Splitwise create/update/delete journal, deterministic idempotency marker, atomic leases, pending-to-posted relationships, finalized-amount and removal reconciliation, valid-draft database invariant, append-only audit events, and visible Recovery UI implemented; transactional outbox moves into Phase 5 |
 | Phase 5 — durable workers | In progress | Transactional outbox schema/service, leased retry/dead-letter worker, durable production Plaid webhook acknowledgement, post-delivery Telegram sent markers, Telegram `update_id` dedupe/retry, resumable Gmail receipt/history pagination, scheduler overlap leases, and truthful cron failures implemented; Splitwise worker, inbound Telegram queue, provider Retry-After, and Railway worker rollout remain open |
 | Phase 6 — product-domain correctness | In progress | Insights financial truth, Household verified-route freshness, receipt pagination/recovery, and Deals trust/reversibility are implemented; atomic batch receipt submission and the combined product-domain browser gate remain open |
@@ -61,11 +61,14 @@ passing phase exit gate.
 | Personal providers | Each member resolves their own Telegram recipient and Splitwise payer; ambiguous multi-member delivery is blocked rather than sent to the first identity |
 | Bank ownership | New Plaid links are attributed to the authenticated user; legacy links require explicit confirmation; posting by a different actor is rejected |
 | Settings UX | Exact Gmail, Telegram, Splitwise, Plaid owner, and verification details are visible; role-restricted controls are omitted |
-| Regression gate | Backend 529 passed; focused Phase 3 backend 139 passed; frontend unit 20 passed; production build passed; Playwright 120 passed across Chromium, mobile Chromium, Firefox, and WebKit |
+| Database isolation policy | Every `TenantScoped` table is protected with PostgreSQL `ENABLE/FORCE ROW LEVEL SECURITY`; request sessions set a transaction-local workspace; verified webhooks and trusted jobs enter and then narrow an explicit global scope |
+| Shared abuse controls | Production requires a PostgreSQL-backed fixed-window limiter so limits survive replica changes; counters use an atomic locked row and a unique key/window constraint |
+| Production safety contract | Production refuses non-PostgreSQL storage, disabled RLS, or process-local rate limiting; pool, acquisition, recycle, statement, and lock budgets are configurable |
+| Regression gate | Backend 559 passed, including focused configuration/auth/tenancy/migration/rate-limit coverage; clean `alembic upgrade head` and `alembic check` passed; Ruff passed; frontend unit 21 passed; production build passed; lint had zero errors |
 
-Phase 3 is not complete until PostgreSQL row-level security and separate request/trusted-worker
-roles are implemented and proven against a real PostgreSQL test database. This remaining control is
-intentionally not represented as complete by the ORM isolation tests.
+The Phase 3 code gate is complete. Enabling the new migration and mandatory production variables,
+observing policies under the Railway runtime identity, and completing backup/restore proof are
+deployment operations tracked in Phase 7; they are not implied by the local SQLite migration gate.
 
 ## Phase 4 interim evidence
 

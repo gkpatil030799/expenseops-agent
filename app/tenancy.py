@@ -6,7 +6,7 @@ from contextvars import ContextVar
 from dataclasses import dataclass
 
 from fastapi import HTTPException
-from sqlalchemy import event, select
+from sqlalchemy import event, select, text
 from sqlalchemy.orm import Session, with_loader_criteria
 
 from app.models import TenantScoped, User, Workspace, WorkspaceMembership
@@ -101,6 +101,8 @@ def set_session_tenant(db: Session, context: TenantContext) -> None:
     require_membership(db, context.user_id, context.workspace_id)
     db.info["user_id"] = context.user_id
     db.info["workspace_id"] = context.workspace_id
+    db.info.pop("trusted_global_scope", None)
+    _set_database_workspace(db, context.workspace_id)
 
 
 def set_active_workspace(workspace_id: int):
@@ -131,11 +133,56 @@ def set_trusted_workspace(db: Session, workspace_id: int) -> None:
     """Set scope for a trusted webhook/job identifier, never from client workspace input."""
     if hasattr(db, "info"):
         db.info["workspace_id"] = workspace_id
+        db.info.pop("trusted_global_scope", None)
+        _set_database_workspace(db, workspace_id)
 
 
 def clear_session_tenant(db: Session) -> None:
+    if not hasattr(db, "info"):
+        return
     db.info.pop("user_id", None)
     db.info.pop("workspace_id", None)
+    db.info["trusted_global_scope"] = True
+    _set_database_bypass(db, enabled=True)
+
+
+def _set_database_workspace(db: Session, workspace_id: int) -> None:
+    bind = db.get_bind()
+    if bind.dialect.name != "postgresql":
+        return
+    db.execute(text("SELECT set_config('expenseops.bypass_rls', 'off', true)"))
+    db.execute(
+        text("SELECT set_config('expenseops.workspace_id', :value, true)"),
+        {"value": str(workspace_id)},
+    )
+
+
+def _set_database_bypass(db: Session, *, enabled: bool) -> None:
+    bind = db.get_bind()
+    if bind.dialect.name != "postgresql":
+        return
+    db.execute(
+        text("SELECT set_config('expenseops.bypass_rls', :value, true)"),
+        {"value": "on" if enabled else "off"},
+    )
+
+
+@event.listens_for(Session, "after_begin")
+def _restore_database_workspace(session: Session, _transaction, connection) -> None:
+    workspace_id = session.info.get("workspace_id")
+    trusted_global_scope = session.info.get("trusted_global_scope")
+    if connection.dialect.name != "postgresql":
+        return
+    if trusted_global_scope:
+        connection.execute(text("SELECT set_config('expenseops.bypass_rls', 'on', true)"))
+        return
+    if workspace_id is None:
+        return
+    connection.execute(text("SELECT set_config('expenseops.bypass_rls', 'off', true)"))
+    connection.execute(
+        text("SELECT set_config('expenseops.workspace_id', :value, true)"),
+        {"value": str(workspace_id)},
+    )
 
 
 @event.listens_for(Session, "do_orm_execute")

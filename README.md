@@ -14,7 +14,8 @@ Telegram conversation. It watches for work, explains what it found, and waits
 for you before doing anything consequential.
 
 > **Built for one trusted user.** ExpenseOps is a personal project and
-> private-beta style MVP, not a multi-tenant financial product.
+> controlled design-user release. ExpenseOps now has workspace isolation and
+> per-user provider identities, while the broader GA operations gate is still in progress.
 
 ## A Day With ExpenseOps
 
@@ -434,8 +435,13 @@ APP_ENV="production"
 ENVIRONMENT="production"
 DATABASE_URL="postgresql+psycopg://..."
 APP_SECRET_KEY="generated-fernet-key"
-DASHBOARD_USERNAME="private-username"
-DASHBOARD_PASSWORD="long-random-password"
+AUTH_MODE="oidc"
+OIDC_ISSUER="https://your-provider.example/"
+OIDC_AUDIENCE="your-audience"
+OIDC_CLIENT_ID="your-client-id"
+OIDC_REDIRECT_URI="https://your-app.example/auth/callback"
+ENABLE_POSTGRES_RLS=true
+RATE_LIMIT_BACKEND="postgres"
 ENABLE_EXPENSEOPS_SANDBOX_LAB=false
 ALLOW_UNVERIFIED_PLAID_WEBHOOKS_FOR_LOCAL_TEST=false
 ```
@@ -541,7 +547,9 @@ limited to an explicitly local environment with the local-test flag enabled.
 
 ## Honest Limitations
 
-- ExpenseOps assumes one trusted user; it has no multi-tenant account system.
+- ExpenseOps isolates workspace data and provider identities per user. A broad
+  GA launch still requires the operational restore, worker, and canary gates in
+  `docs/LAUNCH_READINESS_REMEDIATION_PLAN.md`.
 - Connected-account management needs stronger duplicate-link prevention.
 - Scheduled work requires an external scheduler such as Railway cron.
 - Receipt quality depends on the image and parsing provider.

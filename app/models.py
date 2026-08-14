@@ -539,6 +539,20 @@ class OutboxEvent(TenantScoped, Base):
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
+class RateLimitEvent(Base):
+    __tablename__ = "rate_limit_events"
+    __table_args__ = (
+        UniqueConstraint("key", "window_started_at", name="uq_rate_limit_key_window"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    key: Mapped[str] = mapped_column(String(255), index=True)
+    window_started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    window_seconds: Mapped[int] = mapped_column(Integer)
+    request_count: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
 class ScheduledJobLease(TenantScoped, Base):
     __tablename__ = "scheduled_job_leases"
     __table_args__ = (

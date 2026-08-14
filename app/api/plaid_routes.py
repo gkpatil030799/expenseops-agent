@@ -135,8 +135,13 @@ def sync_all_items(
 async def plaid_webhook(
     request: Request, background_tasks: BackgroundTasks, db: DbSession
 ) -> WebhookAck:
+    from app.tenancy import clear_session_tenant
+
     raw_body = await request.body()
     _verify_plaid_webhook_if_enabled(request, raw_body, db)
+    # This verified provider endpoint must resolve an external item identifier
+    # before its workspace is known. The scope narrows immediately after lookup.
+    clear_session_tenant(db)
     try:
         payload = json.loads(raw_body)
     except json.JSONDecodeError as exc:
@@ -192,6 +197,10 @@ async def plaid_webhook(
             reason="unknown_item_id",
         )
         return WebhookAck(ok=True, message="Webhook accepted, but item is not linked in this app.")
+
+    from app.tenancy import set_trusted_workspace
+
+    set_trusted_workspace(db, item.workspace_id)
 
     event.item_id = item.id
     event.processing_status = "queued"

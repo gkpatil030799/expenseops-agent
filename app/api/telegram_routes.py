@@ -128,6 +128,11 @@ async def telegram_webhook(
     ),
 ) -> dict[str, bool]:
     _verify_webhook_secret(telegram_secret or secret)
+    from app.tenancy import clear_session_tenant
+
+    # A verified Telegram update may contain a one-time connection code, so its
+    # workspace is intentionally unknown until the code or identity is resolved.
+    clear_session_tenant(db)
     update = await request.json()
     update_record = _claim_telegram_update(db, update)
     if update.get("update_id") is not None and update_record is None:

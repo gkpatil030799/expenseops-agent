@@ -17,6 +17,9 @@ def _safe_production_settings(**overrides):
         "oidc_audience": "expenseops",
         "oidc_client_id": "client-id",
         "oidc_redirect_uri": "https://expenseops.example/auth/callback",
+        "database_url": "postgresql://expenseops@db.example/expenseops",
+        "enable_postgres_rls": True,
+        "rate_limit_backend": "postgres",
         "_env_file": None,
     }
     values.update(overrides)
@@ -64,6 +67,20 @@ def test_production_config_rejects_missing_telegram_secret():
 def test_production_config_rejects_local_plaid_webhook_bypass():
     with pytest.raises(ValueError, match="ALLOW_UNVERIFIED_PLAID_WEBHOOKS"):
         _safe_production_settings(allow_unverified_plaid_webhooks_for_local_test=True)
+
+
+@pytest.mark.parametrize(
+    ("override", "message"),
+    [
+        ({"database_url": "sqlite:///unsafe.db"}, "DATABASE_URL"),
+        ({"enable_postgres_rls": False}, "ENABLE_POSTGRES_RLS"),
+        ({"rate_limit_backend": "memory"}, "RATE_LIMIT_BACKEND"),
+    ],
+)
+def test_production_config_requires_shared_database_security(override, message):
+    settings = _safe_production_settings(**override)
+    with pytest.raises(ValueError, match=message):
+        settings.validate_web_runtime()
 
 
 def test_production_config_rejects_enabled_sandbox_lab(monkeypatch):

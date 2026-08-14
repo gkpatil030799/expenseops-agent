@@ -41,8 +41,14 @@ class Settings(BaseSettings):
     auth_session_cookie_name: str = "expenseops_session"
     auth_session_hours: int = Field(default=168, ge=1, le=720)
     admin_user_emails: Annotated[list[str], NoDecode] = Field(default_factory=list)
-    rate_limit_backend: Literal["memory"] = "memory"
+    rate_limit_backend: Literal["memory", "postgres"] = "memory"
     enable_postgres_rls: bool = False
+    database_pool_size: int = Field(default=5, ge=1, le=100)
+    database_max_overflow: int = Field(default=10, ge=0, le=100)
+    database_pool_timeout_seconds: int = Field(default=15, ge=1, le=120)
+    database_pool_recycle_seconds: int = Field(default=900, ge=30, le=86400)
+    database_statement_timeout_ms: int = Field(default=15_000, ge=1000, le=300_000)
+    database_lock_timeout_ms: int = Field(default=5_000, ge=100, le=60_000)
 
     allow_posting_pending_transactions: bool = False
 
@@ -157,11 +163,6 @@ class Settings(BaseSettings):
             errors.append(
                 "ALLOW_UNVERIFIED_PLAID_WEBHOOKS_FOR_LOCAL_TEST must be false in production."
             )
-        if self.enable_postgres_rls:
-            errors.append(
-                "ENABLE_POSTGRES_RLS is reserved for Phase 1C until jobs/webhooks use "
-                "separate PostgreSQL roles and transaction-local workspace settings."
-            )
         if errors:
             raise ValueError("Unsafe production configuration: " + " ".join(errors))
         return self
@@ -172,6 +173,7 @@ class Settings(BaseSettings):
             return
 
         errors: list[str] = []
+        errors.extend(self._production_database_errors())
         if not self.telegram_webhook_secret:
             errors.append("TELEGRAM_WEBHOOK_SECRET must be configured for production.")
         if self.auth_mode != "oidc":
@@ -196,8 +198,21 @@ class Settings(BaseSettings):
             raise ValueError("Unsafe production web configuration: " + " ".join(errors))
 
     def validate_worker_runtime(self) -> None:
-        """Mark the worker boundary; shared checks already ran during construction."""
-        return
+        if not self.is_production_mode:
+            return
+        errors = self._production_database_errors()
+        if errors:
+            raise ValueError("Unsafe production worker configuration: " + " ".join(errors))
+
+    def _production_database_errors(self) -> list[str]:
+        errors: list[str] = []
+        if not self.database_url.startswith("postgresql"):
+            errors.append("DATABASE_URL must use PostgreSQL in production.")
+        if not self.enable_postgres_rls:
+            errors.append("ENABLE_POSTGRES_RLS must be true in production.")
+        if self.rate_limit_backend != "postgres":
+            errors.append("RATE_LIMIT_BACKEND must be postgres in production.")
+        return errors
 
     @property
     def is_production_mode(self) -> bool:
