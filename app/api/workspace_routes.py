@@ -18,6 +18,7 @@ from app.models import (
     utc_now,
 )
 from app.rate_limit import rate_limiter
+from app.services.data_lifecycle_service import DataLifecycleService
 from app.services.managed_auth_service import record_audit
 from app.tenancy import hash_api_token, set_trusted_workspace
 
@@ -302,6 +303,10 @@ def remove_member(
         resource_id=str(target.id),
         metadata={"removed_user_id": member_user_id},
     )
+    DataLifecycleService(db).delete_user_agent_data(
+        user_id=member_user_id,
+        workspace_ids=[workspace_id],
+    )
     db.delete(target)
     db.commit()
 
@@ -395,6 +400,10 @@ def leave_workspace(
         event_type="member_removed",
         resource_type="workspace_membership",
         resource_id=str(membership.id),
+    )
+    DataLifecycleService(db).delete_user_agent_data(
+        user_id=user.id,
+        workspace_ids=[workspace_id],
     )
     db.delete(membership)
     db.commit()

@@ -16,6 +16,7 @@ from starlette.responses import Response
 
 from app.api import (
     admin_routes,
+    agent_routes,
     ai_memory_routes,
     auth_routes,
     context_routes,
@@ -92,6 +93,7 @@ async def request_trace_middleware(request: Request, call_next) -> Response:
 
 app.include_router(plaid_routes.router)
 app.include_router(admin_routes.router)
+app.include_router(agent_routes.router)
 app.include_router(auth_routes.router)
 app.include_router(context_routes.router)
 app.include_router(integration_routes.router)

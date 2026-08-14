@@ -103,6 +103,14 @@ class Settings(BaseSettings):
     openai_api_key: str = Field(default="", repr=False)
     openai_model: str = "gpt-4.1-mini"
 
+    # Unified in-app agent rollout controls. Capabilities remain independently
+    # gated and safely disabled until their implementation phase is released.
+    agent_enabled: bool = False
+    agent_read_tools_enabled: bool = False
+    agent_write_actions_enabled: bool = False
+    agent_proactive_enabled: bool = False
+    agent_purchasing_enabled: bool = False
+
     receipt_parser_provider: Literal["fallback", "openai"] = "fallback"
     receipt_parser_model: str = "gpt-4.1-mini"
     receipt_max_attachment_bytes: int = Field(default=10_000_000, ge=100_000, le=25_000_000)
