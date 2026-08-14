@@ -24,4 +24,4 @@ RUN pip install --no-cache-dir --no-deps .
 USER expenseops
 
 EXPOSE 8000
-CMD ["sh", "-c", "exec uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000}"]
+CMD ["sh", "-c", "if [ \"${EXPENSEOPS_PROCESS:-web}\" = \"outbox\" ]; then exec python -m app.jobs.outbox; else exec uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000}; fi"]

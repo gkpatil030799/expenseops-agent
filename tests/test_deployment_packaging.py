@@ -20,6 +20,14 @@ def test_dockerfile_builds_frontend_and_packages_migrations():
     assert "alembic upgrade head" not in dockerfile
 
 
+def test_dockerfile_can_start_the_durable_outbox_worker():
+    dockerfile = Path("Dockerfile").read_text(encoding="utf-8")
+
+    assert "EXPENSEOPS_PROCESS" in dockerfile
+    assert "python -m app.jobs.outbox" in dockerfile
+    assert "uvicorn app.main:app" in dockerfile
+
+
 def test_release_gate_verifies_migrations_before_building_the_image():
     workflow = Path(".github/workflows/release-gate.yml").read_text(encoding="utf-8")
 
