@@ -31,6 +31,11 @@ def test_clean_database_migrates_to_multitenant_head(tmp_path, monkeypatch):
         "oauth_states",
         "telegram_link_codes",
         "audit_events",
+        "agent_conversations",
+        "agent_messages",
+        "agent_runs",
+        "agent_tool_calls",
+        "agent_action_proposals",
     }.issubset(inspector.get_table_names())
     with engine.connect() as connection:
         assert connection.scalar(text("SELECT COUNT(*) FROM users")) == 1
@@ -211,6 +216,49 @@ def test_telegram_binding_migration_enables_transaction_local_rls_bypass(monkeyp
     assert "LOCK TABLE telegram_identities IN SHARE ROW EXCLUSIVE MODE" in operations[1][1]
     assert "UPDATE telegram_identities" in operations[2][1]
     assert "set_config('expenseops.bypass_rls', 'off', true)" in operations[3][1]
+
+
+def test_agent_foundation_migration_enforces_rls_for_every_agent_table(monkeypatch):
+    migration = (
+        ScriptDirectory.from_config(Config("alembic.ini")).get_revision("20260815_0026").module
+    )
+    statements: list[str] = []
+
+    class FakeOp:
+        @staticmethod
+        def get_bind():
+            return type("Bind", (), {"dialect": type("Dialect", (), {"name": "postgresql"})()})()
+
+        @staticmethod
+        def execute(statement):
+            statements.append(str(statement))
+
+        def __getattr__(self, _name):
+            return lambda *_args, **_kwargs: None
+
+    monkeypatch.setattr(migration, "op", FakeOp())
+
+    migration.upgrade()
+
+    for table in migration.AGENT_TENANT_TABLES:
+        assert f'ALTER TABLE "{table}" ENABLE ROW LEVEL SECURITY' in statements
+        assert f'ALTER TABLE "{table}" FORCE ROW LEVEL SECURITY' in statements
+        assert any(
+            f'CREATE POLICY expenseops_workspace_isolation ON "{table}"' in statement
+            for statement in statements
+        )
+
+    snapshot_function = next(
+        statement
+        for statement in statements
+        if "CREATE FUNCTION expenseops_agent_proposal_snapshot_immutable" in statement
+    )
+    assert "NEW.action_fingerprint" in snapshot_function
+    assert "NEW.preview_json" in snapshot_function
+    # These nullable provenance links use ON DELETE SET NULL. Freezing them in
+    # the trigger would block legitimate FK cleanup of runs and tool calls.
+    assert "NEW.run_id" not in snapshot_function
+    assert "NEW.tool_call_id" not in snapshot_function
 
 
 def test_alembic_head_matches_sqlalchemy_metadata(tmp_path, monkeypatch):

@@ -40,6 +40,16 @@ def test_admin_user_emails_parse_csv():
     assert settings.admin_user_emails == ["a@example.test", "b@example.test"]
 
 
+def test_unified_agent_capabilities_default_safely_off():
+    settings = Settings(_env_file=None)
+
+    assert settings.agent_enabled is False
+    assert settings.agent_read_tools_enabled is False
+    assert settings.agent_write_actions_enabled is False
+    assert settings.agent_proactive_enabled is False
+    assert settings.agent_purchasing_enabled is False
+
+
 def test_settings_repr_redacts_credentials_and_private_identifiers():
     sentinel = "UNIT_TEST_CREDENTIAL_MUST_NOT_BE_RENDERED"
     settings = Settings(

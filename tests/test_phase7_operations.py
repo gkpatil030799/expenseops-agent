@@ -12,6 +12,11 @@ from sqlalchemy.orm import Session
 from app.config import Settings
 from app.db import Base
 from app.models import (
+    AgentActionProposal,
+    AgentConversation,
+    AgentMessage,
+    AgentRun,
+    AgentToolCall,
     DataConsent,
     GmailAccount,
     OAuthState,
@@ -101,6 +106,72 @@ def test_consent_and_account_deletion_revoke_identity_and_credentials(tmp_path):
         assert deleted.status == "deleted"
         assert deleted.deleted_at is not None
         assert deleted.email == f"deleted-{context.user_id}@expenseops.invalid"
+
+
+def test_account_deletion_removes_user_owned_agent_history(tmp_path):
+    engine = create_engine(f"sqlite:///{tmp_path / 'agent-privacy.db'}")
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        context = ensure_default_tenancy(db)
+        set_session_tenant(db, context)
+        conversation = AgentConversation(owner_user_id=context.user_id, title="Private thread")
+        db.add(conversation)
+        db.flush()
+        message = AgentMessage(
+            conversation_id=conversation.id,
+            owner_user_id=context.user_id,
+            role="user",
+            content="Private financial question",
+        )
+        db.add(message)
+        db.flush()
+        run = AgentRun(
+            conversation_id=conversation.id,
+            owner_user_id=context.user_id,
+            trigger_message_id=message.id,
+        )
+        db.add(run)
+        db.flush()
+        tool_call = AgentToolCall(
+            run_id=run.id,
+            owner_user_id=context.user_id,
+            sequence=0,
+            tool_name="read_only_test",
+            operation_kind="read",
+        )
+        db.add(tool_call)
+        db.flush()
+        proposal = AgentActionProposal(
+            owner_user_id=context.user_id,
+            conversation_id=conversation.id,
+            run_id=run.id,
+            tool_call_id=tool_call.id,
+            tool_name="write_test",
+            operation_kind="write",
+            normalized_parameters_json={"transaction_id": "opaque"},
+            parameters_hash="a" * 64,
+            action_fingerprint="b" * 64,
+            idempotency_key="account-deletion-test",
+            expires_at=utc_now() + timedelta(minutes=15),
+        )
+        db.add(proposal)
+        db.commit()
+
+        with pytest.raises(ValueError, match="snapshot is immutable"):
+            proposal.normalized_parameters_json = {"transaction_id": "changed"}
+
+        DataLifecycleService(db, Settings(_env_file=None)).delete_account(
+            db.get(User, context.user_id)
+        )
+
+        for model in (
+            AgentActionProposal,
+            AgentToolCall,
+            AgentRun,
+            AgentMessage,
+            AgentConversation,
+        ):
+            assert db.scalar(select(model.id)) is None
 
 
 def test_account_deletion_requires_owner_transfer_for_shared_workspace(tmp_path):

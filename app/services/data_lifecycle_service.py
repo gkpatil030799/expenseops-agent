@@ -7,6 +7,11 @@ from sqlalchemy.orm import Session
 
 from app.config import Settings, get_settings
 from app.models import (
+    AgentActionProposal,
+    AgentConversation,
+    AgentMessage,
+    AgentRun,
+    AgentToolCall,
     AuditEvent,
     AuthIdentity,
     AuthSession,
@@ -29,6 +34,7 @@ from app.models import (
     WorkspaceMembership,
     utc_now,
 )
+from app.tenancy import set_trusted_workspace
 
 CONSENT_PURPOSES = {
     "gmail_receipts",
@@ -117,6 +123,10 @@ class DataLifecycleService:
                 shared_membership_ids.append(membership.id)
 
         now = utc_now()
+        self.delete_user_agent_data(
+            user_id=user.id,
+            workspace_ids=[membership.workspace_id for membership in memberships],
+        )
         plaid_item_ids = list(
             self.db.scalars(select(PlaidItem.id).where(PlaidItem.owner_user_id == user.id))
         )
@@ -171,6 +181,27 @@ class DataLifecycleService:
         user.deleted_at = now
         user.updated_at = now
         self.db.commit()
+
+    def delete_user_agent_data(self, *, user_id: int, workspace_ids: list[int]) -> None:
+        """Delete private agent content in every workspace the departing user belongs to."""
+        original_workspace_id = self.db.info.get("workspace_id")
+        models = (
+            AgentActionProposal,
+            AgentToolCall,
+            AgentRun,
+            AgentMessage,
+            AgentConversation,
+        )
+        if original_workspace_id is None:
+            raise ValueError("Agent data deletion requires an authenticated workspace scope")
+
+        try:
+            for workspace_id in sorted(set(workspace_ids)):
+                set_trusted_workspace(self.db, workspace_id)
+                for model in models:
+                    self.db.execute(delete(model).where(model.owner_user_id == user_id))
+        finally:
+            set_trusted_workspace(self.db, original_workspace_id)
 
     def purge_expired(self) -> dict[str, int]:
         now = utc_now()

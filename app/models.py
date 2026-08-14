@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from enum import StrEnum
+from uuid import uuid4
 
 from sqlalchemy import (
     JSON,
@@ -18,13 +19,21 @@ from sqlalchemy import (
     UniqueConstraint,
     text,
 )
-from sqlalchemy.orm import Mapped, mapped_column, relationship
+from sqlalchemy.orm import Mapped, mapped_column, relationship, validates
 
 from app.db import Base
 
 
 def utc_now() -> datetime:
     return datetime.now(UTC)
+
+
+def new_agent_public_id() -> str:
+    """Return an opaque, platform-neutral identifier for public agent contracts."""
+    return str(uuid4())
+
+
+_AGENT_FIELD_UNSET = object()
 
 
 class TenantScoped:
@@ -1293,3 +1302,399 @@ class PreferredPlace(TenantScoped, Base):
     provider_place_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class AgentConversationStatus(StrEnum):
+    ACTIVE = "active"
+    ARCHIVED = "archived"
+
+
+class AgentMessageRole(StrEnum):
+    USER = "user"
+    ASSISTANT = "assistant"
+
+
+class AgentMessageStatus(StrEnum):
+    CREATED = "created"
+    COMPLETED = "completed"
+    FAILED = "failed"
+
+
+class AgentRunStatus(StrEnum):
+    QUEUED = "queued"
+    RUNNING = "running"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+
+
+class AgentToolOperationKind(StrEnum):
+    READ = "read"
+    WRITE = "write"
+    EXTERNAL_ACTION = "external_action"
+
+
+class AgentToolCallStatus(StrEnum):
+    PROPOSED = "proposed"
+    RUNNING = "running"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    BLOCKED = "blocked"
+
+
+class AgentActionProposalStatus(StrEnum):
+    AWAITING_CONFIRMATION = "awaiting_confirmation"
+    CONFIRMED = "confirmed"
+    EXECUTING = "executing"
+    COMPLETED = "completed"
+    CANCELLED = "cancelled"
+    EXPIRED = "expired"
+    FAILED = "failed"
+    AMBIGUOUS = "ambiguous"
+
+
+class AgentConversation(TenantScoped, Base):
+    __tablename__ = "agent_conversations"
+    __table_args__ = (
+        UniqueConstraint("public_id", name="uq_agent_conversations_public_id"),
+        CheckConstraint(
+            "status IN ('active', 'archived')",
+            name="ck_agent_conversations_status",
+        ),
+        Index(
+            "ix_agent_conversations_workspace_owner_status_updated",
+            "workspace_id",
+            "owner_user_id",
+            "status",
+            "updated_at",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    workspace_id: Mapped[int] = mapped_column(
+        ForeignKey("workspaces.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    public_id: Mapped[str] = mapped_column(String(36), default=new_agent_public_id, nullable=False)
+    owner_user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    title: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    status: Mapped[str] = mapped_column(
+        String(32), default=AgentConversationStatus.ACTIVE.value, nullable=False, index=True
+    )
+    metadata_json: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    messages: Mapped[list[AgentMessage]] = relationship(
+        back_populates="conversation", cascade="all, delete-orphan"
+    )
+    runs: Mapped[list[AgentRun]] = relationship(
+        back_populates="conversation", cascade="all, delete-orphan"
+    )
+    proposals: Mapped[list[AgentActionProposal]] = relationship(
+        back_populates="conversation", cascade="all, delete-orphan"
+    )
+
+
+class AgentMessage(TenantScoped, Base):
+    __tablename__ = "agent_messages"
+    __table_args__ = (
+        UniqueConstraint("public_id", name="uq_agent_messages_public_id"),
+        UniqueConstraint(
+            "workspace_id",
+            "conversation_id",
+            "client_message_id",
+            name="uq_agent_messages_workspace_conversation_client",
+        ),
+        CheckConstraint(
+            "role IN ('user', 'assistant')",
+            name="ck_agent_messages_role",
+        ),
+        CheckConstraint(
+            "status IN ('created', 'completed', 'failed')",
+            name="ck_agent_messages_status",
+        ),
+        Index(
+            "ix_agent_messages_workspace_owner_conversation_created",
+            "workspace_id",
+            "owner_user_id",
+            "conversation_id",
+            "created_at",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    workspace_id: Mapped[int] = mapped_column(
+        ForeignKey("workspaces.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    public_id: Mapped[str] = mapped_column(String(36), default=new_agent_public_id, nullable=False)
+    conversation_id: Mapped[int] = mapped_column(
+        ForeignKey("agent_conversations.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    owner_user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    client_message_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    role: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    status: Mapped[str] = mapped_column(
+        String(32), default=AgentMessageStatus.COMPLETED.value, nullable=False, index=True
+    )
+    content: Mapped[str | None] = mapped_column(Text, nullable=True)
+    structured_response_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    metadata_json: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+    conversation: Mapped[AgentConversation] = relationship(back_populates="messages")
+
+
+class AgentRun(TenantScoped, Base):
+    __tablename__ = "agent_runs"
+    __table_args__ = (
+        UniqueConstraint("public_id", name="uq_agent_runs_public_id"),
+        CheckConstraint(
+            "status IN ('queued', 'running', 'completed', 'failed', 'cancelled')",
+            name="ck_agent_runs_status",
+        ),
+        Index(
+            "ix_agent_runs_workspace_owner_conversation_created",
+            "workspace_id",
+            "owner_user_id",
+            "conversation_id",
+            "created_at",
+        ),
+        Index(
+            "ix_agent_runs_workspace_status_updated",
+            "workspace_id",
+            "status",
+            "updated_at",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    workspace_id: Mapped[int] = mapped_column(
+        ForeignKey("workspaces.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    public_id: Mapped[str] = mapped_column(String(36), default=new_agent_public_id, nullable=False)
+    conversation_id: Mapped[int] = mapped_column(
+        ForeignKey("agent_conversations.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    owner_user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    trigger_message_id: Mapped[int | None] = mapped_column(
+        ForeignKey("agent_messages.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    status: Mapped[str] = mapped_column(
+        String(32), default=AgentRunStatus.QUEUED.value, nullable=False, index=True
+    )
+    model_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    prompt_version: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    page_context_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    response_schema_version: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    request_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    correlation_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    latency_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    input_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    output_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    total_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    estimated_cost_micros: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    error_code: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    metadata_json: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+    conversation: Mapped[AgentConversation] = relationship(back_populates="runs")
+    tool_calls: Mapped[list[AgentToolCall]] = relationship(
+        back_populates="run", cascade="all, delete-orphan"
+    )
+
+
+class AgentToolCall(TenantScoped, Base):
+    __tablename__ = "agent_tool_calls"
+    __table_args__ = (
+        UniqueConstraint("public_id", name="uq_agent_tool_calls_public_id"),
+        UniqueConstraint(
+            "workspace_id",
+            "run_id",
+            "sequence",
+            name="uq_agent_tool_calls_workspace_run_sequence",
+        ),
+        CheckConstraint(
+            "operation_kind IN ('read', 'write', 'external_action')",
+            name="ck_agent_tool_calls_operation_kind",
+        ),
+        CheckConstraint(
+            "capability IN ('standard', 'purchasing')",
+            name="ck_agent_tool_calls_capability",
+        ),
+        CheckConstraint(
+            "status IN ('proposed', 'running', 'completed', 'failed', 'blocked')",
+            name="ck_agent_tool_calls_status",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    workspace_id: Mapped[int] = mapped_column(
+        ForeignKey("workspaces.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    public_id: Mapped[str] = mapped_column(String(36), default=new_agent_public_id, nullable=False)
+    run_id: Mapped[int] = mapped_column(
+        ForeignKey("agent_runs.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    owner_user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    sequence: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    tool_name: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    tool_version: Mapped[str] = mapped_column(String(32), default="1.0", nullable=False)
+    operation_kind: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    capability: Mapped[str] = mapped_column(String(32), default="standard", nullable=False)
+    requires_confirmation: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    status: Mapped[str] = mapped_column(
+        String(32), default=AgentToolCallStatus.PROPOSED.value, nullable=False, index=True
+    )
+    arguments_json: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
+    result_metadata_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    latency_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    error_code: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    metadata_json: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+    run: Mapped[AgentRun] = relationship(back_populates="tool_calls")
+
+
+class AgentActionProposal(TenantScoped, Base):
+    __tablename__ = "agent_action_proposals"
+    __table_args__ = (
+        UniqueConstraint("public_id", name="uq_agent_action_proposals_public_id"),
+        UniqueConstraint(
+            "workspace_id",
+            "owner_user_id",
+            "idempotency_key",
+            name="uq_agent_action_proposals_workspace_owner_idempotency",
+        ),
+        CheckConstraint(
+            "operation_kind IN ('write', 'external_action')",
+            name="ck_agent_action_proposals_operation_kind",
+        ),
+        CheckConstraint(
+            "capability IN ('standard', 'purchasing')",
+            name="ck_agent_action_proposals_capability",
+        ),
+        CheckConstraint(
+            "status IN ('awaiting_confirmation', 'confirmed', 'executing', 'completed', "
+            "'cancelled', 'expired', 'failed', 'ambiguous')",
+            name="ck_agent_action_proposals_status",
+        ),
+        CheckConstraint("version >= 1", name="ck_agent_action_proposals_version"),
+        Index(
+            "uq_agent_action_proposals_active_fingerprint",
+            "workspace_id",
+            "owner_user_id",
+            "action_fingerprint",
+            unique=True,
+            postgresql_where=text(
+                "status IN ('awaiting_confirmation', 'confirmed', 'executing')"
+            ),
+            sqlite_where=text(
+                "status IN ('awaiting_confirmation', 'confirmed', 'executing')"
+            ),
+        ),
+        Index(
+            "ix_agent_action_proposals_workspace_owner_status_expires",
+            "workspace_id",
+            "owner_user_id",
+            "status",
+            "expires_at",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    workspace_id: Mapped[int] = mapped_column(
+        ForeignKey("workspaces.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    public_id: Mapped[str] = mapped_column(String(36), default=new_agent_public_id, nullable=False)
+    owner_user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    conversation_id: Mapped[int] = mapped_column(
+        ForeignKey("agent_conversations.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    run_id: Mapped[int | None] = mapped_column(
+        ForeignKey("agent_runs.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    tool_call_id: Mapped[int | None] = mapped_column(
+        ForeignKey("agent_tool_calls.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    tool_name: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    tool_version: Mapped[str] = mapped_column(String(32), default="1.0", nullable=False)
+    operation_kind: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    capability: Mapped[str] = mapped_column(String(32), default="standard", nullable=False)
+    normalized_parameters_json: Mapped[dict] = mapped_column(
+        JSON, nullable=False, active_history=True
+    )
+    parameters_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    action_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    preview_json: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
+    status: Mapped[str] = mapped_column(
+        String(32),
+        default=AgentActionProposalStatus.AWAITING_CONFIRMATION.value,
+        nullable=False,
+        index=True,
+    )
+    idempotency_key: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    version: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    confirmed_by_user_id: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    attempt_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    result_metadata_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    error_code: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    metadata_json: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, index=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    execution_started_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    cancelled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    conversation: Mapped[AgentConversation] = relationship(back_populates="proposals")
+
+    @validates(
+        "workspace_id",
+        "owner_user_id",
+        "conversation_id",
+        "run_id",
+        "tool_call_id",
+        "tool_name",
+        "tool_version",
+        "operation_kind",
+        "capability",
+        "normalized_parameters_json",
+        "parameters_hash",
+        "action_fingerprint",
+        "preview_json",
+        "idempotency_key",
+        "expires_at",
+    )
+    def _preserve_action_snapshot(self, key: str, value):
+        current = self.__dict__.get(key, _AGENT_FIELD_UNSET)
+        if current is not _AGENT_FIELD_UNSET and current != value:
+            raise ValueError("Agent action proposal snapshot is immutable")
+        return value

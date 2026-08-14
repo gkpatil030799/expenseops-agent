@@ -16,6 +16,7 @@ from app.config import Settings
 from app.db import Base, get_db
 from app.main import app
 from app.models import (
+    AgentConversation,
     AuditEvent,
     AuthIdentity,
     GmailAccount,
@@ -501,6 +502,14 @@ def test_owner_can_transfer_ownership_and_new_owner_can_remove_member(onboarding
             contexts["owner"].user_id: "member",
             contexts["guest"].user_id: "owner",
         }
+        db.add(
+            AgentConversation(
+                workspace_id=contexts["owner"].workspace_id,
+                owner_user_id=contexts["owner"].user_id,
+                title="Private agent history",
+            )
+        )
+        db.commit()
 
     removed = client.delete(
         f"/api/workspaces/{contexts['owner'].workspace_id}/members/{contexts['owner'].user_id}",
@@ -514,6 +523,14 @@ def test_owner_can_transfer_ownership_and_new_owner_can_remove_member(onboarding
                     WorkspaceMembership.workspace_id == contexts["owner"].workspace_id,
                     WorkspaceMembership.user_id == contexts["owner"].user_id,
                 )
+            )
+            is None
+        )
+        assert (
+            db.scalar(
+                select(AgentConversation.id)
+                .where(AgentConversation.owner_user_id == contexts["owner"].user_id)
+                .execution_options(skip_tenant_scope=True)
             )
             is None
         )
