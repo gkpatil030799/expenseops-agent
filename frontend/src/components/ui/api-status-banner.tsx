@@ -88,7 +88,7 @@ function ApiStatusBanner() {
     <aside
       role={status === "session-expired" ? "alert" : "status"}
       aria-live={status === "session-expired" ? "assertive" : "polite"}
-      className="pointer-events-none fixed inset-x-4 top-20 z-[110] mx-auto flex max-w-2xl items-start gap-3 rounded-card border border-slate-200 bg-white p-4 shadow-elevated"
+      className="pointer-events-none fixed inset-x-4 top-20 z-[110] mx-auto flex max-w-2xl items-start gap-3 rounded-card border border-slate-200 bg-white p-4 shadow-primary"
     >
       <Icon aria-hidden="true" className={`mt-0.5 size-5 shrink-0 ${status === "slow" ? "animate-spin text-indigo-600 motion-reduce:animate-none" : "text-slate-700"}`} />
       <div className="min-w-0 flex-1">

@@ -264,7 +264,7 @@ export function AccountSettingsPage({ context, splitwiseTools, learnedBehaviorTo
         <main id="settings-panel" className="min-w-0" aria-live="polite">
           {section === "account" ? <SettingsPanel title="Account" description="Your signed-in identity and setup progress.">
             <Card>
-              <CardContent className="grid gap-5 p-5 sm:grid-cols-2 sm:divide-x sm:divide-slate-200">
+              <CardContent className="grid gap-5 p-5 sm:grid-cols-2 sm:divide-x sm:divide-slate-200 sm:p-5">
                 <div className="flex flex-col gap-4 sm:flex-row sm:items-center"><span className="flex h-14 w-14 shrink-0 items-center justify-center rounded-2xl bg-indigo-50 text-lg font-semibold text-indigo-700 ring-1 ring-indigo-100">{initials(context.user.display_name)}</span><div className="min-w-0"><p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Signed in as</p><p className="mt-1 font-semibold text-slate-950">{context.user.display_name}</p><p className="mt-1 truncate text-sm text-slate-600">{context.user.email}</p><p className="mt-2 text-xs text-slate-500">ExpenseOps account ID {context.user.id}</p></div></div>
                 <div className="flex items-center gap-4 sm:pl-5"><span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-slate-100 text-slate-600"><Building2 className="h-5 w-5" /></span><div className="min-w-0"><p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Current workspace</p><p className="mt-1 truncate font-semibold text-slate-950">{context.workspace.name}</p><p className="mt-1 text-sm capitalize text-slate-600">{currentMembership?.role || "Loading role…"} · {context.workspace.workspace_type}</p></div></div>
               </CardContent>

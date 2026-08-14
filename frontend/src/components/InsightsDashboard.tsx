@@ -15,6 +15,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
+import { ResponsiveSheet } from "@/components/ui/responsive-sheet";
 import { customGranularity, dateRangeForPreset, type DatePreset } from "@/insightsLogic";
 import {
   axisTicks,
@@ -299,15 +300,74 @@ type ControlsProps = {
 };
 
 function InsightsControls(props: ControlsProps) {
+  const [rangeOpen, setRangeOpen] = useState(false);
+  const [filtersOpen, setFiltersOpen] = useState(false);
   const currencyOptions = Array.from(new Set([
     props.data?.scope.currency || "USD",
     ...(props.data?.scope.available_currencies || []),
   ])).sort();
   const secondaryPreset = secondaryPresets.find(([value]) => value === props.preset);
+  const selectedRangeLabel = presets.find(([value]) => value === props.preset)?.[1] || "Date range";
+  const chooseMobilePreset = (value: DatePreset) => {
+    props.choosePreset(value);
+    setRangeOpen(false);
+  };
   return (
     <Card variant="primary" className="relative z-20 overflow-visible bg-white">
       <CardContent className="space-y-3 p-3 pt-3 sm:p-3 sm:pt-3">
-        <div className="flex flex-wrap items-center gap-2">
+        <div className="flex min-w-0 items-center gap-2 sm:hidden">
+          <ResponsiveSheet
+            open={rangeOpen}
+            onOpenChange={setRangeOpen}
+            title="Choose a date range"
+            description="Compare a focused period without crowding the dashboard."
+            trigger={
+              <Button variant="outline" className="min-w-0 flex-1 justify-between px-3" aria-label={`Date range: ${selectedRangeLabel}`}>
+                <span className="flex min-w-0 items-center gap-2"><CalendarRange className="h-4 w-4 shrink-0 text-indigo-600" /><span className="truncate">{selectedRangeLabel}</span></span>
+                <ChevronDown className="h-4 w-4 shrink-0 text-slate-500" />
+              </Button>
+            }
+          >
+            <div className="grid grid-cols-2 gap-2" aria-label="Date range presets">
+              {presets.map(([value, label]) => (
+                <button
+                  key={value}
+                  type="button"
+                  aria-pressed={props.preset === value}
+                  onClick={() => chooseMobilePreset(value)}
+                  className={`min-h-11 rounded-control border px-3 text-sm font-semibold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500 ${props.preset === value ? "border-indigo-600 bg-indigo-600 text-white" : "border-slate-200 bg-white text-slate-700 hover:border-indigo-300 hover:bg-indigo-50"}`}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+          </ResponsiveSheet>
+
+          <label className="sr-only" htmlFor="insights-spending-basis-mobile">Spending basis</label>
+          <select id="insights-spending-basis-mobile" className="h-11 max-w-28 rounded-lg border border-slate-200 bg-white px-2 text-xs font-semibold text-slate-700 hover:border-indigo-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500" value={props.basis} onChange={(event) => props.setBasis(event.target.value)}>
+            <option value="card">Card spend</option>
+            <option value="actual_share">My share</option>
+          </select>
+
+          <ResponsiveSheet
+            open={filtersOpen}
+            onOpenChange={setFiltersOpen}
+            title="Refine insights"
+            description="Narrow the story by account, category, merchant, currency, or review type."
+            trigger={
+              <Button variant="outline" className="relative shrink-0 px-3" aria-label={`Filters${props.activeFilterCount ? `, ${props.activeFilterCount} active` : ""}`}>
+                <Filter className="h-4 w-4" />
+                <span>Filters</span>
+                {props.activeFilterCount ? <span className="flex h-5 min-w-5 items-center justify-center rounded-full bg-indigo-100 px-1 text-[11px] font-semibold text-indigo-800">{props.activeFilterCount}</span> : null}
+              </Button>
+            }
+            footer={<Button className="w-full" onClick={() => setFiltersOpen(false)}>View insights</Button>}
+          >
+            <AdvancedFilterFields props={props} currencyOptions={currencyOptions} />
+          </ResponsiveSheet>
+        </div>
+
+        <div className="hidden flex-wrap items-center gap-2 sm:flex">
           <div className="flex min-w-0 flex-1 gap-1.5 overflow-x-auto" aria-label="Date range presets">
             {primaryPresets.map(([value, label]) => (
               <button
@@ -338,8 +398,8 @@ function InsightsControls(props: ControlsProps) {
               </div>
             </details>
           </div>
-          <label className="sr-only" htmlFor="insights-spending-basis">Spending basis</label>
-          <select id="insights-spending-basis" className="h-11 rounded-lg border border-slate-200 bg-white px-3 text-xs font-semibold text-slate-700 hover:border-indigo-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500" value={props.basis} onChange={(event) => props.setBasis(event.target.value)}>
+          <label className="sr-only" htmlFor="insights-spending-basis-desktop">Spending basis</label>
+          <select id="insights-spending-basis-desktop" className="h-11 rounded-lg border border-slate-200 bg-white px-3 text-xs font-semibold text-slate-700 hover:border-indigo-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500" value={props.basis} onChange={(event) => props.setBasis(event.target.value)}>
             <option value="card">Card spend</option>
             <option value="actual_share">My actual share</option>
           </select>
@@ -352,13 +412,7 @@ function InsightsControls(props: ControlsProps) {
               <ChevronDown className="h-4 w-4 text-slate-500 transition-transform group-open:rotate-180" />
             </summary>
             <div className="absolute right-0 top-full z-30 mt-2 w-[min(42rem,calc(100vw-2rem))] rounded-xl border border-slate-200 bg-white p-4 shadow-xl">
-              <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-                <Select label="Account" value={props.account} onChange={props.setAccount} options={props.data?.accounts || []} all="All accounts" />
-                <Select label="Category" value={props.category} onChange={props.setCategory} options={props.data?.categories || []} all="All categories" />
-                <label className="grid gap-1 text-xs font-semibold text-slate-700">Merchant<Input value={props.merchantInput} onChange={(event) => props.setMerchantInput(event.target.value)} placeholder="All merchants" /></label>
-                <Select label="Currency" value={props.currency || props.data?.scope.currency || "USD"} onChange={props.setCurrency} options={currencyOptions} all="Currency" includeAll={false} />
-                <Select label="Type" value={props.reviewType} onChange={props.setReviewType} options={["personal", "shared"]} all="All types" />
-              </div>
+              <AdvancedFilterFields props={props} currencyOptions={currencyOptions} />
             </div>
           </details>
         </div>
@@ -388,6 +442,18 @@ function InsightsControls(props: ControlsProps) {
         ) : null}
       </CardContent>
     </Card>
+  );
+}
+
+function AdvancedFilterFields({ props, currencyOptions }: { props: ControlsProps; currencyOptions: string[] }) {
+  return (
+    <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+      <Select label="Account" value={props.account} onChange={props.setAccount} options={props.data?.accounts || []} all="All accounts" />
+      <Select label="Category" value={props.category} onChange={props.setCategory} options={props.data?.categories || []} all="All categories" />
+      <label className="grid gap-1 text-xs font-semibold text-slate-700">Merchant<Input value={props.merchantInput} onChange={(event) => props.setMerchantInput(event.target.value)} placeholder="All merchants" /></label>
+      <Select label="Currency" value={props.currency || props.data?.scope.currency || "USD"} onChange={props.setCurrency} options={currencyOptions} all="Currency" includeAll={false} />
+      <Select label="Type" value={props.reviewType} onChange={props.setReviewType} options={["personal", "shared"]} all="All types" />
+    </div>
   );
 }
 
@@ -714,41 +780,53 @@ function LineChart({ values, split, granularity, currency }: { values: Trend[]; 
           <><Legend color="#475569" label="Personal" /><Legend color="#4f46e5" label="Shared" /></>
         ) : <Legend color="#4f46e5" label="Total spend" />}
       </div>
-      <div className="relative min-h-[240px] w-full overflow-hidden">
-        <svg viewBox="0 0 640 280" className="h-[260px] w-full sm:h-[300px]" role="img" aria-label={`Spend over time, ${split ? "personal and shared series" : "total series"}`}>
-          <defs><linearGradient id="insights-total-area" x1="0" x2="0" y1="0" y2="1"><stop offset="0%" stopColor="#4f46e5" stopOpacity="0.18" /><stop offset="100%" stopColor="#4f46e5" stopOpacity="0" /></linearGradient></defs>
-          {ticks.map((tick) => <g key={tick}><line x1={left} x2={right} y1={y(tick)} y2={y(tick)} stroke="#e2e8f0" /><text x={left - 8} y={y(tick) + 4} textAnchor="end" fontSize="11" fill="#64748b">{compactMoney(tick, currency)}</text></g>)}
-          {!split && totalArea ? <polygon points={totalArea} fill="url(#insights-total-area)" /> : null}
-          {split ? (
-            <><polyline points={points("personal_cents")} fill="none" stroke="#475569" strokeWidth="2" strokeDasharray="6 5" /><polyline points={points("shared_cents")} fill="none" stroke="#4f46e5" strokeWidth="2" /></>
-          ) : <polyline points={points("total_cents")} fill="none" stroke="#4f46e5" strokeWidth="2" />}
-          {activeIndex !== null ? <line x1={x(activeIndex)} x2={x(activeIndex)} y1={top} y2={bottom} stroke="#6366f1" strokeDasharray="3 4" strokeWidth="1" /> : null}
-          {values.map((value, index) => {
-            const label = split
-              ? `${dateLabel(value.period, granularity, true)}. Personal ${money(value.personal_cents, currency)}. Shared ${money(value.shared_cents, currency)}. Total ${money(value.total_cents, currency)}. ${value.transactions} transactions.`
-              : `${dateLabel(value.period, granularity, true)}. Total spend ${money(value.total_cents, currency)}. ${value.transactions} transactions.`;
-            return (
-              <g key={value.period} data-chart-point={value.period} role="img" tabIndex={0} aria-label={label} onFocus={() => setActiveIndex(index)} onBlur={() => setActiveIndex(null)} onPointerEnter={() => setActiveIndex(index)} onClick={() => setActiveIndex(index)} onKeyDown={(event) => { if (event.key === "Escape") setActiveIndex(null); }} className="cursor-crosshair outline-none focus:[&_circle]:stroke-indigo-950 focus:[&_circle]:stroke-[3px]">
-                <rect x={Math.max(left, x(index) - 14)} y={top} width="28" height={bottom - top} fill="transparent" />
-                {split ? (
-                  <><circle cx={x(index)} cy={y(value.personal_cents)} r={activeIndex === index ? 5 : 3.5} fill="#475569" stroke="white" strokeWidth="1.5" /><circle cx={x(index)} cy={y(value.shared_cents)} r={activeIndex === index ? 5 : 3.5} fill="#4f46e5" stroke="white" strokeWidth="1.5" /></>
-                ) : <circle cx={x(index)} cy={y(value.total_cents)} r={activeIndex === index ? 5 : 3.5} fill="#4f46e5" stroke="white" strokeWidth="1.5" />}
-              </g>
-            );
-          })}
-          {dateTicks.map((index) => <text key={values[index].period} x={x(index)} y="264" textAnchor="middle" fontSize="10" fill="#64748b">{dateLabel(values[index].period, granularity)}</text>)}
-        </svg>
-        {activeValue ? (
-          <ChartTooltip
-            className={`${activeIndex !== null && activeIndex > values.length / 2 ? "-translate-x-full -ml-2" : "ml-2"}`}
-            style={{ left: `${x(activeIndex || 0) / 640 * 100}%`, top: `${Math.max(2, activeY / 280 * 100)}%` }}
-            title={dateLabel(activeValue.period, granularity, true)}
-            lines={split
-              ? [`Personal ${money(activeValue.personal_cents, currency)}`, `Shared ${money(activeValue.shared_cents, currency)}`, `${activeValue.transactions} transactions`]
-              : [`Total ${money(activeValue.total_cents, currency)}`, `${activeValue.transactions} transactions`]}
-          />
-        ) : null}
+      <div className="relative -mx-1">
+        <div
+          className="overflow-x-auto rounded-lg px-1 pb-1 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500 focus-visible:ring-offset-2 sm:overflow-visible"
+          role="region"
+          aria-label="Scrollable spend over time chart"
+          aria-describedby="spend-chart-scroll-hint"
+          tabIndex={0}
+        >
+          <div className="relative min-h-[240px] w-[640px] sm:w-full">
+            <svg viewBox="0 0 640 280" className="h-[260px] w-[640px] max-w-none sm:h-[300px] sm:w-full" role="img" aria-label={`Spend over time, ${split ? "personal and shared series" : "total series"}`}>
+              <defs><linearGradient id="insights-total-area" x1="0" x2="0" y1="0" y2="1"><stop offset="0%" stopColor="#4f46e5" stopOpacity="0.18" /><stop offset="100%" stopColor="#4f46e5" stopOpacity="0" /></linearGradient></defs>
+              {ticks.map((tick) => <g key={tick}><line x1={left} x2={right} y1={y(tick)} y2={y(tick)} stroke="#e2e8f0" /><text x={left - 8} y={y(tick) + 4} textAnchor="end" fontSize="11" fill="#64748b">{compactMoney(tick, currency)}</text></g>)}
+              {!split && totalArea ? <polygon points={totalArea} fill="url(#insights-total-area)" /> : null}
+              {split ? (
+                <><polyline points={points("personal_cents")} fill="none" stroke="#475569" strokeWidth="2" strokeDasharray="6 5" /><polyline points={points("shared_cents")} fill="none" stroke="#4f46e5" strokeWidth="2" /></>
+              ) : <polyline points={points("total_cents")} fill="none" stroke="#4f46e5" strokeWidth="2" />}
+              {activeIndex !== null ? <line x1={x(activeIndex)} x2={x(activeIndex)} y1={top} y2={bottom} stroke="#6366f1" strokeDasharray="3 4" strokeWidth="1" /> : null}
+              {values.map((value, index) => {
+                const label = split
+                  ? `${dateLabel(value.period, granularity, true)}. Personal ${money(value.personal_cents, currency)}. Shared ${money(value.shared_cents, currency)}. Total ${money(value.total_cents, currency)}. ${value.transactions} transactions.`
+                  : `${dateLabel(value.period, granularity, true)}. Total spend ${money(value.total_cents, currency)}. ${value.transactions} transactions.`;
+                return (
+                  <g key={value.period} data-chart-point={value.period} role="img" tabIndex={0} aria-label={label} onFocus={() => setActiveIndex(index)} onBlur={() => setActiveIndex(null)} onPointerEnter={() => setActiveIndex(index)} onClick={() => setActiveIndex(index)} onKeyDown={(event) => { if (event.key === "Escape") setActiveIndex(null); }} className="cursor-crosshair outline-none focus:[&_circle]:stroke-indigo-950 focus:[&_circle]:stroke-[3px]">
+                    <rect x={Math.max(left, x(index) - 22)} y={top} width="44" height={bottom - top} fill="transparent" />
+                    {split ? (
+                      <><circle cx={x(index)} cy={y(value.personal_cents)} r={activeIndex === index ? 5 : 3.5} fill="#475569" stroke="white" strokeWidth="1.5" /><circle cx={x(index)} cy={y(value.shared_cents)} r={activeIndex === index ? 5 : 3.5} fill="#4f46e5" stroke="white" strokeWidth="1.5" /></>
+                    ) : <circle cx={x(index)} cy={y(value.total_cents)} r={activeIndex === index ? 5 : 3.5} fill="#4f46e5" stroke="white" strokeWidth="1.5" />}
+                  </g>
+                );
+              })}
+              {dateTicks.map((index) => <text key={values[index].period} x={x(index)} y="264" textAnchor="middle" fontSize="11" fill="#64748b">{dateLabel(values[index].period, granularity)}</text>)}
+            </svg>
+            {activeValue ? (
+              <ChartTooltip
+                className={`${activeIndex !== null && activeIndex > values.length / 2 ? "-translate-x-full -ml-2" : "ml-2"}`}
+                style={{ left: `${x(activeIndex || 0) / 640 * 100}%`, top: `${Math.max(2, activeY / 280 * 100)}%` }}
+                title={dateLabel(activeValue.period, granularity, true)}
+                lines={split
+                  ? [`Personal ${money(activeValue.personal_cents, currency)}`, `Shared ${money(activeValue.shared_cents, currency)}`, `${activeValue.transactions} transactions`]
+                  : [`Total ${money(activeValue.total_cents, currency)}`, `${activeValue.transactions} transactions`]}
+              />
+            ) : null}
+          </div>
+        </div>
+        <span aria-hidden="true" className="pointer-events-none absolute inset-y-0 right-0 w-8 rounded-r-lg bg-gradient-to-l from-white via-white/80 to-transparent sm:hidden" />
       </div>
+      <p id="spend-chart-scroll-hint" className="mt-1 text-xs text-slate-500 sm:sr-only">Scroll horizontally to explore each date without shrinking chart labels.</p>
       <DataTable summary="View spending data table" headers={["Period", "Total", "Personal", "Shared", "Transactions"]} rows={values.map((value) => [dateLabel(value.period, granularity, true), money(value.total_cents, currency), money(value.personal_cents, currency), money(value.shared_cents, currency), String(value.transactions)])} />
     </div>
   );

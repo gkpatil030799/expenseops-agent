@@ -504,6 +504,11 @@ GA.
 
 ## Phase 8 — GA validation and re-audit
 
+> **August 14, 2026 status:** Two re-audits are now recorded. The independent design-user review
+> returned a scope-limited conditional GO with open conditions; the full live-production review
+> returned GA NO-GO. Closure work is tracked in
+> [`CONSOLIDATED_LAUNCH_REMEDIATION_STRATEGY_2026-08-14.md`](./CONSOLIDATED_LAUNCH_REMEDIATION_STRATEGY_2026-08-14.md).
+
 Before requesting another launch audit:
 
 - Mark every audit item resolved with linked code, test, and operational evidence.

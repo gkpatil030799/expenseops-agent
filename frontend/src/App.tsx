@@ -839,7 +839,7 @@ function DashboardApp() {
               />
             )}
           </section>
-          {recoveryTransactions.length ? <section className="mt-6 space-y-3" aria-labelledby="recovery-title"><div><div className="inline-flex items-center gap-2 text-xs font-semibold uppercase text-amber-700"><RotateCcw className="h-3.5 w-3.5" />Recovery</div><h2 id="recovery-title" className="mt-1 text-xl font-semibold text-slate-950">Financial actions needing attention</h2><p className="mt-1 text-sm text-slate-600">ExpenseOps keeps uncertain or failed Splitwise actions visible until their provider state is confirmed.</p></div>{recoveryTransactions.map((transaction) => <Card key={transaction.id} className="border-amber-200"><CardContent className="flex flex-col gap-4 p-4 sm:flex-row sm:items-center sm:justify-between"><div className="min-w-0"><p className="font-semibold text-slate-950">{transaction.merchant_name || transaction.name} · {formatTransactionAmount(transaction)}</p><p className="mt-1 text-sm text-slate-700">{transaction.last_error || statusDisplay(transaction.status)}</p><p className="mt-1 text-xs text-slate-500">The transaction has not been hidden or marked successful.</p></div><div className="flex shrink-0 flex-wrap gap-2"><Button variant="outline" disabled={Boolean(transactionActionById[transaction.id])} onClick={() => retryFinancialOperation(transaction.id)}><RotateCcw className="h-4 w-4" />{transactionActionById[transaction.id] || "Reconcile and retry"}</Button>{transaction.status === "reconciliation_required" ? <Button variant="ghost" disabled={Boolean(transactionActionById[transaction.id])} onClick={() => undoTransaction(transaction.id)}>Remove old split &amp; review</Button> : null}</div>{transactionNoticeById[transaction.id] ? <p role="alert" className="text-sm text-rose-700">{transactionNoticeById[transaction.id].text}</p> : null}</CardContent></Card>)}</section> : null}
+          {recoveryTransactions.length ? <section className="mt-6 space-y-3" aria-labelledby="recovery-title"><div><div className="inline-flex items-center gap-2 text-xs font-semibold uppercase text-amber-700"><RotateCcw className="h-3.5 w-3.5" />Recovery</div><h2 id="recovery-title" className="mt-1 text-xl font-semibold text-slate-950">Financial actions needing attention</h2><p className="mt-1 text-sm text-slate-600">ExpenseOps keeps uncertain or failed Splitwise actions visible until their provider state is confirmed.</p></div>{recoveryTransactions.map((transaction) => <Card key={transaction.id} className="border-amber-200"><CardContent className="flex flex-col gap-4 p-4 sm:p-4 sm:flex-row sm:items-center sm:justify-between"><div className="min-w-0"><p className="font-semibold text-slate-950">{transaction.merchant_name || transaction.name} · {formatTransactionAmount(transaction)}</p><p className="mt-1 text-sm text-slate-700">{transaction.last_error || statusDisplay(transaction.status)}</p><p className="mt-1 text-xs text-slate-500">The transaction has not been hidden or marked successful.</p></div><div className="flex shrink-0 flex-wrap gap-2"><Button variant="outline" disabled={Boolean(transactionActionById[transaction.id])} onClick={() => retryFinancialOperation(transaction.id)}><RotateCcw className="h-4 w-4" />{transactionActionById[transaction.id] || "Reconcile and retry"}</Button>{transaction.status === "reconciliation_required" ? <Button variant="ghost" disabled={Boolean(transactionActionById[transaction.id])} onClick={() => undoTransaction(transaction.id)}>Remove old split &amp; review</Button> : null}</div>{transactionNoticeById[transaction.id] ? <p role="alert" className="text-sm text-rose-700">{transactionNoticeById[transaction.id].text}</p> : null}</CardContent></Card>)}</section> : null}
           </div>
           <section aria-labelledby="recently-handled-title"><div className="mb-3 flex items-center justify-between"><h2 id="recently-handled-title" className="text-lg font-semibold text-slate-950">Recently handled</h2><Button variant="ghost" size="sm" onClick={()=>changeExpenseTab("activity")}>View all activity</Button></div>
             <RecentActivity
@@ -1012,8 +1012,8 @@ function ReviewFilters({
         </div>
       </label>
       <div className="grid gap-3 sm:grid-cols-2">
-        <label className="grid gap-1.5 text-sm font-medium text-ui-text">From<Input className="date-control" type="date" value={filters.dateFrom} onChange={(event) => onChange("dateFrom", event.target.value)} /></label>
-        <label className="grid gap-1.5 text-sm font-medium text-ui-text">To<Input className="date-control" type="date" value={filters.dateTo} onChange={(event) => onChange("dateTo", event.target.value)} /></label>
+        <label className="grid gap-1.5 text-sm font-medium text-ui-text">From<Input type="date" value={filters.dateFrom} onChange={(event) => onChange("dateFrom", event.target.value)} /></label>
+        <label className="grid gap-1.5 text-sm font-medium text-ui-text">To<Input type="date" value={filters.dateTo} onChange={(event) => onChange("dateTo", event.target.value)} /></label>
       </div>
     </div>
   );
@@ -1510,14 +1510,14 @@ function Header({
     <PageHeader
       eyebrow={<span className="inline-flex items-center gap-2"><WalletCards className="h-4 w-4" aria-hidden="true" />Expenses</span>}
       title={copy.title}
-      description={<><span className="block text-slate-200">{copy.description}</span><span role={syncError ? "alert" : "status"} className={`mt-1 block text-xs ${syncError ? "text-rose-300" : "text-slate-400"}`}>{syncError ? "We couldn't sync transactions." : busy === "sync" ? "Syncing transactions…" : `Last synced ${lastSyncLabel}`}</span></>}
+      description={<><span className="hidden text-slate-200 sm:block">{copy.description}</span><span role={syncError ? "alert" : "status"} className={`block text-xs sm:mt-1 ${syncError ? "text-rose-300" : "text-slate-400"}`}>{syncError ? "We couldn't sync transactions." : busy === "sync" ? "Syncing transactions…" : `Last synced ${lastSyncLabel}`}</span></>}
       actions={<Button
           onClick={onSync}
           disabled={busy !== null}
           variant="outline"
           className="relative border-white/15 bg-white/10 text-white hover:border-white/25 hover:bg-white/15 hover:text-white"
         >
-          <RefreshCw className={`h-4 w-4 ${busy === "sync" ? "animate-spin" : ""}`}/>{syncError ? "Try again" : "Sync"}
+          <RefreshCw className={`h-4 w-4 ${busy === "sync" ? "animate-spin" : ""}`}/><span className="sr-only sm:not-sr-only">{syncError ? "Try again" : "Sync"}</span>
         </Button>}
     />
   );
@@ -1544,7 +1544,7 @@ function EmptyState({
 }) {
   return (
     <Card className="border-dashed border-slate-300 bg-white">
-      <CardContent className="flex min-h-40 flex-col items-center justify-center p-7 text-center">
+      <CardContent className="flex min-h-40 flex-col items-center justify-center p-7 text-center sm:p-7">
         <span className="flex h-9 w-9 items-center justify-center rounded-md border border-slate-200 bg-white text-slate-500">
           <Icon className="h-5 w-5" />
         </span>
@@ -1645,7 +1645,7 @@ function OperationalState({
 }) {
   return (
     <Card className="bg-slate-50/70 shadow-none">
-      <CardContent className="grid gap-2 p-3 sm:grid-cols-3">
+      <CardContent className="grid gap-2 p-3 sm:grid-cols-3 sm:p-3">
         <StatusPill
           label="Approval queue"
           value={pendingCount ? `${pendingCount} pending` : "Clear"}

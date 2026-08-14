@@ -3,11 +3,18 @@
 This runbook is for the ExpenseOps owner operating the first external beta. Do not invite an
 external user until every preflight item is green.
 
+The August 14 re-audits place this beta on hold until the controlled-design-user gate in
+[CONSOLIDATED_LAUNCH_REMEDIATION_STRATEGY_2026-08-14.md](CONSOLIDATED_LAUNCH_REMEDIATION_STRATEGY_2026-08-14.md)
+is satisfied. This checklist is necessary but does not override an open beta blocker.
+
 ## Before inviting the user
 
 - Confirm `https://expenseops-production.up.railway.app/health` and `/readiness` return success.
 - Confirm Railway `Postgres` has a fresh manual backup under **Postgres → Backups**.
-- Confirm migrations report revision `20260811_0014` after deployment.
+- Confirm the exact deployed Git SHA has a completely green, hermetic test suite and ordinary tests
+  made no external provider calls.
+- Confirm migrations report the repository head for the exact deployed SHA (`20260813_0023` for
+  revision `fce8c5b`) after deployment; do not rely on a permanently hard-coded revision.
 - Confirm Google OAuth is in **External / Testing** and both the owner and design user are listed
   under **Google Auth Platform → Audience → Test users**.
 - Confirm the Google OAuth web client allows these exact redirect URIs:
@@ -23,6 +30,8 @@ external user until every preflight item is green.
 - For the owner's migration only, set `OIDC_BOOTSTRAP_EMAIL` to the owner's exact verified Google
   email. Sign in once, verify the existing data checklist below, then remove this variable.
 - Confirm `/api/admin/onboarding-funnel` works for the email listed in `ADMIN_USER_EMAILS`.
+- Confirm the account-deletion contract is fixed, or self-service deletion is unavailable and a
+  tested operator-assisted deletion procedure plus accurate disclosure has been approved.
 
 Owner data verification after bootstrap:
 
@@ -49,6 +58,11 @@ bot token/webhook secret, Plaid app credentials, and Splitwise consumer credenti
 > testing. Gmail and Telegram are the recommended starting connections. Plaid and Splitwise are
 > optional. ExpenseOps stores connection credentials encrypted and keeps each workspace isolated;
 > you can disconnect an integration from Settings without deleting your workflow history.
+
+Before sending, append the deletion statement approved by the beta gate: either the verified
+self-service path after `PRIV-P0-001` closes, or “Account deletion is operator-assisted during this
+beta; contact support and we will complete and confirm it.” Do not promise the current self-service
+behavior until its deletion matrix passes.
 
 ## What the user does
 

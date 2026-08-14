@@ -913,7 +913,7 @@ export function HouseholdOpsPage() {
             disabled={busy !== null}
           >
             <RefreshCw className={`h-4 w-4 ${busy === "refresh" ? "animate-spin" : ""}`} />
-            Refresh
+            <span className="sr-only sm:not-sr-only">Refresh</span>
           </Button>}
       />
 
@@ -1298,7 +1298,7 @@ function TodayOverview({ receiptCount, unresolvedErrandCount, activeErrandCount,
   return <section className="space-y-4" aria-labelledby="household-next-action">
     <div><h2 id="household-next-action" className="text-xl font-semibold text-slate-950">Recommended next action</h2><p className="mt-1 text-sm text-slate-600">One useful step, based on what is currently waiting.</p></div>
     <Card variant="command" className="overflow-hidden">
-      <CardContent className="flex flex-col gap-5 p-5 sm:flex-row sm:items-center sm:justify-between">
+      <CardContent className="flex flex-col gap-5 p-5 sm:p-5 sm:flex-row sm:items-center sm:justify-between">
         <div className="flex items-start gap-4"><span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-white/10 text-indigo-100 ring-1 ring-white/15"><Icon className="h-5 w-5" /></span><div><p className="text-xs font-semibold uppercase tracking-[0.12em] text-indigo-200">{recommendation.eyebrow}</p><h3 className="mt-1 text-xl font-semibold text-white">{recommendation.title}</h3><p className="mt-1 max-w-2xl text-sm leading-6 text-slate-300">{recommendation.detail}</p></div></div>
         <Button className="shrink-0 bg-white text-indigo-950 hover:bg-indigo-50" onClick={() => onChange(recommendation.view)}>{recommendation.action}<ArrowRight className="h-4 w-4" /></Button>
       </CardContent>

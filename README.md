@@ -425,8 +425,12 @@ Sandbox runtime state and JSONL logs are ignored by Git.
 ## Deploy on Railway
 
 The included [Dockerfile](Dockerfile) builds the React app and packages it with
-FastAPI. [railway.json](railway.json) runs database migrations before startup
-and uses `/health` as the health check.
+FastAPI. [railway.json](railway.json) currently declares only the Railway schema;
+it does not encode migrations, service topology, or health checks. Configure a
+dedicated one-shot migration job and use `/readiness` as the deployment health
+gate, following
+[the production operations runbook](docs/PRODUCTION_OPERATIONS_RUNBOOK.md).
+Keep `/health` for lightweight process liveness.
 
 At minimum, production should have:
 
@@ -452,12 +456,18 @@ Add integration variables in the Railway dashboard, then deploy:
 railway up --detach
 ```
 
-The container starts with:
+Run migrations once through the dedicated migration job before rolling out the
+web and worker services:
 
 ```bash
 alembic upgrade head
-uvicorn app.main:app --host 0.0.0.0 --port "$PORT"
 ```
+
+The container itself starts Uvicorn by default. Set
+`EXPENSEOPS_PROCESS="outbox"` on the separate outbox service to run
+`python -m app.jobs.outbox`. Railway service commands and schedules are
+currently external configuration and must be checked against the runbook before
+each release.
 
 Use Railway Variables for secrets and managed PostgreSQL for data. Do not
 deploy `.env`, SQLite databases, receipt files, Sandbox logs, or Sandbox
@@ -547,9 +557,9 @@ limited to an explicitly local environment with the local-test flag enabled.
 
 ## Honest Limitations
 
-- ExpenseOps isolates workspace data and provider identities per user. A broad
-  GA launch still requires the operational restore, worker, and canary gates in
-  `docs/LAUNCH_READINESS_REMEDIATION_PLAN.md`.
+- ExpenseOps isolates workspace data and provider identities per user. The
+  controlled design-user beta is currently held on the combined beta gate, and
+  broad GA remains NO-GO; see the August 14 re-audit and remediation strategy.
 - Connected-account management needs stronger duplicate-link prevention.
 - Scheduled work requires an external scheduler such as Railway cron.
 - Receipt quality depends on the image and parsing provider.
@@ -560,6 +570,9 @@ limited to an explicitly local environment with the local-test flag enabled.
 ## More to Read
 
 - [Architecture](docs/ARCHITECTURE.md)
+- [Full-Application Launch Re-audit — August 14, 2026](docs/FULL_APPLICATION_LAUNCH_REAUDIT_2026-08-14.md)
+- [Independent Design-User Beta Audit — August 14, 2026](docs/INDEPENDENT_DESIGN_USER_BETA_AUDIT_2026-08-14.md)
+- [Consolidated Launch-Remediation Strategy](docs/CONSOLIDATED_LAUNCH_REMEDIATION_STRATEGY_2026-08-14.md)
 - [Promotion Intelligence](docs/PROMOTION_INTELLIGENCE.md)
 - [Replenishment Learning](docs/REPLENISHMENT_LEARNING.md)
 - [Sandbox Lab](sandbox/README.md)

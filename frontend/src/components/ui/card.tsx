@@ -1,32 +1,25 @@
 import * as React from "react";
-import { cva, type VariantProps } from "class-variance-authority";
+import type { VariantProps } from "class-variance-authority";
 
 import { cn } from "@/lib/utils";
+import { Surface, surfaceVariants } from "@/components/ui/surface";
 
-const cardVariants = cva("text-ink", {
-  variants: {
-    variant: {
-      primary: "rounded-card border border-ui-border bg-white shadow-card",
-      secondary: "rounded-card border border-ui-border bg-slate-50/60",
-      command:
-        "rounded-card border border-slate-800 bg-gradient-to-br from-slate-950 via-slate-950 to-indigo-950 text-white shadow-primary",
-      row: "border-b border-ui-border bg-transparent last:border-b-0",
-    },
-  },
-  defaultVariants: {
-    variant: "primary",
-  },
-});
+// Card and Surface intentionally share one visual contract. Keep this alias for
+// backwards-compatible composition without maintaining a second set of tokens.
+const cardVariants = surfaceVariants;
 
 export interface CardProps
   extends React.HTMLAttributes<HTMLDivElement>,
-    VariantProps<typeof cardVariants> {}
+    Omit<VariantProps<typeof cardVariants>, "padding"> {}
 
 const Card = React.forwardRef<HTMLDivElement, CardProps>(
   ({ className, variant, ...props }, ref) => (
-    <div
+    <Surface
       ref={ref}
-      className={cn(cardVariants({ variant }), className)}
+      variant={variant}
+      padding="none"
+      data-ui="card"
+      className={className}
       {...props}
     />
   ),
@@ -64,7 +57,7 @@ CardDescription.displayName = "CardDescription";
 
 const CardContent = React.forwardRef<HTMLDivElement, React.HTMLAttributes<HTMLDivElement>>(
   ({ className, ...props }, ref) => (
-    <div ref={ref} className={cn("p-4 pt-0 sm:p-6 sm:pt-0", className)} {...props} />
+    <div ref={ref} className={cn("px-4 pb-4 sm:px-6 sm:pb-6", className)} {...props} />
   ),
 );
 CardContent.displayName = "CardContent";

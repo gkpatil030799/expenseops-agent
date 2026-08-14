@@ -3,7 +3,7 @@
 **Program branch:** `agent/launch-readiness`
 
 **Baseline commit:** `f11f960`
-**Last updated:** August 13, 2026
+**Last updated:** August 14, 2026
 
 This file records the implementation and validation evidence for the remediation program in
 [`LAUNCH_READINESS_REMEDIATION_PLAN.md`](./LAUNCH_READINESS_REMEDIATION_PLAN.md).
@@ -21,6 +21,13 @@ This file records the implementation and validation evidence for the remediation
 
 The pre-remediation Insights/UI work and all three audits were preserved in `f11f960` before
 visual-foundation changes began.
+
+## Current release status
+
+| Release | Status | Evidence standard |
+| --- | --- | --- |
+| First external design-user beta | Conditional GO in the independent review; combined conditions remain open and the beta is held | Controlled-beta B0–B4 gate in the August 14 strategy |
+| General availability | NO-GO | All R0–R7 gates, exact-release canary, and independent re-audit |
 
 ## Workstream status
 
@@ -41,13 +48,58 @@ visual-foundation changes began.
 | Phase 5 — durable workers | Complete (code gate) | Production Plaid, Splitwise, Telegram inbound/delivery, Gmail receipt, and Gmail promotion work use durable leased processing; crash reconciliation, jittered provider-aware retries, dead letters/operator replay, cursor safety, overlap protection, and truthful job outcomes are covered. Railway worker activation remains a Phase 7 deployment gate. |
 | Phase 6 — product-domain correctness | Complete (code gate) | Insights financial truth, Household verified-route freshness, atomic receipt review, pagination/recovery, and Deals trust/reversibility are implemented and pass the combined four-browser product-domain gate |
 | Phase 7 — security and operations | Complete (code gate); live operations gate open | Hardened readiness and HTTP security, versioned secret rotation, privacy/consent/deletion and retention, operational queue metrics, migration-controlled non-root container, exact runtime lock, dependency audit, release CI, and production runbook are implemented. Railway backup/PITR activation, restore timing, alert delivery, and service rollout remain unproven live gates. |
-| Phase 8 — GA validation and re-audit | Not started | — |
+| Phase 8 — GA validation and re-audit | Started — two re-audits recorded; closure and exact-release validation remain open | Independent beta audit returned conditional GO with open conditions; full live-production audit returned GA NO-GO |
 
 ## Release rule
 
 No item is considered resolved merely because its code was changed. Resolution requires a linked
 implementation commit, automated tests, applicable screenshots or operational evidence, and a
 passing phase exit gate.
+
+## August 14 re-audits and reconciliation
+
+The full current-state audit is recorded in
+[`FULL_APPLICATION_LAUNCH_REAUDIT_2026-08-14.md`](./FULL_APPLICATION_LAUNCH_REAUDIT_2026-08-14.md).
+It reviewed the clean `main` revision `fce8c5b`, live Railway readiness/configuration, the actual
+production CSP in a clean browser, desktop/mobile UI, customer journeys, backend workers,
+cybersecurity, privacy, and operations.
+
+The separately supplied independent review is archived in
+[`INDEPENDENT_DESIGN_USER_BETA_AUDIT_2026-08-14.md`](./INDEPENDENT_DESIGN_USER_BETA_AUDIT_2026-08-14.md).
+It reviewed the same revision against a narrower, operator-supported first-design-user beta bar and
+could not inspect live Railway/provider state.
+
+The verdict is **NO-GO for broad launch**. New production and failure-path evidence reopens portions
+of V4/V8 and Phases 2–7; prior completion evidence remains below as historical implementation
+evidence rather than being deleted.
+
+The active closure program is
+[`CONSOLIDATED_LAUNCH_REMEDIATION_STRATEGY_2026-08-14.md`](./CONSOLIDATED_LAUNCH_REMEDIATION_STRATEGY_2026-08-14.md).
+
+| Reconciled item | Scope/status | Required proof |
+| --- | --- | --- |
+| Credential representation incident | Open beta/GA blocker | Rotation, revocation, redacted settings/log tests |
+| Provider-leaky Google Routes test | Open beta/GA blocker | Hermetic full suite; zero ordinary-test network calls |
+| Production readiness/RLS 503 | Open beta/GA blocker | Restricted runtime role and `/readiness` 200 |
+| Production Plaid CSP failure | Open beta/GA blocker when Plaid is offered | Production-container/browser Plaid load test |
+| README/Railway claim | Documentation corrected; infrastructure drift remains open | Versioned manifest or executable live-config drift check |
+| Migration ownership | Beta manual-verification requirement; GA remediation | Dedicated migration job and web startup without Alembic |
+| Account deletion | Beta guardrail and GA blocker | Accurate disclosure/operator path for beta; full deletion matrix for GA |
+| 604 KB bundle and 20-warning ceiling | Non-beta maintainability debt | Route chunks, bundle budget, zero-warning lint |
+| Backup/PITR/restore/alerts | Beta preflight subset and GA blocker | Fresh beta backup; timed GA restore and delivered alerts |
+
+## August 14 closure-program status
+
+| Phase | Status |
+| --- | --- |
+| R0 — incident containment and evidence | Not started |
+| R1 — trustworthy customer surface | Not started |
+| R2 — tenant isolation and workers | Not started |
+| R3 — security/identity boundaries | Not started |
+| R4 — financial/privacy/operational truth | Not started |
+| R5 — scale and maintainability | Not started |
+| R6 — production resilience proof | Not started |
+| R7 — exact-release canary/re-audit | Not started |
 
 ## Phase 3 interim evidence
 
@@ -371,3 +423,27 @@ represented as completed by Axe or browser emulation.
 
 Phase 2 does not make provider mutations intrinsically safe to retry. Durable financial
 idempotency and recovery remain Phase 4 work; worker-level retry/lease behavior remains Phase 5.
+
+## R1A UI foundation and responsive polish evidence — 2026-08-14
+
+| Check | Result |
+| --- | --- |
+| Surface contract | `Card` delegates to the canonical `Surface` variants; command, primary, secondary, and row styling no longer have duplicate definitions |
+| Card spacing | Shared content padding uses side-specific defaults, so explicit uniform padding no longer becomes `padding-top: 0` at desktop breakpoints |
+| Page headers | Mobile refresh/sync actions are compact icon controls in the eyebrow row; supporting Expense prose is reduced on phones while the page title and sync status remain available |
+| First viewport | At 393×727, Total Spend is visible without scrolling after opening Insights; Expense, Household, and Deals headers remain within the tested 190px cap |
+| Mobile filters | Date range and advanced filters use controlled accessible sheets with a clear “View insights” completion action; desktop controls retain their compact toolbar |
+| Chart legibility | The 640-unit trend plot is no longer scaled into 4–6px mobile text; it scrolls within its own card, uses 11px axis labels and 44-unit datum hit regions, and retains keyboard tooltips plus a semantic table |
+| Overflow | The contained chart scroller does not create document-level overflow at 320px |
+| Visual tokens | Undefined `shadow-elevated` and `date-control` usages were removed; `Card`/`Surface` share one text and elevation contract |
+| Product metadata | Product title, description, theme color, color scheme, and a local SVG favicon are present and browser-tested |
+| Frontend unit tests | 21 passed |
+| Frontend build | Passed; the existing >500KB initial JavaScript advisory remains open |
+| Frontend lint | Zero errors; 20 existing warnings remain tracked and were not represented as a clean-warning gate |
+| Cross-browser visual gate | 144 passed across desktop Chromium, Pixel 5 Chromium, desktop Firefox, and desktop WebKit |
+| Screenshot evidence | Expense, Household, Settings, Deals, and Insights baselines were intentionally updated for all four browser projects |
+
+R1A is a presentation-only checkpoint. It does not close R1, authorize production deployment, or
+change the standing no-go verdict. Review state truth, complete queue totals, backend permissions,
+provider resilience, tenant isolation, credential rotation, privacy deletion, and production
+recovery evidence remain assigned to later remediation phases.

@@ -3,7 +3,7 @@ import { cva, type VariantProps } from "class-variance-authority";
 
 import { cn } from "@/lib/utils";
 
-const surfaceVariants = cva("min-w-0", {
+const surfaceVariants = cva("min-w-0 text-ink", {
   variants: {
     variant: {
       command:

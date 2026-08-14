@@ -318,6 +318,16 @@ test("visual foundation keeps the expense dashboard stable", async ({ page }) =>
   await expect(page).toHaveScreenshot("expense-review-empty.png", { fullPage: true, timeout: 15_000 });
 });
 
+test("document branding is complete and product-facing", async ({ page }) => {
+  await mockExpenseDashboard(page);
+  await page.goto("/");
+
+  await expect(page).toHaveTitle("ExpenseOps");
+  await expect(page.locator('meta[name="description"]')).toHaveAttribute("content", /review shared expenses/i);
+  await expect(page.locator('meta[name="theme-color"]')).toHaveAttribute("content", "#0f172a");
+  await expect(page.locator('link[rel="icon"]')).toHaveAttribute("href", "/static/favicon.svg");
+});
+
 test("@a11y expense dashboard has no serious accessibility violations", async ({ page }) => {
   await mockExpenseDashboard(page);
   await page.goto("/");
@@ -342,6 +352,33 @@ test("primary destinations remain reachable from the responsive shell", async ({
 
   await page.getByRole("button", { name: "Expenses", exact: true }).click();
   await expect(page.getByRole("heading", { name: "Expense Review" })).toBeVisible();
+});
+
+test("mobile headers stay compact and Insights answers the primary question above the fold", async ({ page }) => {
+  await page.setViewportSize({ width: 393, height: 727 });
+  await mockExpenseDashboard(page);
+  await mockSpendingInsights(page);
+  await mockHouseholdOps(page);
+  await mockDeals(page);
+  await page.goto("/");
+
+  const header = page.locator('[data-ui="page-header"]');
+  await expect(header).toBeVisible();
+  expect(await header.evaluate((element) => Math.round(element.getBoundingClientRect().height))).toBeLessThanOrEqual(190);
+
+  await page.getByRole("button", { name: /insights/i, exact: true }).click();
+  await expect(page.getByRole("heading", { name: "Spending Insights" })).toBeVisible();
+  const total = page.getByLabel("Spending overview").getByText("$1,285", { exact: true });
+  await expect(total).toBeVisible();
+  expect(await total.evaluate((element) => Math.round(element.getBoundingClientRect().bottom))).toBeLessThanOrEqual(727);
+
+  await page.getByRole("button", { name: "Household" }).click();
+  await expect(page.getByRole("heading", { name: "Household operations" })).toBeVisible();
+  expect(await header.evaluate((element) => Math.round(element.getBoundingClientRect().height))).toBeLessThanOrEqual(190);
+
+  await page.getByRole("button", { name: "Deals" }).click();
+  await expect(page.getByRole("heading", { name: "Deals worth your attention" })).toBeVisible();
+  expect(await header.evaluate((element) => Math.round(element.getBoundingClientRect().height))).toBeLessThanOrEqual(190);
 });
 
 test("household Today prioritizes one action and summarizes the route", async ({ page }) => {
@@ -681,8 +718,9 @@ test("primary mobile destinations keep touch targets at least 44px", async ({ pa
   await page.getByRole("button", { name: /insights/i, exact: true }).click();
   await expect(page.getByRole("heading", { name: "Spending Insights" })).toBeVisible();
   await expectMobileTouchTargets(page);
-  await page.getByText("Filters", { exact: true }).click();
+  await page.getByRole("button", { name: /^Filters/ }).click();
   await page.getByRole("combobox", { name: "Account", exact: true }).selectOption("Chase checking");
+  await page.getByRole("button", { name: "View insights" }).click();
   await expect(page.getByRole("button", { name: "Remove Account: Chase checking" })).toBeVisible();
   await expectMobileTouchTargets(page);
 
@@ -838,6 +876,15 @@ test("insights remain usable without horizontal document overflow", async ({ pag
     scrollWidth: document.documentElement.scrollWidth,
   }));
   expect(dimensions.scrollWidth).toBeLessThanOrEqual(dimensions.clientWidth);
+
+  const chart = page.getByRole("region", { name: "Scrollable spend over time chart" });
+  await expect(chart).toBeVisible();
+  const chartDimensions = await chart.evaluate((element) => ({
+    clientWidth: element.clientWidth,
+    scrollWidth: element.scrollWidth,
+  }));
+  expect(chartDimensions.scrollWidth).toBeGreaterThan(chartDimensions.clientWidth);
+  await expect(page.getByText("Scroll horizontally to explore each date without shrinking chart labels.")).toBeVisible();
 });
 
 test("review card prioritizes Personal and Split with progressive split steps", async ({ page }) => {
