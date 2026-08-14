@@ -94,6 +94,9 @@ def _handle_event(db, claimed: ClaimedEvent) -> None:
     if event.event_type == "telegram.review_transaction":
         _handle_telegram_review(db, event)
         return
+    if event.event_type == "telegram.splitwise_posted":
+        _handle_telegram_splitwise_posted(db, event)
+        return
     raise RuntimeError(f"unsupported_outbox_event:{event.event_type}")
 
 
@@ -135,6 +138,31 @@ def _handle_telegram_review(db, event: OutboxEvent) -> None:
     tx.review_notification_queued_at = None
     tx.updated_at = utc_now()
     db.commit()
+
+
+def _handle_telegram_splitwise_posted(db, event: OutboxEvent) -> None:
+    tx = db.get(ExpenseTransaction, int(event.payload_json["transaction_id"]))
+    if tx is None:
+        raise RuntimeError("transaction_missing")
+    expense_id = str(event.payload_json.get("splitwise_expense_id") or "")
+    if not expense_id:
+        raise RuntimeError("splitwise_expense_id_missing")
+    if tx.splitwise_expense_id != expense_id:
+        # The confirmation became stale before delivery (for example, the user
+        # already removed the split). Completing it silently avoids misleading
+        # the recipient about the current state.
+        return
+    recipient_user_id = int(event.payload_json["recipient_user_id"])
+    settings = telegram_settings_for_workspace(
+        db,
+        tx.workspace_id,
+        get_settings(),
+        user_id=recipient_user_id,
+    )
+    if not settings.telegram_chat_id:
+        raise RuntimeError("telegram_recipient_not_connected")
+    if NotificationService(settings).notify_splitwise_posted(tx, expense_id) is False:
+        raise RuntimeError("telegram_delivery_failed")
 
 
 if __name__ == "__main__":

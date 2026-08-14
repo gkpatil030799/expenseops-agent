@@ -10,7 +10,7 @@ from sqlalchemy import delete, select
 
 from app.config import get_settings
 from app.db import SessionLocal
-from app.models import ExpenseTransaction, PlaidItem, TransactionStatus
+from app.models import AuditEvent, ExpenseTransaction, PlaidItem, TransactionStatus
 from app.tenancy import ensure_default_tenancy, set_session_tenant
 
 DEMO_ITEM_ID = "expenseops-insights-demo-v1"
@@ -90,6 +90,9 @@ def seed() -> tuple[int, int, date]:
                 ExpenseTransaction.plaid_transaction_id.startswith(DEMO_TRANSACTION_PREFIX)
             )
         )
+        db.execute(
+            delete(AuditEvent).where(AuditEvent.request_id.startswith(DEMO_TRANSACTION_PREFIX))
+        )
         item = db.scalar(select(PlaidItem).where(PlaidItem.item_id == DEMO_ITEM_ID))
         if item is None:
             item = PlaidItem(
@@ -104,26 +107,61 @@ def seed() -> tuple[int, int, date]:
 
         for index, record in enumerate(records, start=1):
             payload = _split_payload(record.group_id) if record.group_id is not None else None
-            db.add(
-                ExpenseTransaction(
-                    workspace_id=context.workspace_id,
-                    plaid_transaction_id=f"{DEMO_TRANSACTION_PREFIX}{index:03d}",
-                    plaid_item_id=item.id,
-                    account_id=record.account_id,
-                    merchant_name=record.merchant,
-                    name=record.merchant,
-                    amount_cents=record.amount_cents,
-                    iso_currency_code="USD",
-                    date=today - timedelta(days=record.days_ago),
-                    authorized_date=today - timedelta(days=record.days_ago),
-                    pending=False,
-                    payment_channel="in store",
-                    category=record.category,
-                    status=record.status.value,
-                    splitwise_payload_json=payload,
-                    raw_json=json.dumps({"source": DEMO_SOURCE, "demo": True}),
-                )
+            transaction = ExpenseTransaction(
+                workspace_id=context.workspace_id,
+                plaid_transaction_id=f"{DEMO_TRANSACTION_PREFIX}{index:03d}",
+                plaid_item_id=item.id,
+                account_id=record.account_id,
+                merchant_name=record.merchant,
+                name=record.merchant,
+                amount_cents=record.amount_cents,
+                iso_currency_code="USD",
+                date=today - timedelta(days=record.days_ago),
+                authorized_date=today - timedelta(days=record.days_ago),
+                pending=False,
+                payment_channel="in store",
+                category=record.category,
+                status=record.status.value,
+                splitwise_expense_id=(
+                    f"demo-splitwise-{index:03d}"
+                    if record.status == TransactionStatus.POSTED
+                    else None
+                ),
+                splitwise_payload_json=payload,
+                splitwise_amount_cents=(
+                    abs(record.amount_cents)
+                    if record.status == TransactionStatus.POSTED
+                    else None
+                ),
+                raw_json=json.dumps({"source": DEMO_SOURCE, "demo": True}),
             )
+            db.add(transaction)
+            db.flush()
+            if record.status in {TransactionStatus.PERSONAL, TransactionStatus.POSTED}:
+                posted = record.status == TransactionStatus.POSTED
+                db.add(
+                    AuditEvent(
+                        workspace_id=context.workspace_id,
+                        user_id=context.user_id,
+                        event_type=(
+                            "splitwise_expense_posted"
+                            if posted
+                            else "transaction_marked_personal"
+                        ),
+                        resource_type="expense_transaction",
+                        resource_id=str(transaction.id),
+                        request_id=f"{DEMO_TRANSACTION_PREFIX}{index:03d}",
+                        metadata_json={
+                            "source": DEMO_SOURCE,
+                            "transaction_id": transaction.id,
+                            "action": "splitwise_create" if posted else "mark_personal",
+                            "outcome": "succeeded",
+                            "channel": "dashboard",
+                            "attempt": 1 if posted else None,
+                            "provider_object_id": transaction.splitwise_expense_id,
+                        },
+                    )
+                )
         db.commit()
         return len(CURRENT_PERIOD), len(PREVIOUS_PERIOD), today
 

@@ -161,3 +161,87 @@ def test_failed_delivery_retries_and_expired_lease_is_reclaimable(tmp_path):
         assert reclaimed[0].attempt_count == 2
         assert reclaimed[0].lease_token != token
     engine.dispose()
+
+
+def test_worker_delivers_splitwise_confirmation_to_exact_recipient(tmp_path, monkeypatch):
+    engine, factory, context, tx_id = _database(tmp_path)
+    with factory() as db:
+        set_session_tenant(db, context)
+        tx = db.get(ExpenseTransaction, tx_id)
+        tx.status = TransactionStatus.POSTED.value
+        tx.splitwise_expense_id = "splitwise-expense-42"
+        enqueue_outbox_event(
+            db,
+            workspace_id=context.workspace_id,
+            event_type="telegram.splitwise_posted",
+            aggregate_type="financial_operation",
+            aggregate_id="operation-42",
+            dedupe_key="telegram-splitwise-posted:operation-42",
+            payload={
+                "transaction_id": tx_id,
+                "splitwise_expense_id": "splitwise-expense-42",
+                "recipient_user_id": context.user_id,
+            },
+        )
+        db.commit()
+
+    delivered = []
+
+    class Notification:
+        def __init__(self, settings):
+            assert settings.telegram_chat_id == "telegram-chat"
+
+        def notify_splitwise_posted(self, tx, expense_id):
+            delivered.append((tx.id, expense_id))
+            return True
+
+    monkeypatch.setattr(outbox_job, "SessionLocal", factory)
+    monkeypatch.setattr(outbox_job, "NotificationService", Notification)
+    monkeypatch.setattr(outbox_job, "get_settings", lambda: Settings())
+
+    outcome = outbox_job.run_once()
+
+    with factory() as db:
+        set_session_tenant(db, context)
+        event = db.scalar(select(OutboxEvent))
+        assert outcome == {"claimed": 1, "succeeded": 1, "retried": 0, "dead": 0}
+        assert delivered == [(tx_id, "splitwise-expense-42")]
+        assert event.state == "succeeded"
+    engine.dispose()
+
+
+def test_worker_does_not_send_stale_splitwise_confirmation(tmp_path, monkeypatch):
+    engine, factory, context, tx_id = _database(tmp_path)
+    with factory() as db:
+        set_session_tenant(db, context)
+        enqueue_outbox_event(
+            db,
+            workspace_id=context.workspace_id,
+            event_type="telegram.splitwise_posted",
+            aggregate_type="financial_operation",
+            aggregate_id="operation-stale",
+            dedupe_key="telegram-splitwise-posted:operation-stale",
+            payload={
+                "transaction_id": tx_id,
+                "splitwise_expense_id": "already-deleted",
+                "recipient_user_id": context.user_id,
+            },
+        )
+        db.commit()
+
+    class Notification:
+        def __init__(self, _settings):
+            raise AssertionError("stale confirmation must not instantiate delivery")
+
+    monkeypatch.setattr(outbox_job, "SessionLocal", factory)
+    monkeypatch.setattr(outbox_job, "NotificationService", Notification)
+    monkeypatch.setattr(outbox_job, "get_settings", lambda: Settings())
+
+    outcome = outbox_job.run_once()
+
+    with factory() as db:
+        set_session_tenant(db, context)
+        event = db.scalar(select(OutboxEvent))
+        assert outcome == {"claimed": 1, "succeeded": 1, "retried": 0, "dead": 0}
+        assert event.state == "succeeded"
+    engine.dispose()

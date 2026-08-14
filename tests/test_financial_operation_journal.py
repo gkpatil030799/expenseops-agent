@@ -8,8 +8,10 @@ from app.db import Base
 from app.models import (
     ExpenseTransaction,
     FinancialOperation,
+    OutboxEvent,
     PlaidItem,
     SplitwiseIntegration,
+    TelegramIdentity,
     TransactionStatus,
     User,
     Workspace,
@@ -67,6 +69,14 @@ def _database(tmp_path):
                 verified_at=utc_now(),
             )
         )
+        db.add(
+            TelegramIdentity(
+                workspace_id=workspace.id,
+                user_id=user.id,
+                telegram_user_id="telegram-owner",
+                chat_id="telegram-chat",
+            )
+        )
         tx = ExpenseTransaction(
             workspace_id=workspace.id,
             plaid_transaction_id="transaction-1",
@@ -119,10 +129,18 @@ def test_successful_create_is_replayed_without_second_provider_call(tmp_path):
         set_session_tenant(db, context)
         posted, _ = _post(_service(db, splitwise), tx_id)
         operation = db.scalar(select(FinancialOperation))
+        outbox = db.scalar(select(OutboxEvent))
         assert posted.splitwise_expense_id == "expense-1"
         assert operation.state == "succeeded"
         assert operation.attempt_count == 1
         assert operation.idempotency_key
+        assert outbox.event_type == "telegram.splitwise_posted"
+        assert outbox.dedupe_key == f"telegram-splitwise-posted:{operation.id}"
+        assert outbox.payload_json == {
+            "transaction_id": tx_id,
+            "splitwise_expense_id": "expense-1",
+            "recipient_user_id": context.user_id,
+        }
 
         # Simulate a local caller replay after completion. The durable operation
         # result wins without calling the provider again.
@@ -133,6 +151,7 @@ def test_successful_create_is_replayed_without_second_provider_call(tmp_path):
         assert replayed.splitwise_expense_id == "expense-1"
         assert response["replayed"] is True
         assert splitwise.calls == 1
+        assert len(list(db.scalars(select(OutboxEvent)))) == 1
     engine.dispose()
 
 

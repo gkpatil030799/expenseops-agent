@@ -56,6 +56,32 @@ class TransactionOut(BaseModel):
     model_config = {"from_attributes": True}
 
 
+class FinancialActivityEventOut(BaseModel):
+    id: int
+    event_type: str
+    action: str
+    outcome: Literal["succeeded", "failed", "ambiguous"]
+    actor_user_id: int | None = None
+    actor_display_name: str
+    channel: str
+    attempt: int | None = None
+    transaction_id: int | None = None
+    merchant_name: str | None = None
+    amount_cents: int | None = None
+    currency_code: str | None = None
+    provider_object_id: str | None = None
+    correlation_id: str | None = None
+    created_at: datetime
+
+
+class FinancialActivityPage(BaseModel):
+    events: list[FinancialActivityEventOut]
+    total: int
+    limit: int
+    offset: int
+    has_more: bool
+
+
 class MarkPersonalResponse(BaseModel):
     transaction: TransactionOut
     message: str

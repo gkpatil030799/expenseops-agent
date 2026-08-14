@@ -20,6 +20,29 @@ async function mockExpenseDashboard(page: Page, transactions: unknown[] = []) {
     const pathname = new URL(route.request().url()).pathname;
     if (pathname === "/api/context") return route.fulfill({ json: context });
     if (pathname === "/api/insights/activity") return route.fulfill({ json: [] });
+    if (pathname === "/api/insights/financial-activity") return route.fulfill({ json: {
+      events: [{
+        id: 9,
+        event_type: "splitwise_expense_posted",
+        action: "splitwise_create",
+        outcome: "succeeded",
+        actor_user_id: 1,
+        actor_display_name: "Gunjan Patil",
+        channel: "dashboard",
+        attempt: 1,
+        transaction_id: 44,
+        merchant_name: "Aldi",
+        amount_cents: 4850,
+        currency_code: "USD",
+        provider_object_id: "splitwise-44",
+        correlation_id: "request-44",
+        created_at: "2026-08-12T18:30:00Z",
+      }],
+      total: 1,
+      limit: 200,
+      offset: 0,
+      has_more: false,
+    } });
     return route.fulfill({ status: 503, json: { detail: "Provider unavailable in visual test" } });
   });
   await page.route(/.*\/transactions.*/, (route) => route.fulfill({ json: transactions }));
@@ -623,6 +646,9 @@ test("expense views provide their own page identity", async ({ page }) => {
 
   await page.getByRole("button", { name: /activity/i, exact: true }).click();
   await expect(page.getByRole("heading", { name: "Expense Activity" })).toBeVisible();
+  await expect(page.getByText("Posted to Splitwise")).toBeVisible();
+  await expect(page.locator("#main-content").getByText("Gunjan Patil", { exact: true })).toBeVisible();
+  await expect(page.getByText("Attempt 1")).toBeVisible();
 });
 
 test("insights tell a scoped, accessible spending story", async ({ page }) => {

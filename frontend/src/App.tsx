@@ -46,8 +46,6 @@ import { AccountSettingsPage } from "@/components/AccountSettingsPage";
 import { InsightsDashboard } from "@/components/InsightsDashboard";
 import {
   analyticsForTransactions,
-  buildDashboardEvents,
-  filterEvents,
   filterTransactions,
   memoryForTransactions,
 } from "@/dashboardLogic";
@@ -55,11 +53,12 @@ import { ApiError, api, apiErrorMessage } from "@/lib/api";
 import { authenticationView } from "@/onboardingLogic";
 import { SandboxLabPage } from "$sandbox/SandboxLabPage";
 import type {
-  DashboardEvent,
   DashboardFilters,
   AIMemory,
   CustomSplitMode,
   Friend,
+  FinancialActivityEvent,
+  FinancialActivityPage,
   Group,
   MemoryEntry,
   SplitwiseUser,
@@ -106,6 +105,10 @@ function DashboardApp() {
   const [recoveryTransactions, setRecoveryTransactions] = useState<Transaction[]>([]);
   const [recentTransactions, setRecentTransactions] = useState<Transaction[]>([]);
   const [allTransactions, setAllTransactions] = useState<Transaction[]>([]);
+  const [financialActivity, setFinancialActivity] = useState<FinancialActivityPage | null>(null);
+  const [financialActivityLoading, setFinancialActivityLoading] = useState(false);
+  const [financialActivityError, setFinancialActivityError] = useState("");
+  const [financialActivityReload, setFinancialActivityReload] = useState(0);
   const [aiMemories, setAiMemories] = useState<AIMemory[]>([]);
   const [filters, setFilters] = useState<DashboardFilters>({
     merchant: "",
@@ -164,10 +167,6 @@ function DashboardApp() {
     () => filterTransactions(transactions, { ...filters, group: "", status: "" }),
     [transactions, filters],
   );
-  const timelineEvents = useMemo(
-    () => filterEvents(buildDashboardEvents(allTransactions), filters),
-    [allTransactions, filters],
-  );
   const analytics = useMemo(
     () => analyticsForTransactions(allTransactions, analyticsDays),
     [allTransactions, analyticsDays],
@@ -197,10 +196,15 @@ function DashboardApp() {
 
   useEffect(() => {
     if (!accountContext || activeWorkspace !== "expenses" || expenseTab !== "activity") return;
-    void api<Transaction[]>("/api/insights/activity?limit=200")
-      .then((items) => setAllTransactions((current) => mergeTransactions(current, items)))
-      .catch(() => undefined);
-  }, [accountContext, activeWorkspace, expenseTab]);
+    setFinancialActivityLoading(true);
+    setFinancialActivityError("");
+    void api<FinancialActivityPage>("/api/insights/financial-activity?limit=200")
+      .then(setFinancialActivity)
+      .catch((error) =>
+        setFinancialActivityError(apiErrorMessage(error, "Activity could not be loaded.")),
+      )
+      .finally(() => setFinancialActivityLoading(false));
+  }, [accountContext, activeWorkspace, expenseTab, financialActivityReload]);
 
   useEffect(() => {
     const onPopState = () => {
@@ -826,7 +830,7 @@ function DashboardApp() {
               onUndo={undoTransaction}
             />
           </section>
-        </div> : expenseTab === "insights" ? <InsightsDashboard/> : <div className="space-y-4"><SearchFilters filters={filters} onChange={updateFilter}/><ActivityTimeline events={timelineEvents} loading={busy !== null && allTransactions.length === 0}/></div>}
+        </div> : expenseTab === "insights" ? <InsightsDashboard/> : <ActivityTimeline page={financialActivity} loading={financialActivityLoading} error={financialActivityError} onRetry={() => setFinancialActivityReload((value) => value + 1)}/>}
           </>
         )}
     </AppShell>
@@ -966,11 +970,6 @@ function formatTransactionAmount(transaction: Pick<Transaction, "amount_cents" |
   return formatCurrency(Math.abs(transaction.amount_cents) / 100, currency);
 }
 
-function formatDashboardAmount(amount: string) {
-  const parsed = Number(amount);
-  return Number.isFinite(parsed) ? formatCurrency(parsed) : amount;
-}
-
 function ReviewFilters({
   filters,
   onChange,
@@ -1017,84 +1016,6 @@ function ReviewFilters({
         {fields}
       </ResponsiveSheet>
     </FilterToolbar>
-  );
-}
-
-function SearchFilters({
-  filters,
-  onChange,
-  compact = false,
-}: {
-  filters: DashboardFilters;
-  onChange: <K extends keyof DashboardFilters>(key: K, value: DashboardFilters[K]) => void;
-  compact?: boolean;
-}) {
-  const controlClass =
-    "h-11 rounded-lg border-slate-300 bg-white text-slate-800 hover:border-slate-400 focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/20 sm:h-10";
-  return (
-    <Card>
-      <CardContent className="p-5">
-      <div className="mb-4 flex items-center gap-2 text-xs font-semibold uppercase tracking-wide text-slate-600">
-        <Search className="h-3.5 w-3.5 text-slate-500" />
-        Transaction controls
-      </div>
-      <div className={`grid gap-3 md:grid-cols-2 ${compact ? "xl:grid-cols-[1fr_180px_180px]" : "xl:grid-cols-[1.15fr_1fr_160px_155px_155px]"}`}>
-        {!compact ? <label className="grid gap-1.5 text-xs font-medium text-slate-700">
-          Merchant
-          <div className="relative">
-          <Search className="pointer-events-none absolute left-3 top-3 h-4 w-4 text-slate-500" />
-          <Input
-            className={`${controlClass} pl-9`}
-            value={filters.merchant}
-            onChange={(event) => onChange("merchant", event.target.value)}
-            placeholder="Search merchant"
-          />
-          </div>
-        </label> : null}
-        {!compact ? <label className="grid gap-1.5 text-xs font-medium text-slate-700">
-          Group
-          <Input
-            className={controlClass}
-            value={filters.group}
-            onChange={(event) => onChange("group", event.target.value)}
-            placeholder="Filter by group"
-          />
-        </label> : null}
-        <label className="grid gap-1.5 text-xs font-medium text-slate-700">
-          Status
-          <select
-          className={`${controlClass} w-full px-3 text-sm outline-none transition`}
-          value={filters.status}
-          onChange={(event) => onChange("status", event.target.value)}
-        >
-          <option value="">All statuses</option>
-          <option value="ask_user">Needs review</option>
-          <option value="personal">Personal</option>
-          <option value="posted">Posted</option>
-          <option value="shared_draft">Draft split</option>
-        </select>
-        </label>
-        <label className="grid gap-1.5 text-xs font-medium text-slate-700">
-          From
-          <Input
-            className={`${controlClass} date-control`}
-            type="date"
-            value={filters.dateFrom}
-            onChange={(event) => onChange("dateFrom", event.target.value)}
-          />
-        </label>
-        <label className="grid gap-1.5 text-xs font-medium text-slate-700">
-          To
-          <Input
-            className={`${controlClass} date-control`}
-            type="date"
-            value={filters.dateTo}
-            onChange={(event) => onChange("dateTo", event.target.value)}
-          />
-        </label>
-      </div>
-      </CardContent>
-    </Card>
   );
 }
 
@@ -1238,84 +1159,96 @@ function MiniBarList({
 }
 
 function ActivityTimeline({
-  events,
+  page,
   loading,
+  error,
+  onRetry,
 }: {
-  events: DashboardEvent[];
+  page: FinancialActivityPage | null;
   loading: boolean;
+  error: string;
+  onRetry: () => void;
 }) {
-  const eventStyles: Record<
-    DashboardEvent["type"],
-    { badge: string; dot: string; icon: ComponentType<{ className?: string }> }
-  > = {
-    transaction_detected: {
-      badge: "bg-slate-100 text-slate-700",
-      dot: "bg-slate-400",
-      icon: WalletCards,
-    },
-    telegram_sent: { badge: "bg-sky-50 text-sky-700", dot: "bg-sky-500", icon: MessageCircle },
-    recommendation_generated: {
-      badge: "bg-indigo-50 text-indigo-700",
-      dot: "bg-indigo-500",
-      icon: Sparkles,
-    },
-    split_confirmed: {
-      badge: "bg-amber-50 text-amber-700",
-      dot: "bg-amber-500",
-      icon: CheckCircle2,
-    },
-    split_posted: {
-      badge: "bg-emerald-50 text-emerald-700",
-      dot: "bg-emerald-500",
-      icon: Split,
-    },
-    undo_completed: {
-      badge: "bg-amber-50 text-amber-700",
-      dot: "bg-amber-500",
-      icon: RotateCcw,
-    },
-  };
-
+  const events = page?.events || [];
   return (
     <Card className="overflow-hidden">
-      <CardHeader className="pb-4">
-        <div className="flex items-center gap-2">
-          <Activity className="h-4 w-4 text-slate-600" />
-          <CardTitle>Activity timeline</CardTitle>
+      <CardHeader className="flex-row items-start justify-between gap-3 pb-4">
+        <div>
+          <div className="flex items-center gap-2">
+            <Activity className="h-4 w-4 text-slate-600" />
+            <CardTitle>Financial activity</CardTitle>
+          </div>
+          <CardDescription>
+            Immutable decisions, provider attempts, and recovery outcomes
+          </CardDescription>
         </div>
-        <CardDescription>Chronological transaction events</CardDescription>
+        {page ? (
+          <Badge className="bg-slate-100 text-slate-700">
+            {events.length} of {page.total}
+          </Badge>
+        ) : null}
       </CardHeader>
       <CardContent className="max-h-[620px] space-y-1 overflow-auto pr-3">
-        {loading ? (
+        {error && !page ? (
+          <div
+            role="alert"
+            className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-900"
+          >
+            <span>{error}</span>
+            <Button variant="outline" size="sm" onClick={onRetry}>
+              <RefreshCw className="h-4 w-4" /> Retry
+            </Button>
+          </div>
+        ) : loading && !page ? (
           <SkeletonRows rows={5} />
         ) : events.length ? (
-          events.filter((event) => event.type !== "recommendation_generated" && event.type !== "transaction_detected").slice(0, 50).map((event) => {
-            const style = eventStyles[event.type];
+          events.map((event) => {
+            const style = financialActivityStyle(event);
             const Icon = style.icon;
             return (
               <div
                 key={event.id}
-                className="group flex w-full gap-3 rounded-lg border border-transparent px-2 py-2 text-left transition hover:border-slate-200 hover:bg-slate-50 focus-visible:border-indigo-300 focus-visible:bg-indigo-50/40"
+                className="group flex w-full gap-3 rounded-lg border border-transparent px-2 py-2 text-left transition hover:border-slate-200 hover:bg-slate-50"
               >
                 <span className="relative mt-1 flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-white shadow-sm ring-1 ring-slate-200">
-                  <span className={`absolute -left-1 top-3 h-2 w-2 rounded-full ${style.dot}`} />
+                  <span
+                    className={`absolute -left-1 top-3 h-2 w-2 rounded-full ${style.dot}`}
+                  />
                   <Icon className="h-3.5 w-3.5 text-slate-600" />
                 </span>
                 <span className="min-w-0 flex-1 border-b border-slate-100 pb-3">
                   <span className="flex flex-wrap items-center justify-between gap-2">
                     <span className="truncate text-sm font-medium text-slate-900">
-                      {event.merchant}
+                      {event.merchant_name || financialActionLabel(event.action)}
                     </span>
-                    <Badge className={style.badge}>{event.type.replace(/_/g, " ")}</Badge>
+                    <Badge className={style.badge}>{event.outcome}</Badge>
                   </span>
-                  <span className="mt-1 block text-xs text-slate-500">
-                    {formatDashboardAmount(event.amount)}
-                    {event.participants.length ? ` · ${event.participants.join(", ")}` : ""}
+                  <span className="mt-1 block text-sm text-slate-700">
+                    {financialActionLabel(event.action)}
+                    {event.amount_cents !== null
+                      ? ` · ${formatFinancialActivityAmount(event)}`
+                      : ""}
+                  </span>
+                  <span className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-slate-500">
+                    <span>{event.actor_display_name}</span>
+                    <span aria-hidden="true">·</span>
+                    <span className="capitalize">{event.channel}</span>
+                    {event.attempt ? (
+                      <>
+                        <span aria-hidden="true">·</span>
+                        <span>Attempt {event.attempt}</span>
+                      </>
+                    ) : null}
                   </span>
                   <span className="mt-1 flex items-center gap-1 text-xs text-slate-500">
                     <CalendarDays className="h-3 w-3" />
-                    {new Date(event.timestamp).toLocaleString()}
+                    {new Date(event.created_at).toLocaleString()}
                   </span>
+                  {event.correlation_id ? (
+                    <span className="mt-1 block truncate text-xs text-slate-500">
+                      Support ID: {event.correlation_id}
+                    </span>
+                  ) : null}
                 </span>
               </div>
             );
@@ -1323,13 +1256,55 @@ function ActivityTimeline({
         ) : (
           <PanelEmptyState
             icon={Activity}
-            title="No matching activity"
-            description="Activity will appear here as transactions move through the workflow."
+            title="No financial activity yet"
+            description="Decisions and provider attempts will appear here as an immutable history."
           />
         )}
       </CardContent>
     </Card>
   );
+}
+
+function financialActivityStyle(event: FinancialActivityEvent): {
+  badge: string;
+  dot: string;
+  icon: ComponentType<{ className?: string }>;
+} {
+  if (event.outcome === "failed") {
+    return { badge: "bg-rose-50 text-rose-700", dot: "bg-rose-500", icon: AlertCircle };
+  }
+  if (event.outcome === "ambiguous") {
+    return { badge: "bg-amber-50 text-amber-800", dot: "bg-amber-500", icon: RotateCcw };
+  }
+  if (event.action.includes("delete") || event.action === "return_to_review") {
+    return { badge: "bg-slate-100 text-slate-700", dot: "bg-slate-400", icon: RotateCcw };
+  }
+  return {
+    badge: "bg-emerald-50 text-emerald-700",
+    dot: "bg-emerald-500",
+    icon: CheckCircle2,
+  };
+}
+
+function financialActionLabel(action: string) {
+  const labels: Record<string, string> = {
+    mark_personal: "Marked personal",
+    save_draft: "Saved split draft",
+    return_to_review: "Returned to review",
+    remove: "Removed transaction",
+    splitwise_create: "Posted to Splitwise",
+    splitwise_update: "Reconciled Splitwise amount",
+    splitwise_delete: "Removed Splitwise expense",
+    splitwise_delete_removed: "Removed superseded Splitwise expense",
+  };
+  return labels[action] || action.replace(/_/g, " ");
+}
+
+function formatFinancialActivityAmount(event: FinancialActivityEvent) {
+  return new Intl.NumberFormat(undefined, {
+    style: "currency",
+    currency: event.currency_code || "USD",
+  }).format((event.amount_cents || 0) / 100);
 }
 
 function AgentMemoryPanel({

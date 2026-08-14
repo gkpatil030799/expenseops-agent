@@ -74,6 +74,32 @@ export type DashboardEvent = {
   details: Record<string, unknown>;
 };
 
+export type FinancialActivityEvent = {
+  id: number;
+  event_type: string;
+  action: string;
+  outcome: "succeeded" | "failed" | "ambiguous";
+  actor_user_id: number | null;
+  actor_display_name: string;
+  channel: string;
+  attempt: number | null;
+  transaction_id: number | null;
+  merchant_name: string | null;
+  amount_cents: number | null;
+  currency_code: string | null;
+  provider_object_id: string | null;
+  correlation_id: string | null;
+  created_at: string;
+};
+
+export type FinancialActivityPage = {
+  events: FinancialActivityEvent[];
+  total: number;
+  limit: number;
+  offset: number;
+  has_more: boolean;
+};
+
 export type DashboardFilters = {
   merchant: string;
   group: string;

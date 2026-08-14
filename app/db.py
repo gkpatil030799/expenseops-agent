@@ -53,6 +53,7 @@ def get_db(request: Request) -> Generator[Session, None, None]:
             from app.tenancy import TenantContext, set_session_tenant
 
             set_session_tenant(db, TenantContext(user_id=user_id, workspace_id=workspace_id))
+            db.info["interaction_channel"] = "dashboard"
         yield db
     finally:
         db.close()

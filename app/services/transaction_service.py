@@ -23,6 +23,7 @@ from app.models import (
     FinancialOperation,
     PlaidItem,
     SplitwiseIntegration,
+    TelegramIdentity,
     TransactionStatus,
     WorkspaceMembership,
     utc_now,
@@ -939,6 +940,11 @@ class TransactionService:
             return
         tx.status = TransactionStatus.REMOVED.value
         tx.updated_at = utc_now()
+        self._record_transaction_audit(
+            tx,
+            event_type="transaction_removed",
+            action="remove",
+        )
         self.db.commit()
 
     def mark_personal(self, tx_id: int) -> ExpenseTransaction:
@@ -948,6 +954,11 @@ class TransactionService:
         tx.status = TransactionStatus.PERSONAL.value
         tx.last_error = None
         tx.updated_at = utc_now()
+        self._record_transaction_audit(
+            tx,
+            event_type="transaction_marked_personal",
+            action="mark_personal",
+        )
         self.db.commit()
         self.db.refresh(tx)
         return tx
@@ -961,6 +972,11 @@ class TransactionService:
         tx.status = TransactionStatus.SHARED_DRAFT.value
         tx.last_error = None
         tx.updated_at = utc_now()
+        self._record_transaction_audit(
+            tx,
+            event_type="splitwise_draft_saved",
+            action="save_draft",
+        )
         self.db.commit()
         self.db.refresh(tx)
         return tx
@@ -976,6 +992,11 @@ class TransactionService:
         tx.status = TransactionStatus.ASK_USER.value
         tx.last_error = None
         tx.updated_at = utc_now()
+        self._record_transaction_audit(
+            tx,
+            event_type="transaction_returned_to_review",
+            action="return_to_review",
+        )
         self.db.commit()
         self.db.refresh(tx)
         return tx
@@ -1196,6 +1217,11 @@ class TransactionService:
             tx.status = TransactionStatus.SHARED_DRAFT.value
             tx.last_error = None
             tx.updated_at = utc_now()
+            self._record_transaction_audit(
+                tx,
+                event_type="splitwise_draft_saved",
+                action="save_draft",
+            )
             self.db.commit()
             self.db.refresh(tx)
             return tx, {"draft": True, "payload": payload}
@@ -1294,11 +1320,29 @@ class TransactionService:
                 "provider_object_id": expense_id,
                 "idempotency_key": operation.idempotency_key,
                 "recovered": recovered,
+                "action": operation.action,
+                "outcome": "succeeded",
+                "attempt": operation.attempt_count,
+                "channel": self._interaction_channel(),
             },
         )
+        recipient_user_id = self._splitwise_notification_recipient_user_id(tx)
+        if recipient_user_id is not None:
+            enqueue_outbox_event(
+                self.db,
+                workspace_id=tx.workspace_id,
+                event_type="telegram.splitwise_posted",
+                aggregate_type="financial_operation",
+                aggregate_id=operation.id,
+                dedupe_key=f"telegram-splitwise-posted:{operation.id}",
+                payload={
+                    "transaction_id": tx.id,
+                    "splitwise_expense_id": expense_id,
+                    "recipient_user_id": recipient_user_id,
+                },
+            )
         self.db.commit()
         self.db.refresh(tx)
-        self.notification_service.notify_splitwise_posted(tx, expense_id)
         log_event(
             logger,
             "splitwise_expense_posted",
@@ -1380,6 +1424,10 @@ class TransactionService:
                 "transaction_id": tx.id,
                 "provider_object_id": operation.provider_object_id,
                 "amount_cents": tx.splitwise_amount_cents,
+                "action": operation.action,
+                "outcome": "succeeded",
+                "attempt": operation.attempt_count,
+                "channel": self._interaction_channel(),
             },
         )
         self.db.commit()
@@ -1474,6 +1522,10 @@ class TransactionService:
                 "transaction_id": tx.id,
                 "provider_object_id": operation.provider_object_id,
                 "idempotency_key": operation.idempotency_key,
+                "action": operation.action,
+                "outcome": "succeeded",
+                "attempt": operation.attempt_count,
+                "channel": self._interaction_channel(),
             },
         )
         self.db.commit()
@@ -1603,6 +1655,9 @@ class TransactionService:
                 "action": operation.action,
                 "idempotency_key": operation.idempotency_key,
                 "error_code": operation.error_code,
+                "outcome": "ambiguous" if ambiguous else "failed",
+                "attempt": operation.attempt_count,
+                "channel": self._interaction_channel(),
             },
         )
         self.db.commit()
@@ -1622,6 +1677,55 @@ class TransactionService:
     def _actor_user_id(self) -> int | None:
         value = getattr(self.db, "info", {}).get("user_id")
         return int(value) if value is not None else None
+
+    def _interaction_channel(self) -> str:
+        value = str(getattr(self.db, "info", {}).get("interaction_channel") or "").strip()
+        if value:
+            return value
+        return "dashboard" if self._actor_user_id() is not None else "system"
+
+    def _record_transaction_audit(
+        self,
+        tx: ExpenseTransaction,
+        *,
+        event_type: str,
+        action: str,
+    ) -> None:
+        # Lightweight unit-test/legacy adapters do not expose the SQLAlchemy
+        # persistence contract. Real request and worker sessions always do.
+        if not hasattr(self.db, "add"):
+            return
+        record_audit(
+            self.db,
+            workspace_id=tx.workspace_id,
+            user_id=self._actor_user_id(),
+            event_type=event_type,
+            resource_type="expense_transaction",
+            resource_id=str(tx.id),
+            request_id=get_trace_id(),
+            metadata={
+                "transaction_id": tx.id,
+                "action": action,
+                "outcome": "succeeded",
+                "channel": self._interaction_channel(),
+            },
+        )
+
+    def _splitwise_notification_recipient_user_id(
+        self, tx: ExpenseTransaction
+    ) -> int | None:
+        item = tx.plaid_item or self.db.get(PlaidItem, tx.plaid_item_id)
+        recipient_user_id = item.owner_user_id if item is not None else self._actor_user_id()
+        if recipient_user_id is None:
+            return None
+        identity_id = self.db.scalar(
+            select(TelegramIdentity.id).where(
+                TelegramIdentity.workspace_id == tx.workspace_id,
+                TelegramIdentity.user_id == recipient_user_id,
+                TelegramIdentity.enabled.is_(True),
+            )
+        )
+        return int(recipient_user_id) if identity_id is not None else None
 
     def _splitwise_service_for_item_owner(self, item: PlaidItem) -> SplitwiseService:
         if item.owner_user_id is None:

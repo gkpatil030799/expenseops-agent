@@ -3,7 +3,7 @@
 **Program branch:** `agent/launch-readiness`
 
 **Baseline commit:** `f11f960`
-**Last updated:** August 12, 2026
+**Last updated:** August 13, 2026
 
 This file records the implementation and validation evidence for the remediation program in
 [`LAUNCH_READINESS_REMEDIATION_PLAN.md`](./LAUNCH_READINESS_REMEDIATION_PLAN.md).
@@ -37,7 +37,7 @@ visual-foundation changes began.
 | V8 — visual/accessibility validation | Complete (automated gate) | Six-width responsive matrix, 44px touch-target audit across primary and expanded flows, keyboard skip/focus restoration, reduced motion, 200%-zoom-equivalent layout, mobile-nav clearance, edge-state fixtures, and four-project Playwright coverage |
 | Phase 2 — UX action integrity | Complete | Structured API client; global resilience surfaces; scoped Expense, Deals, Settings, and Splitwise actions; cross-browser failure-isolation gate; checkpoint on `agent/launch-readiness` |
 | Phase 3 — identity and tenancy | Complete (code gate) | Tenant-safe uniqueness and schema parity; verified OIDC identity and invite recovery; owner/member API matrix; per-user provider ownership; PostgreSQL FORCE RLS policies; transaction-local request scope; explicit verified-webhook/trusted-worker bypass; shared database rate limiting. Live production activation and restore evidence remain Phase 7 operations gates. |
-| Phase 4 — financial correctness | In progress | Durable Splitwise create/update/delete journal, deterministic idempotency marker, atomic leases, pending-to-posted relationships, finalized-amount and removal reconciliation, valid-draft database invariant, append-only audit events, and visible Recovery UI implemented; transactional outbox moves into Phase 5 |
+| Phase 4 — financial correctness | Complete | Durable Splitwise create/update/delete journal, deterministic idempotency marker, atomic leases, pending-to-posted relationships, finalized-amount and removal reconciliation, valid-draft database invariant, visible Recovery UI, immutable actor/channel/attempt Activity, and atomic Splitwise confirmation outbox implemented |
 | Phase 5 — durable workers | In progress | Transactional outbox schema/service, leased retry/dead-letter worker, durable production Plaid webhook acknowledgement, post-delivery Telegram sent markers, Telegram `update_id` dedupe/retry, resumable Gmail receipt/history pagination, scheduler overlap leases, and truthful cron failures implemented; Splitwise worker, inbound Telegram queue, provider Retry-After, and Railway worker rollout remain open |
 | Phase 6 — product-domain correctness | In progress | Insights financial truth, Household verified-route freshness, receipt pagination/recovery, and Deals trust/reversibility are implemented; atomic batch receipt submission and the combined product-domain browser gate remain open |
 | Phase 7 — security and operations | Not started | — |
@@ -83,12 +83,16 @@ deployment operations tracked in Phase 7; they are not implied by the local SQLi
 | Draft integrity | `shared_draft` requires a non-empty participant/allocation payload in both service validation and a database check constraint; the unsafe one-click Telegram Draft action is no longer offered |
 | Customer recovery | Error and ambiguous transactions remain visible in a dedicated Recovery section; confirmed failures can either retry or remove the old split and return to review |
 | Auditability | Success, failure, ambiguity, recovery, actor, provider object, correlation, and idempotency identifiers emit append-only audit events |
+| Immutable customer Activity | Financial decisions and provider attempts are read from append-only audit events rather than reconstructed from mutable transaction state; actor, channel, attempt, outcome, timestamp, amount, provider ID, and support correlation are paginated and workspace-scoped |
+| Atomic confirmation delivery | A successful Splitwise operation, its audit event, and its exact-recipient Telegram confirmation outbox event commit atomically; no crash window exists between durable financial success and scheduling the confirmation |
+| Delivery truth | Splitwise confirmations now call Telegram through the durable worker, retry on delivery failure, and suppress stale confirmations after the split has already been removed |
 | Migration parity | Clean `alembic upgrade head` followed by `alembic check` passes with the reconciliation fields and draft constraint |
-| Focused regression gate | Backend 140 passed; Ruff passed; frontend unit 20 passed; lint had zero errors; production build passed |
+| Focused regression gate | Financial/transaction/Telegram/outbox gate: 140 passed; full backend suite: 564 passed; Ruff passed; frontend unit 21 passed; focused Activity browser flow passed; lint had zero errors and 20 pre-existing warnings; production build passed |
 
-Phase 4 remains in progress only because post-commit provider notifications/events must move to the
-transactional outbox introduced in Phase 5. The direct financial mutation paths, Plaid replacement,
-amount modification, reversal/removal handling, and valid-draft invariant are implemented and covered.
+The Phase 4 exit gate is complete. Direct Splitwise operations remain synchronous but are protected
+by the durable operation journal, deterministic provider marker, leases, and reconciliation states.
+Workerizing those provider mutations, inbound Telegram processing, and live Railway worker rollout
+remain explicitly assigned to Phase 5.
 
 ## Phase 5 interim evidence
 

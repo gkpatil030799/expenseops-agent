@@ -40,13 +40,14 @@ class NotificationService:
 
     def notify_splitwise_posted(
         self, tx: ExpenseTransaction, splitwise_expense_id: str | None
-    ) -> None:
+    ) -> bool:
         message = (
             f"Added Splitwise expense for {transaction_display_name(tx)} "
             f"({tx.iso_currency_code} {cents_to_decimal_string(abs(tx.amount_cents))}). "
             f"Splitwise expense id: {splitwise_expense_id or 'unknown'}."
         )
-        self._send(message)
+        return self._send(message)
 
-    def _send(self, message: str) -> None:
+    def _send(self, message: str) -> bool:
         logger.info("ExpenseOps notification: %s", message)
+        return self.telegram_service.send_message(message)
