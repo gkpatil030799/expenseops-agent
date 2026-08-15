@@ -66,10 +66,12 @@ class PostgresRateLimiter:
                     event.request_count += 1
                 if int(now.timestamp()) % 100 == 0:
                     db.execute(
-                        delete(RateLimitEvent).where(
+                        delete(RateLimitEvent)
+                        .where(
                             RateLimitEvent.window_started_at
                             < now - timedelta(seconds=max(window_seconds, 3600))
                         )
+                        .execution_options(synchronize_session=False)
                     )
                 db.commit()
             except HTTPException:
@@ -77,12 +79,15 @@ class PostgresRateLimiter:
                 raise
             except IntegrityError:
                 db.rollback()
-                count = db.scalar(
-                    select(func.sum(RateLimitEvent.request_count)).where(
-                        RateLimitEvent.key == key,
-                        RateLimitEvent.window_started_at == window_started_at,
+                count = (
+                    db.scalar(
+                        select(func.sum(RateLimitEvent.request_count)).where(
+                            RateLimitEvent.key == key,
+                            RateLimitEvent.window_started_at == window_started_at,
+                        )
                     )
-                ) or 0
+                    or 0
+                )
                 if count >= limit:
                     raise HTTPException(status_code=429, detail="Too many requests") from None
                 # A concurrent creator won. Retry against the now-existing row.
