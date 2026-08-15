@@ -1471,6 +1471,15 @@ class AgentRun(TenantScoped, Base):
             "status",
             "updated_at",
         ),
+        Index(
+            "uq_agent_runs_workspace_owner_trigger",
+            "workspace_id",
+            "owner_user_id",
+            "trigger_message_id",
+            unique=True,
+            postgresql_where=text("trigger_message_id IS NOT NULL"),
+            sqlite_where=text("trigger_message_id IS NOT NULL"),
+        ),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)

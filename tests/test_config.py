@@ -169,6 +169,17 @@ def test_production_config_rejects_missing_telegram_secret():
         settings.validate_web_runtime()
 
 
+def test_production_config_requires_openai_key_when_read_agent_is_enabled():
+    settings = _safe_production_settings(
+        agent_enabled=True,
+        agent_read_tools_enabled=True,
+        openai_api_key="",
+    )
+
+    with pytest.raises(ValueError, match="OPENAI_API_KEY"):
+        settings.validate_web_runtime()
+
+
 def test_production_config_rejects_local_plaid_webhook_bypass():
     with pytest.raises(ValueError, match="ALLOW_UNVERIFIED_PLAID_WEBHOOKS"):
         _safe_production_settings(allow_unverified_plaid_webhooks_for_local_test=True)

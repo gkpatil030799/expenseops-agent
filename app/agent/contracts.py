@@ -100,6 +100,16 @@ class AgentPageContext(StrictAgentModel):
     entity: AgentPageEntity | None = None
 
 
+class AgentTurnCreate(StrictAgentModel):
+    text: str = Field(min_length=1, max_length=4_000)
+    client_message_id: str = Field(
+        min_length=1,
+        max_length=64,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+    )
+    page_context: AgentPageContext | None = None
+
+
 class AgentResponseBlockBase(StrictAgentModel):
     block_id: str | None = Field(default=None, min_length=1, max_length=100)
 
@@ -115,7 +125,9 @@ class AgentTransactionSummary(StrictAgentModel):
     amount_cents: int
     currency_code: str = Field(min_length=3, max_length=8, pattern=r"^[A-Za-z]{3,8}$")
     occurred_on: date | None = None
+    category: str | None = Field(default=None, max_length=255)
     status: str = Field(min_length=1, max_length=64)
+    pending: bool = False
 
 
 class AgentTransactionListBlock(AgentResponseBlockBase):
@@ -123,6 +135,14 @@ class AgentTransactionListBlock(AgentResponseBlockBase):
     title: str = Field(min_length=1, max_length=160)
     transactions: list[AgentTransactionSummary] = Field(default_factory=list, max_length=50)
     total_count: int = Field(ge=0)
+
+
+class AgentSpendingBreakdownItem(StrictAgentModel):
+    name: str = Field(min_length=1, max_length=255)
+    amount_cents: int
+    transaction_count: int = Field(ge=0)
+    percentage: float = Field(ge=0, le=100)
+    previous_amount_cents: int | None = None
 
 
 class AgentSpendingSummaryBlock(AgentResponseBlockBase):
@@ -135,6 +155,8 @@ class AgentSpendingSummaryBlock(AgentResponseBlockBase):
     previous_total_cents: int | None = None
     change_percent: float | None = None
     highlights: list[str] = Field(default_factory=list, max_length=10)
+    top_categories: list[AgentSpendingBreakdownItem] = Field(default_factory=list, max_length=10)
+    top_merchants: list[AgentSpendingBreakdownItem] = Field(default_factory=list, max_length=10)
 
     @model_validator(mode="after")
     def validate_date_range(self) -> AgentSpendingSummaryBlock:
@@ -317,6 +339,32 @@ class AgentMessageOut(StrictAgentModel):
         if self.text is None and self.structured_response is None:
             raise ValueError("message must include text or a structured response")
         return self
+
+
+class AgentRunOut(StrictAgentModel):
+    public_id: str = Field(min_length=1, max_length=128)
+    status: Literal["queued", "running", "completed", "failed", "cancelled"]
+    model_name: str | None = Field(default=None, min_length=1, max_length=128)
+    prompt_version: str | None = Field(default=None, min_length=1, max_length=64)
+    input_tokens: int | None = Field(default=None, ge=0)
+    output_tokens: int | None = Field(default=None, ge=0)
+    total_tokens: int | None = Field(default=None, ge=0)
+    error_code: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=100,
+        pattern=r"^[a-z][a-z0-9_]*$",
+    )
+    created_at: datetime
+    started_at: datetime | None = None
+    completed_at: datetime | None = None
+
+
+class AgentTurnOut(StrictAgentModel):
+    schema_version: Literal["1.0"] = AGENT_CONTRACT_VERSION
+    run: AgentRunOut
+    user_message: AgentMessageOut
+    assistant_message: AgentMessageOut
 
 
 class AgentConversationDetail(StrictAgentModel):

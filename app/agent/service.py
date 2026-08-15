@@ -138,15 +138,17 @@ class UnifiedAgentService:
         public_id: str,
         *,
         owner_user_id: int,
+        for_update: bool = False,
     ) -> AgentConversation:
         workspace_id = self._require_enabled_scope(owner_user_id)
-        conversation = self.db.scalar(
-            select(AgentConversation).where(
-                AgentConversation.workspace_id == workspace_id,
-                AgentConversation.owner_user_id == owner_user_id,
-                AgentConversation.public_id == public_id,
-            )
+        statement = select(AgentConversation).where(
+            AgentConversation.workspace_id == workspace_id,
+            AgentConversation.owner_user_id == owner_user_id,
+            AgentConversation.public_id == public_id,
         )
+        if for_update:
+            statement = statement.with_for_update()
+        conversation = self.db.scalar(statement)
         if conversation is None:
             raise AgentNotFoundError("conversation_not_found", "Agent conversation not found")
         return conversation
@@ -204,6 +206,7 @@ class UnifiedAgentService:
         conversation = self.get_conversation(
             conversation_public_id,
             owner_user_id=owner_user_id,
+            for_update=True,
         )
         if conversation.status != "active":
             raise AgentConflictError(
@@ -280,6 +283,24 @@ class UnifiedAgentService:
         owner_user_id: int,
         response: AgentStructuredResponse | dict[str, Any],
     ) -> AgentMessage:
+        message = self.stage_assistant_message(
+            conversation_public_id,
+            owner_user_id=owner_user_id,
+            response=response,
+        )
+        self.db.commit()
+        self.db.refresh(message)
+        return message
+
+    def stage_assistant_message(
+        self,
+        conversation_public_id: str,
+        *,
+        owner_user_id: int,
+        response: AgentStructuredResponse | dict[str, Any],
+    ) -> AgentMessage:
+        """Stage an assistant message for an atomic run-terminal commit."""
+
         workspace_id = self._require_enabled_scope(owner_user_id)
         conversation = self.get_conversation(
             conversation_public_id,
@@ -300,8 +321,7 @@ class UnifiedAgentService:
         )
         conversation.updated_at = utc_now()
         self.db.add(message)
-        self.db.commit()
-        self.db.refresh(message)
+        self.db.flush()
         return message
 
     def list_messages(
@@ -330,6 +350,34 @@ class UnifiedAgentService:
                 .limit(max(1, min(limit, 500)))
             )
         )
+
+    def list_recent_messages(
+        self,
+        conversation_public_id: str,
+        *,
+        owner_user_id: int,
+        limit: int = 12,
+    ) -> list[AgentMessage]:
+        """Return the newest bounded history in chronological order."""
+
+        workspace_id = self._require_enabled_scope(owner_user_id)
+        conversation = self.get_conversation(
+            conversation_public_id,
+            owner_user_id=owner_user_id,
+        )
+        newest_first = list(
+            self.db.scalars(
+                select(AgentMessage)
+                .where(
+                    AgentMessage.workspace_id == workspace_id,
+                    AgentMessage.owner_user_id == owner_user_id,
+                    AgentMessage.conversation_id == conversation.id,
+                )
+                .order_by(AgentMessage.created_at.desc(), AgentMessage.id.desc())
+                .limit(max(1, min(limit, 50)))
+            )
+        )
+        return list(reversed(newest_first))
 
     def count_messages(
         self,
@@ -366,9 +414,15 @@ class UnifiedAgentService:
         correlation_id: str | None = None,
     ) -> AgentRun:
         workspace_id = self._require_enabled_scope(owner_user_id)
+        normalized_page_context = (
+            _safe_json(AgentPageContext.model_validate(page_context))
+            if page_context is not None
+            else None
+        )
         conversation = self.get_conversation(
             conversation_public_id,
             owner_user_id=owner_user_id,
+            for_update=True,
         )
         if conversation.status != "active":
             raise AgentConflictError(
@@ -388,6 +442,16 @@ class UnifiedAgentService:
             if trigger is None:
                 raise AgentNotFoundError("message_not_found", "Agent message not found")
             trigger_message_id = trigger.id
+            existing = self.db.scalar(
+                select(AgentRun).where(
+                    AgentRun.workspace_id == workspace_id,
+                    AgentRun.owner_user_id == owner_user_id,
+                    AgentRun.trigger_message_id == trigger_message_id,
+                )
+            )
+            if existing is not None:
+                _require_matching_turn_context(existing, normalized_page_context)
+                return existing
         run = AgentRun(
             workspace_id=workspace_id,
             conversation_id=conversation.id,
@@ -396,17 +460,31 @@ class UnifiedAgentService:
             status="queued",
             model_name=_bounded_optional_text(model_name, 128),
             prompt_version=_bounded_required_text(prompt_version, 64, "prompt version"),
-            page_context_json=(
-                _safe_json(AgentPageContext.model_validate(page_context))
-                if page_context is not None
-                else None
-            ),
+            page_context_json=normalized_page_context,
             response_schema_version="1.0",
             request_id=_bounded_optional_text(request_id or get_trace_id(), 64),
             correlation_id=_bounded_optional_text(correlation_id or get_trace_id(), 64),
         )
         self.db.add(run)
-        self.db.commit()
+        try:
+            self.db.commit()
+        except IntegrityError as exc:
+            self.db.rollback()
+            if trigger_message_id is not None:
+                existing = self.db.scalar(
+                    select(AgentRun).where(
+                        AgentRun.workspace_id == workspace_id,
+                        AgentRun.owner_user_id == owner_user_id,
+                        AgentRun.trigger_message_id == trigger_message_id,
+                    )
+                )
+                if existing is not None:
+                    _require_matching_turn_context(existing, normalized_page_context)
+                    return existing
+            raise AgentConflictError(
+                "run_persistence_conflict",
+                "Agent run could not be persisted safely",
+            ) from exc
         self.db.refresh(run)
         log_event(logger, "agent_run_queued", run_id=run.public_id)
         return run
@@ -442,6 +520,9 @@ class UnifiedAgentService:
         input_tokens: int | None = None,
         output_tokens: int | None = None,
         estimated_cost_micros: int | None = None,
+        assistant_message_public_id: str | None = None,
+        provider_request_id: str | None = None,
+        provider_request_count: int | None = None,
     ) -> AgentRun:
         workspace_id = self._require_enabled_scope(owner_user_id)
         run = self._get_run(public_id, owner_user_id=owner_user_id)
@@ -452,6 +533,12 @@ class UnifiedAgentService:
             (normalized_input_tokens or 0) + (normalized_output_tokens or 0)
             if input_tokens is not None or output_tokens is not None
             else None
+        )
+        metadata = _run_metadata(
+            run.metadata_json,
+            assistant_message_public_id=assistant_message_public_id,
+            provider_request_id=provider_request_id,
+            provider_request_count=provider_request_count,
         )
         result = self.db.execute(
             update(AgentRun)
@@ -468,6 +555,7 @@ class UnifiedAgentService:
                 output_tokens=normalized_output_tokens,
                 total_tokens=total_tokens,
                 estimated_cost_micros=_nonnegative(estimated_cost_micros),
+                metadata_json=metadata,
                 completed_at=now,
                 updated_at=now,
             )
@@ -497,10 +585,36 @@ class UnifiedAgentService:
         error_code: str,
         error_message: str,
         latency_ms: int | None = None,
+        assistant_message_public_id: str | None = None,
+        provider_request_id: str | None = None,
+        provider_request_count: int | None = None,
     ) -> AgentRun:
         workspace_id = self._require_enabled_scope(owner_user_id)
         run = self._get_run(public_id, owner_user_id=owner_user_id)
         now = utc_now()
+        metadata = _run_metadata(
+            run.metadata_json,
+            assistant_message_public_id=assistant_message_public_id,
+            provider_request_id=provider_request_id,
+            provider_request_count=provider_request_count,
+        )
+        self.db.execute(
+            update(AgentToolCall)
+            .where(
+                AgentToolCall.workspace_id == workspace_id,
+                AgentToolCall.owner_user_id == owner_user_id,
+                AgentToolCall.run_id == run.id,
+                AgentToolCall.status.in_(("proposed", "running")),
+            )
+            .values(
+                status="failed",
+                error_code="run_failed",
+                error_message=_SAFE_FAILURE_MESSAGE,
+                completed_at=now,
+                updated_at=now,
+            )
+            .execution_options(synchronize_session=False)
+        )
         result = self.db.execute(
             update(AgentRun)
             .where(
@@ -514,6 +628,7 @@ class UnifiedAgentService:
                 error_code=_safe_error_code(error_code),
                 error_message=_safe_error_message(error_message),
                 latency_ms=_nonnegative(latency_ms),
+                metadata_json=metadata,
                 completed_at=now,
                 updated_at=now,
             )
@@ -532,6 +647,60 @@ class UnifiedAgentService:
             error_code=failed.error_code,
         )
         return failed
+
+    def cancel_run(
+        self,
+        public_id: str,
+        *,
+        owner_user_id: int,
+        latency_ms: int | None = None,
+    ) -> AgentRun:
+        workspace_id = self._require_enabled_scope(owner_user_id)
+        run = self._get_run(public_id, owner_user_id=owner_user_id)
+        now = utc_now()
+        self.db.execute(
+            update(AgentToolCall)
+            .where(
+                AgentToolCall.workspace_id == workspace_id,
+                AgentToolCall.owner_user_id == owner_user_id,
+                AgentToolCall.run_id == run.id,
+                AgentToolCall.status.in_(("proposed", "running")),
+            )
+            .values(
+                status="failed",
+                error_code="run_cancelled",
+                error_message=_SAFE_FAILURE_MESSAGE,
+                completed_at=now,
+                updated_at=now,
+            )
+            .execution_options(synchronize_session=False)
+        )
+        result = self.db.execute(
+            update(AgentRun)
+            .where(
+                AgentRun.id == run.id,
+                AgentRun.workspace_id == workspace_id,
+                AgentRun.owner_user_id == owner_user_id,
+                AgentRun.status.in_(("queued", "running")),
+            )
+            .values(
+                status="cancelled",
+                error_code="run_cancelled",
+                error_message=_SAFE_FAILURE_MESSAGE,
+                latency_ms=_nonnegative(latency_ms),
+                completed_at=now,
+                updated_at=now,
+            )
+            .execution_options(synchronize_session=False)
+        )
+        if result.rowcount != 1:
+            self.db.rollback()
+            raise AgentConflictError("run_state_conflict", "Agent run cannot be cancelled")
+        self.db.commit()
+        self.db.expire(run)
+        cancelled = self._get_run(public_id, owner_user_id=owner_user_id)
+        log_event(logger, "agent_run_cancelled", run_id=cancelled.public_id)
+        return cancelled
 
     def record_tool_call(
         self,
@@ -619,6 +788,13 @@ class UnifiedAgentService:
                 AgentToolCall.workspace_id == workspace_id,
                 AgentToolCall.owner_user_id == owner_user_id,
                 AgentToolCall.status == "proposed",
+                AgentToolCall.run_id.in_(
+                    select(AgentRun.id).where(
+                        AgentRun.workspace_id == workspace_id,
+                        AgentRun.owner_user_id == owner_user_id,
+                        AgentRun.status == "running",
+                    )
+                ),
             )
             .values(status="running", started_at=now, updated_at=now)
             .execution_options(synchronize_session=False)
@@ -662,10 +838,17 @@ class UnifiedAgentService:
                 AgentToolCall.workspace_id == workspace_id,
                 AgentToolCall.owner_user_id == owner_user_id,
                 AgentToolCall.status.in_(("proposed", "running")),
+                AgentToolCall.run_id.in_(
+                    select(AgentRun.id).where(
+                        AgentRun.workspace_id == workspace_id,
+                        AgentRun.owner_user_id == owner_user_id,
+                        AgentRun.status == "running",
+                    )
+                ),
             )
             .values(
                 status="completed",
-                result_metadata_json={"output_schema_validated": True},
+                result_metadata_json=_tool_result_metadata(dispatch.output),
                 latency_ms=_nonnegative(latency_ms),
                 completed_at=now,
                 updated_at=now,
@@ -1097,6 +1280,53 @@ class UnifiedAgentService:
         self.db.expire(proposal)
         return self._get_proposal(public_id, owner_user_id=owner_user_id)
 
+    def get_run(self, public_id: str, *, owner_user_id: int) -> AgentRun:
+        return self._get_run(public_id, owner_user_id=owner_user_id)
+
+    def get_message(self, public_id: str, *, owner_user_id: int) -> AgentMessage:
+        workspace_id = self._require_enabled_scope(owner_user_id)
+        message = self.db.scalar(
+            select(AgentMessage).where(
+                AgentMessage.workspace_id == workspace_id,
+                AgentMessage.owner_user_id == owner_user_id,
+                AgentMessage.public_id == public_id,
+            )
+        )
+        if message is None:
+            raise AgentNotFoundError("message_not_found", "Agent message not found")
+        return message
+
+    def find_run_for_trigger_message(
+        self,
+        trigger_message_public_id: str,
+        *,
+        owner_user_id: int,
+    ) -> AgentRun | None:
+        workspace_id = self._require_enabled_scope(owner_user_id)
+        message = self.get_message(trigger_message_public_id, owner_user_id=owner_user_id)
+        return self.db.scalar(
+            select(AgentRun).where(
+                AgentRun.workspace_id == workspace_id,
+                AgentRun.owner_user_id == owner_user_id,
+                AgentRun.trigger_message_id == message.id,
+            )
+        )
+
+    def result_message_for_run(
+        self,
+        run: AgentRun,
+        *,
+        owner_user_id: int,
+    ) -> AgentMessage | None:
+        self._require_enabled_scope(owner_user_id)
+        value = (run.metadata_json or {}).get("assistant_message_public_id")
+        if not isinstance(value, str) or not value:
+            return None
+        try:
+            return self.get_message(value, owner_user_id=owner_user_id)
+        except AgentNotFoundError:
+            return None
+
     def _get_run(
         self,
         public_id: str,
@@ -1236,6 +1466,65 @@ def _reject_sensitive_keys(value: Any, *, depth: int = 0) -> None:
 def _json_hash(value: dict[str, Any]) -> str:
     encoded = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def _tool_result_metadata(output: dict[str, Any]) -> dict[str, Any]:
+    """Persist auditable semantics without copying financial tool payloads."""
+
+    metadata: dict[str, Any] = {
+        "output_schema_validated": True,
+        "output_sha256": _json_hash(_safe_json(output)),
+    }
+    transactions = output.get("transactions")
+    if isinstance(transactions, list):
+        metadata["returned_count"] = len(transactions)
+    total_count = output.get("total_count")
+    if isinstance(total_count, int) and total_count >= 0:
+        metadata["total_count"] = total_count
+    for key in ("start_date", "end_date", "currency_code"):
+        value = output.get(key)
+        if isinstance(value, str):
+            metadata[key] = value[:16]
+    return metadata
+
+
+def _run_metadata(
+    current: dict[str, Any] | None,
+    *,
+    assistant_message_public_id: str | None,
+    provider_request_id: str | None,
+    provider_request_count: int | None,
+) -> dict[str, Any]:
+    metadata = dict(current or {})
+    metadata.update({"provider": "openai", "runtime": "openai_agents_sdk"})
+    if assistant_message_public_id is not None:
+        metadata["assistant_message_public_id"] = _bounded_required_text(
+            assistant_message_public_id,
+            128,
+            "assistant message ID",
+        )
+    if provider_request_id is not None:
+        metadata["provider_request_id"] = _bounded_required_text(
+            provider_request_id,
+            128,
+            "provider request ID",
+        )
+    if provider_request_count is not None:
+        metadata["provider_request_count"] = _nonnegative(provider_request_count)
+    return _safe_json(metadata)
+
+
+def _require_matching_turn_context(
+    run: AgentRun,
+    page_context: dict[str, Any] | None,
+) -> None:
+    """Reject reuse of a turn idempotency key with a different request context."""
+
+    if run.page_context_json != page_context:
+        raise AgentConflictError(
+            "client_message_id_conflict",
+            "Client message ID was already used for different turn context",
+        )
 
 
 def _bounded_optional_text(value: str | None, maximum: int) -> str | None:
