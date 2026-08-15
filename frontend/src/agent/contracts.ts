@@ -334,6 +334,69 @@ export type AgentTurnOut = {
   assistant_message: AgentMessageOut;
 };
 
+export type AgentStreamEventBase = {
+  schema_version: AgentSchemaVersion;
+  sequence: number;
+  run_public_id: string | null;
+};
+
+export type AgentRunStartedEvent = AgentStreamEventBase & {
+  type: "run_started";
+  resumed: boolean;
+};
+
+export type AgentAssistantDeltaEvent = AgentStreamEventBase & {
+  type: "assistant_delta";
+  delta: string;
+};
+
+export type AgentToolActivity = "spending" | "transactions";
+
+export type AgentToolStartedEvent = AgentStreamEventBase & {
+  type: "tool_started";
+  activity: AgentToolActivity;
+  message: string;
+};
+
+export type AgentToolCompletedEvent = AgentStreamEventBase & {
+  type: "tool_completed";
+  activity: AgentToolActivity;
+  message: string;
+};
+
+export type AgentStructuredResponseEvent = AgentStreamEventBase & {
+  type: "structured_response";
+  response: AgentStructuredResponse;
+};
+
+export type AgentAssistantCompletedEvent = AgentStreamEventBase & {
+  type: "assistant_completed";
+  message: AgentMessageOut;
+};
+
+export type AgentRunCompletedEvent = AgentStreamEventBase & {
+  type: "run_completed";
+  run: AgentRunOut;
+};
+
+export type AgentRunFailedEvent = AgentStreamEventBase & {
+  type: "run_failed";
+  run: AgentRunOut | null;
+  code: string;
+  message: string;
+  retryable: boolean;
+};
+
+export type AgentStreamEvent =
+  | AgentRunStartedEvent
+  | AgentAssistantDeltaEvent
+  | AgentToolStartedEvent
+  | AgentToolCompletedEvent
+  | AgentStructuredResponseEvent
+  | AgentAssistantCompletedEvent
+  | AgentRunCompletedEvent
+  | AgentRunFailedEvent;
+
 export type AgentConversationDetail = {
   conversation: AgentConversation;
   messages: AgentMessage[];

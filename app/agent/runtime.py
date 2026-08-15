@@ -6,7 +6,8 @@ import logging
 import re
 import threading
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
+from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from typing import Annotated, Any, Protocol
@@ -29,15 +30,24 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.agent.contracts import (
+    AgentAssistantCompletedEvent,
+    AgentAssistantDeltaEvent,
     AgentEmptyStateBlock,
     AgentErrorBlock,
     AgentMessageOut,
     AgentPageContext,
+    AgentRunCompletedEvent,
+    AgentRunFailedEvent,
     AgentRunOut,
+    AgentRunStartedEvent,
     AgentSpendingBreakdownItem,
     AgentSpendingSummaryBlock,
+    AgentStreamEvent,
     AgentStructuredResponse,
+    AgentStructuredResponseEvent,
     AgentTextBlock,
+    AgentToolCompletedEvent,
+    AgentToolStartedEvent,
     AgentTransactionListBlock,
     AgentTransactionSummary,
     AgentTurnOut,
@@ -132,6 +142,16 @@ class RuntimeResult:
 
 
 @dataclass(frozen=True, slots=True)
+class RuntimeProgressEvent:
+    kind: str
+    run_public_id: str
+    tool_name: str | None = None
+
+
+RuntimeProgressSink = Callable[[RuntimeProgressEvent], Awaitable[None]]
+
+
+@dataclass(frozen=True, slots=True)
 class ReadToolEvidence:
     tool_name: str
     arguments: dict[str, Any]
@@ -176,6 +196,7 @@ class ReadToolExecutor:
         run_public_id: str,
         owner_user_id: int,
         max_calls: int = MAX_AGENT_TOOL_CALLS,
+        progress: RuntimeProgressSink | None = None,
     ) -> None:
         self.registry = registry
         self.settings = settings
@@ -185,6 +206,7 @@ class ReadToolExecutor:
         self.run_public_id = run_public_id
         self.owner_user_id = owner_user_id
         self.max_calls = max_calls
+        self.progress = progress
         self.call_count = 0
         self.evidence: list[ReadToolEvidence] = []
         self.failures: list[ReadToolFailure] = []
@@ -196,6 +218,14 @@ class ReadToolExecutor:
                 "The read-only agent reached its tool-call limit.",
             )
         self.call_count += 1
+        await _emit_progress_safely(
+            self.progress,
+            RuntimeProgressEvent(
+                kind="tool_started",
+                run_public_id=self.run_public_id,
+                tool_name=tool_name,
+            ),
+        )
         cancelled = threading.Event()
         work = asyncio.create_task(
             asyncio.to_thread(
@@ -206,7 +236,16 @@ class ReadToolExecutor:
             )
         )
         try:
-            return await asyncio.wait_for(work, timeout=MAX_TOOL_SECONDS)
+            output = await asyncio.wait_for(work, timeout=MAX_TOOL_SECONDS)
+            await _emit_progress_safely(
+                self.progress,
+                RuntimeProgressEvent(
+                    kind="tool_completed",
+                    run_public_id=self.run_public_id,
+                    tool_name=tool_name,
+                ),
+            )
+            return output
         except TimeoutError as exc:
             cancelled.set()
             raise AgentRuntimeError(
@@ -384,7 +423,7 @@ class OpenAIAgentsRuntime:
             output_type=ReadOnlyModelResponse,
         )
         try:
-            result = await Runner.run(
+            result = Runner.run_streamed(
                 agent,
                 _sdk_input(request),
                 context=executor,
@@ -397,6 +436,11 @@ class OpenAIAgentsRuntime:
                     workflow_name="ExpenseOps read-only agent",
                 ),
             )
+            # The SDK stream drives the real model/tool loop. Raw provider events
+            # never cross the ExpenseOps boundary; customer-safe progress comes
+            # from the trusted tool executor and canonical response below.
+            async for _event in result.stream_events():
+                pass
         except MaxTurnsExceeded as exc:
             raise AgentRuntimeError(
                 "run_budget_exceeded",
@@ -467,6 +511,27 @@ class ReadOnlyAgentOrchestrator:
             class_=Session,
         )
 
+    def preflight_turn(
+        self,
+        conversation_public_id: str,
+        *,
+        owner_user_id: int,
+        page_context: AgentPageContext | None = None,
+    ) -> None:
+        """Validate tenant ownership and page context before SSE headers are sent."""
+
+        self._require_read_enabled()
+        self._validate_page_context(page_context)
+        conversation = self.service.get_conversation(
+            conversation_public_id,
+            owner_user_id=owner_user_id,
+        )
+        if conversation.status != "active":
+            raise AgentConflictError(
+                "conversation_archived",
+                "Archived conversations cannot accept messages",
+            )
+
     async def run_turn(
         self,
         conversation_public_id: str,
@@ -475,6 +540,7 @@ class ReadOnlyAgentOrchestrator:
         text: str,
         client_message_id: str,
         page_context: AgentPageContext | None = None,
+        progress: RuntimeProgressSink | None = None,
     ) -> AgentTurnOut:
         self._require_read_enabled()
         self._validate_page_context(page_context)
@@ -484,10 +550,11 @@ class ReadOnlyAgentOrchestrator:
             text=text,
             client_message_id=client_message_id,
         )
+        user_message_public_id = user_message.public_id
         run = self.service.create_run(
             conversation_public_id,
             owner_user_id=owner_user_id,
-            trigger_message_public_id=user_message.public_id,
+            trigger_message_public_id=user_message_public_id,
             page_context=page_context,
             model_name=self.settings.openai_model,
             prompt_version=READ_ONLY_PROMPT_VERSION,
@@ -514,13 +581,18 @@ class ReadOnlyAgentOrchestrator:
             )
 
         run = self.service.start_run(run.public_id, owner_user_id=owner_user_id)
+        run_public_id = run.public_id
+        await _emit_progress_safely(
+            progress,
+            RuntimeProgressEvent(kind="run_started", run_public_id=run_public_id),
+        )
         started = time.monotonic()
         try:
             if _is_consequential_request(text):
                 response = _read_only_action_response()
                 return self._complete_turn(
-                    run,
-                    user_message,
+                    run_public_id,
+                    user_message_public_id,
                     conversation_public_id=conversation_public_id,
                     owner_user_id=owner_user_id,
                     response=response,
@@ -545,8 +617,9 @@ class ReadOnlyAgentOrchestrator:
                 session_factory=self._tool_session_factory,
                 workspace_id=workspace_id,
                 request_id=get_trace_id(),
-                run_public_id=run.public_id,
+                run_public_id=run_public_id,
                 owner_user_id=owner_user_id,
+                progress=progress,
             )
             runtime = self.runtime or OpenAIAgentsRuntime(self.settings)
             request = RuntimeRequest(
@@ -554,12 +627,18 @@ class ReadOnlyAgentOrchestrator:
                 page_context=page_context,
                 current_date=self._now().astimezone(UTC).date(),
             )
+            # The request session has completed its pre-provider reads. End that
+            # transaction before awaiting the model so the independently scoped
+            # tool worker can acquire a connection even from a one-slot pool.
+            # Public IDs above are deliberately materialized first because a
+            # rollback expires ORM instances; terminal persistence reloads them.
+            self.db.rollback()
             async with asyncio.timeout(MAX_AGENT_RUN_SECONDS):
                 runtime_result = await runtime.run(request, executor=executor)
             response = _grounded_response(executor, runtime_result.draft)
             return self._complete_turn(
-                run,
-                user_message,
+                run_public_id,
+                user_message_public_id,
                 conversation_public_id=conversation_public_id,
                 owner_user_id=owner_user_id,
                 response=response,
@@ -569,15 +648,15 @@ class ReadOnlyAgentOrchestrator:
         except asyncio.CancelledError:
             await _cancel_run_safely(
                 self.service,
-                run.public_id,
+                run_public_id,
                 owner_user_id=owner_user_id,
                 latency_ms=_elapsed_ms(started),
             )
             raise
         except TimeoutError as exc:
             return self._failed_turn(
-                run,
-                user_message,
+                run_public_id,
+                user_message_public_id,
                 conversation_public_id=conversation_public_id,
                 owner_user_id=owner_user_id,
                 code="agent_timeout",
@@ -589,8 +668,8 @@ class ReadOnlyAgentOrchestrator:
             )
         except AgentRuntimeError as exc:
             return self._failed_turn(
-                run,
-                user_message,
+                run_public_id,
+                user_message_public_id,
                 conversation_public_id=conversation_public_id,
                 owner_user_id=owner_user_id,
                 code=exc.code,
@@ -602,8 +681,8 @@ class ReadOnlyAgentOrchestrator:
             )
         except Exception as exc:
             return self._failed_turn(
-                run,
-                user_message,
+                run_public_id,
+                user_message_public_id,
                 conversation_public_id=conversation_public_id,
                 owner_user_id=owner_user_id,
                 code="agent_run_failed",
@@ -614,10 +693,138 @@ class ReadOnlyAgentOrchestrator:
                 cause=exc,
             )
 
+    async def stream_turn(
+        self,
+        conversation_public_id: str,
+        *,
+        owner_user_id: int,
+        text: str,
+        client_message_id: str,
+        page_context: AgentPageContext | None = None,
+    ) -> AsyncIterator[AgentStreamEvent]:
+        """Translate one canonical turn into the public ExpenseOps event stream."""
+
+        queue: asyncio.Queue[RuntimeProgressEvent] = asyncio.Queue()
+        task = asyncio.create_task(
+            self.run_turn(
+                conversation_public_id,
+                owner_user_id=owner_user_id,
+                text=text,
+                client_message_id=client_message_id,
+                page_context=page_context,
+                progress=queue.put,
+            )
+        )
+        sequence = 0
+        saw_started = False
+        try:
+            while not task.done() or not queue.empty():
+                if not queue.empty():
+                    progress_event = queue.get_nowait()
+                else:
+                    next_progress = asyncio.create_task(queue.get())
+                    done, _pending = await asyncio.wait(
+                        {task, next_progress},
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                    if next_progress not in done:
+                        next_progress.cancel()
+                        with suppress(asyncio.CancelledError):
+                            await next_progress
+                        continue
+                    progress_event = next_progress.result()
+                event = _public_progress_event(progress_event, sequence=sequence)
+                if event is None:
+                    continue
+                saw_started = saw_started or isinstance(event, AgentRunStartedEvent)
+                yield event
+                sequence += 1
+
+            try:
+                turn = await task
+            except AgentFoundationError as exc:
+                yield AgentRunFailedEvent(
+                    sequence=sequence,
+                    code=_safe_runtime_code(getattr(exc, "code", "agent_request_failed")),
+                    message=_safe_stream_failure_message(exc),
+                    retryable=isinstance(exc, AgentConflictError),
+                )
+                return
+            except Exception:
+                yield AgentRunFailedEvent(
+                    sequence=sequence,
+                    code="agent_run_failed",
+                    message="ExpenseOps could not complete that request. Please retry.",
+                    retryable=True,
+                )
+                return
+
+            if not saw_started:
+                yield AgentRunStartedEvent(
+                    sequence=sequence,
+                    run_public_id=turn.run.public_id,
+                    resumed=True,
+                )
+                sequence += 1
+
+            response = turn.assistant_message.structured_response
+            if response is not None:
+                for chunk in _canonical_text_chunks(response):
+                    yield AgentAssistantDeltaEvent(
+                        sequence=sequence,
+                        run_public_id=turn.run.public_id,
+                        delta=chunk,
+                    )
+                    sequence += 1
+                    await asyncio.sleep(0)
+                yield AgentStructuredResponseEvent(
+                    sequence=sequence,
+                    run_public_id=turn.run.public_id,
+                    response=response,
+                )
+                sequence += 1
+
+            yield AgentAssistantCompletedEvent(
+                sequence=sequence,
+                run_public_id=turn.run.public_id,
+                message=turn.assistant_message,
+            )
+            sequence += 1
+            if turn.run.status == "completed":
+                yield AgentRunCompletedEvent(
+                    sequence=sequence,
+                    run_public_id=turn.run.public_id,
+                    run=turn.run,
+                )
+            else:
+                error = _response_error(response)
+                yield AgentRunFailedEvent(
+                    sequence=sequence,
+                    run_public_id=turn.run.public_id,
+                    run=turn.run,
+                    code=turn.run.error_code or (error.code if error else "agent_run_failed"),
+                    message=(
+                        error.message
+                        if error
+                        else "ExpenseOps could not complete that request. Please retry."
+                    ),
+                    retryable=error.retryable if error else True,
+                )
+        except asyncio.CancelledError:
+            task.cancel()
+            with suppress(asyncio.CancelledError, Exception):
+                await task
+            raise
+        finally:
+            if not task.done():
+                task.cancel()
+                with suppress(asyncio.CancelledError, Exception):
+                    await task
+
     def _complete_turn(
         self,
-        run: AgentRun,
-        user_message: AgentMessage,
+        run_public_id: str,
+        user_message_public_id: str,
         *,
         conversation_public_id: str,
         owner_user_id: int,
@@ -631,7 +838,7 @@ class ReadOnlyAgentOrchestrator:
             response=response,
         )
         completed = self.service.complete_run(
-            run.public_id,
+            run_public_id,
             owner_user_id=owner_user_id,
             latency_ms=_elapsed_ms(started),
             input_tokens=runtime_result.input_tokens if runtime_result else 0,
@@ -641,12 +848,16 @@ class ReadOnlyAgentOrchestrator:
             provider_request_count=(runtime_result.provider_request_count if runtime_result else 0),
         )
         self.db.refresh(assistant)
+        user_message = self.service.get_message(
+            user_message_public_id,
+            owner_user_id=owner_user_id,
+        )
         return _turn_out(completed, user_message, assistant, conversation_public_id)
 
     def _failed_turn(
         self,
-        run: AgentRun,
-        user_message: AgentMessage,
+        run_public_id: str,
+        user_message_public_id: str,
         *,
         conversation_public_id: str,
         owner_user_id: int,
@@ -673,7 +884,7 @@ class ReadOnlyAgentOrchestrator:
             response=response,
         )
         failed = self.service.fail_run(
-            run.public_id,
+            run_public_id,
             owner_user_id=owner_user_id,
             error_code=_safe_runtime_code(code),
             error_message="The agent operation could not be completed.",
@@ -681,10 +892,14 @@ class ReadOnlyAgentOrchestrator:
             assistant_message_public_id=assistant.public_id,
         )
         self.db.refresh(assistant)
+        user_message = self.service.get_message(
+            user_message_public_id,
+            owner_user_id=owner_user_id,
+        )
         log_event(
             logger,
             "agent_read_only_turn_failed",
-            run_id=run.public_id,
+            run_id=run_public_id,
             error_code=failed.error_code,
             error_type=type(cause).__name__,
         )
@@ -1027,6 +1242,99 @@ def _bounded_provider_id(value: Any) -> str | None:
         return None
     normalized = value.strip()
     return normalized[:128] or None
+
+
+async def _emit_progress_safely(
+    sink: RuntimeProgressSink | None,
+    event: RuntimeProgressEvent,
+) -> None:
+    if sink is None:
+        return
+    try:
+        await sink(event)
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        log_event(logger, "agent_progress_sink_failed", progress_kind=event.kind)
+
+
+def _public_progress_event(
+    event: RuntimeProgressEvent,
+    *,
+    sequence: int,
+) -> AgentRunStartedEvent | AgentToolStartedEvent | AgentToolCompletedEvent | None:
+    if event.kind == "run_started":
+        return AgentRunStartedEvent(
+            sequence=sequence,
+            run_public_id=event.run_public_id,
+        )
+    activity = _tool_activity(event.tool_name)
+    if activity is None:
+        return None
+    kind, started_message, completed_message = activity
+    if event.kind == "tool_started":
+        return AgentToolStartedEvent(
+            sequence=sequence,
+            run_public_id=event.run_public_id,
+            activity=kind,
+            message=started_message,
+        )
+    if event.kind == "tool_completed":
+        return AgentToolCompletedEvent(
+            sequence=sequence,
+            run_public_id=event.run_public_id,
+            activity=kind,
+            message=completed_message,
+        )
+    return None
+
+
+def _tool_activity(tool_name: str | None) -> tuple[str, str, str] | None:
+    if tool_name == "get_spending_insights":
+        return ("spending", "Checking your spending…", "Spending data is ready.")
+    if tool_name == "search_transactions":
+        return ("transactions", "Looking through your transactions…", "Transactions are ready.")
+    return None
+
+
+def _canonical_text_chunks(response: AgentStructuredResponse) -> tuple[str, ...]:
+    text = "\n\n".join(block.text for block in response.blocks if isinstance(block, AgentTextBlock))
+    if not text:
+        return ()
+    chunks: list[str] = []
+    remaining = text
+    while remaining:
+        if len(remaining) <= 72:
+            chunks.append(remaining)
+            break
+        boundary = remaining.rfind(" ", 0, 73)
+        if boundary < 24:
+            boundary = 72
+        chunks.append(remaining[:boundary])
+        remaining = remaining[boundary:]
+    return tuple(chunk for chunk in chunks if chunk)
+
+
+def _response_error(response: AgentStructuredResponse | None) -> AgentErrorBlock | None:
+    if response is None:
+        return None
+    return next(
+        (block for block in response.blocks if isinstance(block, AgentErrorBlock)),
+        None,
+    )
+
+
+def _safe_stream_failure_message(exc: AgentFoundationError) -> str:
+    if isinstance(exc, AgentConflictError):
+        if exc.code == "conversation_archived":
+            return "This conversation is archived. Start a new conversation to continue."
+        if exc.code == "agent_turn_in_progress":
+            return "This request is already in progress."
+        if exc.code == "client_message_id_conflict":
+            return "That retry did not match the original request. Send it again as a new message."
+    if isinstance(exc, (AgentNotFoundError, AgentFeatureDisabledError)):
+        return "The requested Agent conversation is unavailable."
+    return "ExpenseOps could not process that request. Please retry."
 
 
 def _best_effort_fail_tool(

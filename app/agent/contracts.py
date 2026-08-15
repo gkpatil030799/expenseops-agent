@@ -367,6 +367,87 @@ class AgentTurnOut(StrictAgentModel):
     assistant_message: AgentMessageOut
 
 
+class AgentStreamEventBase(StrictAgentModel):
+    """Platform-owned stream envelope shared by web and future native clients."""
+
+    schema_version: Literal["1.0"] = AGENT_CONTRACT_VERSION
+    sequence: int = Field(ge=0)
+    run_public_id: str | None = Field(default=None, min_length=1, max_length=128)
+
+
+class AgentRunStartedEvent(AgentStreamEventBase):
+    type: Literal["run_started"] = "run_started"
+    resumed: bool = False
+
+
+class AgentAssistantDeltaEvent(AgentStreamEventBase):
+    # Stream fragments are the one contract where boundary whitespace is data:
+    # stripping it would corrupt the canonical persisted answer when chunks are
+    # joined by web or native clients.
+    model_config = ConfigDict(
+        extra="forbid",
+        str_strip_whitespace=False,
+        allow_inf_nan=False,
+    )
+
+    type: Literal["assistant_delta"] = "assistant_delta"
+    delta: str = Field(min_length=1, max_length=1_000)
+
+    @model_validator(mode="after")
+    def validate_visible_delta(self) -> AgentAssistantDeltaEvent:
+        if not self.delta.strip():
+            raise ValueError("delta must include visible text")
+        return self
+
+
+class AgentToolStartedEvent(AgentStreamEventBase):
+    type: Literal["tool_started"] = "tool_started"
+    activity: Literal["spending", "transactions"]
+    message: str = Field(min_length=1, max_length=160)
+
+
+class AgentToolCompletedEvent(AgentStreamEventBase):
+    type: Literal["tool_completed"] = "tool_completed"
+    activity: Literal["spending", "transactions"]
+    message: str = Field(min_length=1, max_length=160)
+
+
+class AgentStructuredResponseEvent(AgentStreamEventBase):
+    type: Literal["structured_response"] = "structured_response"
+    response: AgentStructuredResponse
+
+
+class AgentAssistantCompletedEvent(AgentStreamEventBase):
+    type: Literal["assistant_completed"] = "assistant_completed"
+    message: AgentMessageOut
+
+
+class AgentRunCompletedEvent(AgentStreamEventBase):
+    type: Literal["run_completed"] = "run_completed"
+    run: AgentRunOut
+
+
+class AgentRunFailedEvent(AgentStreamEventBase):
+    type: Literal["run_failed"] = "run_failed"
+    run: AgentRunOut | None = None
+    code: str = Field(min_length=1, max_length=100, pattern=r"^[a-z][a-z0-9_]*$")
+    message: str = Field(min_length=1, max_length=1_000)
+    retryable: bool = False
+
+
+AgentStreamEvent = Annotated[
+    AgentRunStartedEvent
+    | AgentAssistantDeltaEvent
+    | AgentToolStartedEvent
+    | AgentToolCompletedEvent
+    | AgentStructuredResponseEvent
+    | AgentAssistantCompletedEvent
+    | AgentRunCompletedEvent
+    | AgentRunFailedEvent,
+    Field(discriminator="type"),
+]
+
+
 class AgentConversationDetail(StrictAgentModel):
     conversation: AgentConversationOut
     messages: list[AgentMessageOut] = Field(default_factory=list, max_length=500)

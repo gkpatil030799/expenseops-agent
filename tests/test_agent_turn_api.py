@@ -10,9 +10,14 @@ from fastapi.testclient import TestClient
 
 import app.api.agent_routes as agent_routes
 from app.agent.contracts import (
+    AgentAssistantDeltaEvent,
     AgentMessageOut,
+    AgentRunCompletedEvent,
     AgentRunOut,
+    AgentRunStartedEvent,
+    AgentSpendingSummaryBlock,
     AgentStructuredResponse,
+    AgentStructuredResponseEvent,
     AgentTextBlock,
     AgentTurnOut,
 )
@@ -42,9 +47,17 @@ class RecordingRateLimiter:
 
 
 class FakeOrchestrator:
-    def __init__(self, *, error: Exception | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        error: Exception | None = None,
+        stream_events: list[Any] | None = None,
+    ) -> None:
         self.calls: list[dict[str, Any]] = []
+        self.preflight_calls: list[dict[str, Any]] = []
+        self.stream_calls: list[dict[str, Any]] = []
         self.error = error
+        self.stream_events = stream_events
 
     async def run_turn(
         self,
@@ -71,6 +84,46 @@ class FakeOrchestrator:
             text=text,
             client_message_id=client_message_id,
         )
+
+    async def stream_turn(
+        self,
+        conversation_public_id: str,
+        *,
+        owner_user_id: int,
+        text: str,
+        client_message_id: str,
+        page_context: Any,
+    ):
+        self.stream_calls.append(
+            {
+                "conversation_public_id": conversation_public_id,
+                "owner_user_id": owner_user_id,
+                "text": text,
+                "client_message_id": client_message_id,
+                "page_context": page_context,
+            }
+        )
+        if self.error is not None:
+            raise self.error
+        for event in self.stream_events or []:
+            yield event
+
+    def preflight_turn(
+        self,
+        conversation_public_id: str,
+        *,
+        owner_user_id: int,
+        page_context: Any,
+    ) -> None:
+        self.preflight_calls.append(
+            {
+                "conversation_public_id": conversation_public_id,
+                "owner_user_id": owner_user_id,
+                "page_context": page_context,
+            }
+        )
+        if self.error is not None:
+            raise self.error
 
 
 def _client(
@@ -300,3 +353,119 @@ def test_turn_endpoint_is_indistinguishable_when_read_agent_is_disabled(monkeypa
     assert response.json() == {"detail": "Agent resource not found"}
     assert limiter.calls == []
     assert orchestrator.calls == []
+
+
+def test_stream_endpoint_uses_semantic_sse_headers_and_safe_framing(monkeypatch):
+    run = _turn_out(
+        conversation_public_id="conversation-1",
+        text="Show spending",
+        client_message_id="browser-stream-1",
+    ).run
+    structured = AgentStructuredResponse(
+        blocks=[
+            AgentTextBlock(text="Canonical safe answer."),
+            AgentSpendingSummaryBlock(
+                title="Canonical spending",
+                start_date="2026-08-01",
+                end_date="2026-08-14",
+                currency_code="USD",
+                total_cents=4_321,
+                change_percent=None,
+            ),
+        ]
+    )
+    stream_events = [
+        AgentRunStartedEvent(
+            sequence=0,
+            run_public_id=run.public_id,
+        ),
+        AgentAssistantDeltaEvent(
+            sequence=1,
+            run_public_id=run.public_id,
+            delta="Canonical\nsafe answer.",
+        ),
+        AgentStructuredResponseEvent(
+            sequence=2,
+            run_public_id=run.public_id,
+            response=structured,
+        ),
+        AgentRunCompletedEvent(
+            sequence=3,
+            run_public_id=run.public_id,
+            run=run,
+        ),
+    ]
+    client, orchestrator, limiter = _client(
+        monkeypatch,
+        orchestrator=FakeOrchestrator(stream_events=stream_events),
+    )
+
+    response = client.post(
+        "/api/agent/conversations/conversation-1/turns/stream",
+        json={
+            "text": "Show spending",
+            "client_message_id": "browser-stream-1",
+            "page_context": {
+                "surface": "expense_insights",
+                "filters": {"category": "Groceries"},
+            },
+        },
+        headers={"Accept": "text/event-stream"},
+    )
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/event-stream")
+    assert response.headers["cache-control"] == "no-store, no-transform"
+    assert response.headers["x-accel-buffering"] == "no"
+    frames = response.text.strip().split("\n\n")
+    assert [frame.splitlines()[1] for frame in frames] == [
+        "event: run_started",
+        "event: assistant_delta",
+        "event: structured_response",
+        "event: run_completed",
+    ]
+    assert [frame.splitlines()[0] for frame in frames] == [
+        "id: 0",
+        "id: 1",
+        "id: 2",
+        "id: 3",
+    ]
+    # Embedded newlines remain JSON escaped and cannot inject a second SSE field/frame.
+    assert '"delta":"Canonical\\nsafe answer."' in frames[1]
+    # Nullable contract fields remain explicit JSON nulls for strict web/native clients.
+    assert '"change_percent":null' in frames[2]
+    assert limiter.calls == [("agent-turn:29:17", 10, 60)]
+    assert len(orchestrator.preflight_calls) == 1
+    assert orchestrator.preflight_calls[0]["conversation_public_id"] == "conversation-1"
+    assert len(orchestrator.stream_calls) == 1
+    stream_call = orchestrator.stream_calls[0]
+    assert stream_call["conversation_public_id"] == "conversation-1"
+    assert stream_call["owner_user_id"] == 17
+    assert stream_call["text"] == "Show spending"
+    assert stream_call["client_message_id"] == "browser-stream-1"
+    assert stream_call["page_context"].filters.category == "Groceries"
+
+
+def test_stream_endpoint_is_hidden_and_makes_no_agent_call_when_disabled(monkeypatch):
+    client, orchestrator, limiter = _client(monkeypatch)
+    monkeypatch.setattr(
+        agent_routes,
+        "get_settings",
+        lambda: Settings(
+            _env_file=None,
+            agent_enabled=False,
+            agent_read_tools_enabled=False,
+        ),
+    )
+
+    response = client.post(
+        "/api/agent/conversations/conversation-1/turns/stream",
+        json={"text": "Show spending", "client_message_id": "browser-stream-disabled"},
+        headers={"Accept": "text/event-stream"},
+    )
+
+    assert response.status_code == 404
+    assert response.json() == {"detail": "Agent resource not found"}
+    assert limiter.calls == []
+    assert orchestrator.preflight_calls == []
+    assert orchestrator.stream_calls == []

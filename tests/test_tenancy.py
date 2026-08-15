@@ -12,7 +12,7 @@ from sqlalchemy.pool import StaticPool
 
 import app.auth as auth
 import app.job_tenancy as job_tenancy
-from app.api import plaid_routes, telegram_routes
+from app.api import context_routes, plaid_routes, telegram_routes
 from app.config import Settings
 from app.db import Base, get_db
 from app.jobs import weekly_replenishment
@@ -198,6 +198,37 @@ def test_user_workspace_memberships_and_default_token_resolution(tenant_db):
     assert response.status_code == 200
     assert response.json()["user"]["email"] == "b@example.test"
     assert response.json()["workspace"]["id"] == contexts["b"].workspace_id
+
+
+@pytest.mark.parametrize(
+    ("agent_enabled", "read_tools_enabled", "expected"),
+    [(False, False, False), (True, False, False), (True, True, True)],
+)
+def test_context_exposes_only_the_effective_read_only_agent_feature(
+    tenant_db,
+    monkeypatch,
+    agent_enabled,
+    read_tools_enabled,
+    expected,
+):
+    _factory, _contexts = tenant_db
+    monkeypatch.setattr(
+        context_routes,
+        "get_settings",
+        lambda: Settings(
+            _env_file=None,
+            agent_enabled=agent_enabled,
+            agent_read_tools_enabled=read_tools_enabled,
+        ),
+    )
+
+    response = TestClient(app).get("/api/context", headers={"Authorization": "Bearer token-a"})
+
+    assert response.status_code == 200
+    assert response.json()["features"]["agent"] == {
+        "enabled": expected,
+        "read_only": True,
+    }
 
 
 @pytest.mark.parametrize(

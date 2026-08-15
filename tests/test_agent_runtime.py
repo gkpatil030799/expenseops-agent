@@ -1019,6 +1019,108 @@ def test_synchronous_tool_work_uses_worker_owned_session_and_enforces_timeout(
         assert (call.status, call.error_code) == ("failed", "run_failed")
 
 
+def test_model_turn_releases_request_connection_for_single_slot_tool_pool(tmp_path):
+    database_path = tmp_path / "agent-single-slot.db"
+    engine = create_engine(
+        f"sqlite+pysqlite:///{database_path}",
+        connect_args={"check_same_thread": False},
+        pool_size=1,
+        max_overflow=0,
+        pool_timeout=0.2,
+    )
+    Base.metadata.create_all(engine)
+    factory = sessionmaker(bind=engine)
+
+    try:
+        with factory() as setup_db:
+            owner = User(
+                email="single-slot-owner@example.test",
+                display_name="Single slot owner",
+            )
+            setup_db.add(owner)
+            setup_db.flush()
+            workspace = Workspace(
+                name="Single slot workspace",
+                created_by_user_id=owner.id,
+            )
+            setup_db.add(workspace)
+            setup_db.flush()
+            context = TenantContext(user_id=owner.id, workspace_id=workspace.id)
+            setup_db.add(
+                WorkspaceMembership(
+                    workspace_id=workspace.id,
+                    user_id=owner.id,
+                    role="owner",
+                    is_default=True,
+                )
+            )
+            item = PlaidItem(
+                workspace_id=workspace.id,
+                item_id="single-slot-item",
+                owner_user_id=owner.id,
+                institution_name="Single slot bank",
+            )
+            setup_db.add(item)
+            setup_db.flush()
+            setup_db.add(
+                _transaction(
+                    workspace_id=workspace.id,
+                    item_id=item.id,
+                    provider_id="single-slot-transaction",
+                    merchant="Pool Safe Market",
+                    amount_cents=4_200,
+                    occurred_on=date(2026, 8, 14),
+                    category="Groceries",
+                )
+            )
+            setup_db.commit()
+
+        with factory() as db:
+            set_session_tenant(db, context)
+            conversation = _conversation(db, context)
+            conversation_public_id = conversation.public_id
+            observed: dict[str, Any] = {}
+
+            async def search(
+                _request: RuntimeRequest,
+                executor: ReadToolExecutor,
+            ) -> RuntimeResult:
+                observed["request_transaction_open"] = db.in_transaction()
+                observed["checked_out_before_tool"] = engine.pool.checkedout()
+                output = await executor.invoke(
+                    "search_transactions",
+                    {"merchant": "Pool Safe Market", "limit": 5},
+                )
+                observed["tool_total_count"] = output["total_count"]
+                return _draft()
+
+            turn = asyncio.run(
+                ReadOnlyAgentOrchestrator(
+                    db,
+                    settings=_settings(),
+                    runtime=FakeRuntime(search),
+                    now=lambda: datetime(2026, 8, 14, 12, tzinfo=UTC),
+                ).run_turn(
+                    conversation_public_id,
+                    owner_user_id=context.user_id,
+                    text="Find Pool Safe Market transactions",
+                    client_message_id="single-slot-turn-1",
+                )
+            )
+
+            assert observed == {
+                "request_transaction_open": False,
+                "checked_out_before_tool": 0,
+                "tool_total_count": 1,
+            }
+            assert turn.run.status == "completed"
+            call = db.scalar(select(AgentToolCall))
+            assert call is not None
+            assert (call.tool_name, call.status) == ("search_transactions", "completed")
+    finally:
+        engine.dispose()
+
+
 def test_run_wall_clock_budget_returns_a_safe_terminal_failure(
     agent_runtime_db,
     monkeypatch,
