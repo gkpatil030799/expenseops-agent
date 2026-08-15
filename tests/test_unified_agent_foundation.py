@@ -433,7 +433,8 @@ def test_run_tool_call_and_structured_response_metadata_persist_without_prompts(
         )
         assert tool_call.status == "completed"
         assert tool_call.latency_ms == 25
-        assert tool_call.result_metadata_json == {"output_schema_validated": True}
+        assert tool_call.result_metadata_json["output_schema_validated"] is True
+        assert len(tool_call.result_metadata_json["output_sha256"]) == 64
         with pytest.raises(AgentConflictError, match="cannot be completed"):
             service.complete_tool_call(
                 tool_call.public_id,

@@ -1,0 +1,302 @@
+from __future__ import annotations
+
+from datetime import UTC, datetime
+from types import SimpleNamespace
+from typing import Any
+
+import pytest
+from fastapi import FastAPI, HTTPException
+from fastapi.testclient import TestClient
+
+import app.api.agent_routes as agent_routes
+from app.agent.contracts import (
+    AgentMessageOut,
+    AgentRunOut,
+    AgentStructuredResponse,
+    AgentTextBlock,
+    AgentTurnOut,
+)
+from app.agent.runtime import AgentRuntimeError
+from app.agent.service import (
+    AgentConflictError,
+    AgentFeatureDisabledError,
+    AgentFoundationError,
+    AgentNotFoundError,
+)
+from app.api.deps import get_current_user, get_current_workspace
+from app.config import Settings
+from app.db import get_db
+
+NOW = datetime(2026, 8, 14, 12, 0, tzinfo=UTC)
+
+
+class RecordingRateLimiter:
+    def __init__(self, rejection: HTTPException | None = None) -> None:
+        self.calls: list[tuple[str, int, int]] = []
+        self.rejection = rejection
+
+    def check(self, key: str, *, limit: int, window_seconds: int) -> None:
+        self.calls.append((key, limit, window_seconds))
+        if self.rejection is not None:
+            raise self.rejection
+
+
+class FakeOrchestrator:
+    def __init__(self, *, error: Exception | None = None) -> None:
+        self.calls: list[dict[str, Any]] = []
+        self.error = error
+
+    async def run_turn(
+        self,
+        conversation_public_id: str,
+        *,
+        owner_user_id: int,
+        text: str,
+        client_message_id: str,
+        page_context: Any,
+    ) -> AgentTurnOut:
+        self.calls.append(
+            {
+                "conversation_public_id": conversation_public_id,
+                "owner_user_id": owner_user_id,
+                "text": text,
+                "client_message_id": client_message_id,
+                "page_context": page_context,
+            }
+        )
+        if self.error is not None:
+            raise self.error
+        return _turn_out(
+            conversation_public_id=conversation_public_id,
+            text=text,
+            client_message_id=client_message_id,
+        )
+
+
+def _client(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    orchestrator: FakeOrchestrator | None = None,
+    limiter: RecordingRateLimiter | None = None,
+) -> tuple[TestClient, FakeOrchestrator, RecordingRateLimiter]:
+    application = FastAPI()
+    application.include_router(agent_routes.router)
+    application.dependency_overrides[get_db] = lambda: object()
+    application.dependency_overrides[get_current_user] = lambda: SimpleNamespace(id=17)
+    application.dependency_overrides[get_current_workspace] = lambda: SimpleNamespace(id=29)
+    fake = orchestrator or FakeOrchestrator()
+    recording_limiter = limiter or RecordingRateLimiter()
+    monkeypatch.setattr(agent_routes, "_build_read_only_orchestrator", lambda _db: fake)
+    monkeypatch.setattr(agent_routes, "rate_limiter", recording_limiter)
+    monkeypatch.setattr(
+        agent_routes,
+        "get_settings",
+        lambda: Settings(
+            _env_file=None,
+            agent_enabled=True,
+            agent_read_tools_enabled=True,
+        ),
+    )
+    return TestClient(application), fake, recording_limiter
+
+
+def _turn_out(
+    *,
+    conversation_public_id: str,
+    text: str,
+    client_message_id: str,
+) -> AgentTurnOut:
+    return AgentTurnOut(
+        run=AgentRunOut(
+            public_id="run-public-1",
+            status="completed",
+            model_name="gpt-5-mini",
+            prompt_version="expenseops-readonly-v1.0",
+            input_tokens=24,
+            output_tokens=12,
+            total_tokens=36,
+            created_at=NOW,
+            started_at=NOW,
+            completed_at=NOW,
+        ),
+        user_message=AgentMessageOut(
+            public_id="message-user-1",
+            conversation_public_id=conversation_public_id,
+            role="user",
+            text=text,
+            client_message_id=client_message_id,
+            created_at=NOW,
+        ),
+        assistant_message=AgentMessageOut(
+            public_id="message-assistant-1",
+            conversation_public_id=conversation_public_id,
+            role="assistant",
+            structured_response=AgentStructuredResponse(
+                blocks=[AgentTextBlock(text="Here is the grounded answer.")]
+            ),
+            created_at=NOW,
+        ),
+    )
+
+
+def test_turn_endpoint_passes_typed_context_and_scopes_rate_limit(monkeypatch):
+    client, orchestrator, limiter = _client(monkeypatch)
+
+    response = client.post(
+        "/api/agent/conversations/conversation-1/turns",
+        json={
+            "text": "Show my Starbucks transactions",
+            "client_message_id": "ios-turn-42",
+            "page_context": {
+                "surface": "expense_activity",
+                "filters": {
+                    "start_date": "2026-05-16",
+                    "end_date": "2026-08-14",
+                    "merchant": "Starbucks",
+                },
+            },
+        },
+    )
+
+    assert response.status_code == 201
+    assert response.json()["run"]["status"] == "completed"
+    assert response.json()["assistant_message"]["structured_response"]["blocks"] == [
+        {"block_id": None, "type": "text", "text": "Here is the grounded answer."}
+    ]
+    assert limiter.calls == [("agent-turn:29:17", 10, 60)]
+    assert orchestrator.calls[0]["conversation_public_id"] == "conversation-1"
+    assert orchestrator.calls[0]["owner_user_id"] == 17
+    assert orchestrator.calls[0]["client_message_id"] == "ios-turn-42"
+    assert orchestrator.calls[0]["page_context"].filters.merchant == "Starbucks"
+
+
+def test_turn_endpoint_requires_idempotency_key_and_valid_page_context(monkeypatch):
+    client, orchestrator, limiter = _client(monkeypatch)
+
+    missing_key = client.post(
+        "/api/agent/conversations/conversation-1/turns",
+        json={"text": "How much did I spend?"},
+    )
+    invalid_dates = client.post(
+        "/api/agent/conversations/conversation-1/turns",
+        json={
+            "text": "How much did I spend?",
+            "client_message_id": "browser-1",
+            "page_context": {
+                "surface": "expense_insights",
+                "filters": {
+                    "start_date": "2026-08-14",
+                    "end_date": "2026-08-01",
+                },
+            },
+        },
+    )
+
+    assert missing_key.status_code == 422
+    assert invalid_dates.status_code == 422
+    assert orchestrator.calls == []
+    assert limiter.calls == []
+
+
+@pytest.mark.parametrize(
+    ("error", "expected_status", "expected_detail"),
+    [
+        (
+            AgentNotFoundError("agent_not_found", "Internal row detail"),
+            404,
+            "Agent resource not found",
+        ),
+        (
+            AgentFeatureDisabledError("agent_disabled", "Internal flag detail"),
+            404,
+            "Agent resource not found",
+        ),
+        (
+            AgentConflictError("agent_turn_in_progress", "This agent turn is already running"),
+            409,
+            "This agent turn is already running",
+        ),
+        (
+            AgentFoundationError("invalid_agent_request", "Request could not be processed"),
+            422,
+            "Request could not be processed",
+        ),
+    ],
+)
+def test_turn_endpoint_maps_foundation_errors(
+    monkeypatch,
+    error,
+    expected_status,
+    expected_detail,
+):
+    client, _orchestrator, _limiter = _client(
+        monkeypatch,
+        orchestrator=FakeOrchestrator(error=error),
+    )
+
+    response = client.post(
+        "/api/agent/conversations/conversation-1/turns",
+        json={"text": "Show spending", "client_message_id": "browser-2"},
+    )
+
+    assert response.status_code == expected_status
+    assert response.json() == {"detail": expected_detail}
+
+
+def test_turn_endpoint_hides_runtime_failure_details(monkeypatch):
+    client, _orchestrator, _limiter = _client(
+        monkeypatch,
+        orchestrator=FakeOrchestrator(
+            error=AgentRuntimeError(
+                "provider_failed",
+                "upstream detail that must not cross the API boundary",
+            )
+        ),
+    )
+
+    response = client.post(
+        "/api/agent/conversations/conversation-1/turns",
+        json={"text": "Show spending", "client_message_id": "browser-3"},
+    )
+
+    assert response.status_code == 503
+    assert response.json() == {"detail": "The agent service is temporarily unavailable"}
+    assert "upstream" not in response.text
+
+
+def test_turn_endpoint_stops_before_orchestration_when_rate_limited(monkeypatch):
+    limiter = RecordingRateLimiter(HTTPException(status_code=429, detail="Too many requests"))
+    client, orchestrator, _limiter = _client(monkeypatch, limiter=limiter)
+
+    response = client.post(
+        "/api/agent/conversations/conversation-1/turns",
+        json={"text": "Show spending", "client_message_id": "browser-4"},
+    )
+
+    assert response.status_code == 429
+    assert response.json() == {"detail": "Too many requests"}
+    assert limiter.calls == [("agent-turn:29:17", 10, 60)]
+    assert orchestrator.calls == []
+
+
+def test_turn_endpoint_is_indistinguishable_when_read_agent_is_disabled(monkeypatch):
+    client, orchestrator, limiter = _client(monkeypatch)
+    monkeypatch.setattr(
+        agent_routes,
+        "get_settings",
+        lambda: Settings(
+            _env_file=None,
+            agent_enabled=True,
+            agent_read_tools_enabled=False,
+        ),
+    )
+
+    response = client.post(
+        "/api/agent/conversations/conversation-1/turns",
+        json={"text": "Show spending", "client_message_id": "browser-disabled"},
+    )
+
+    assert response.status_code == 404
+    assert response.json() == {"detail": "Agent resource not found"}
+    assert limiter.calls == []
+    assert orchestrator.calls == []

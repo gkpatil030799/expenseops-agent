@@ -233,6 +233,10 @@ class Settings(BaseSettings):
             errors.append("ENABLE_EXPENSEOPS_SANDBOX_LAB must be false for production deploys.")
         if not self.plaid_webhook_verification_required:
             errors.append("Plaid webhook verification must be enabled for production.")
+        if self.agent_enabled and self.agent_read_tools_enabled and not self.openai_api_key:
+            errors.append(
+                "OPENAI_API_KEY must be configured when the read-only agent is enabled."
+            )
         if errors:
             raise ValueError("Unsafe production web configuration: " + " ".join(errors))
 

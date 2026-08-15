@@ -11,7 +11,10 @@ from app.agent.contracts import (
     AgentMessageCreate,
     AgentMessageOut,
     AgentStructuredResponse,
+    AgentTurnCreate,
+    AgentTurnOut,
 )
+from app.agent.runtime import AgentRuntimeError, ReadOnlyAgentOrchestrator
 from app.agent.service import (
     AgentConflictError,
     AgentFeatureDisabledError,
@@ -22,6 +25,7 @@ from app.agent.service import (
 from app.api.deps import CurrentUser, CurrentWorkspace, DbSession
 from app.config import get_settings
 from app.models import AgentConversation, AgentMessage
+from app.rate_limit import rate_limiter
 
 router = APIRouter(prefix="/api/agent", tags=["agent"])
 
@@ -150,6 +154,45 @@ def append_user_message(
     return _message_out(message, conversation_public_id)
 
 
+@router.post(
+    "/conversations/{conversation_public_id}/turns",
+    response_model=AgentTurnOut,
+    status_code=status.HTTP_201_CREATED,
+)
+async def run_read_only_turn(
+    conversation_public_id: str,
+    payload: AgentTurnCreate,
+    db: DbSession,
+    user: CurrentUser,
+    workspace: CurrentWorkspace,
+) -> AgentTurnOut:
+    """Run one bounded, idempotent read-only agent turn."""
+
+    settings = get_settings()
+    if not settings.agent_enabled or not settings.agent_read_tools_enabled:
+        raise HTTPException(status_code=404, detail="Agent resource not found")
+    rate_limiter.check(
+        f"agent-turn:{workspace.id}:{user.id}",
+        limit=10,
+        window_seconds=60,
+    )
+    try:
+        return await _build_read_only_orchestrator(db).run_turn(
+            conversation_public_id,
+            owner_user_id=user.id,
+            text=payload.text,
+            client_message_id=payload.client_message_id,
+            page_context=payload.page_context,
+        )
+    except AgentFoundationError as exc:
+        _raise_agent_error(exc)
+    except AgentRuntimeError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="The agent service is temporarily unavailable",
+        ) from exc
+
+
 @router.delete(
     "/conversations/{conversation_public_id}",
     status_code=status.HTTP_204_NO_CONTENT,
@@ -195,6 +238,12 @@ def _message_out(value: AgentMessage, conversation_public_id: str) -> AgentMessa
         client_message_id=value.client_message_id,
         created_at=value.created_at,
     )
+
+
+def _build_read_only_orchestrator(db: DbSession) -> ReadOnlyAgentOrchestrator:
+    """Small construction seam for deterministic route and integration tests."""
+
+    return ReadOnlyAgentOrchestrator(db, settings=get_settings())
 
 
 def _raise_agent_error(exc: AgentFoundationError) -> None:

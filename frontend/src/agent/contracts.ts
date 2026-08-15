@@ -82,6 +82,12 @@ export type AgentPageContext = {
   entity?: AgentPageEntity | null;
 };
 
+export type AgentTurnCreate = {
+  text: string;
+  client_message_id: string;
+  page_context?: AgentPageContext | null;
+};
+
 export type AgentResponseBlockBase = {
   block_id?: string | null;
 };
@@ -97,7 +103,9 @@ export type AgentTransactionSummary = {
   amount_cents: number;
   currency_code: string;
   occurred_on: string | null;
+  category?: string | null;
   status: string;
+  pending?: boolean;
 };
 
 export type AgentTransactionListBlock = AgentResponseBlockBase & {
@@ -105,6 +113,14 @@ export type AgentTransactionListBlock = AgentResponseBlockBase & {
   title: string;
   transactions: AgentTransactionSummary[];
   total_count: number;
+};
+
+export type AgentSpendingBreakdownItem = {
+  name: string;
+  amount_cents: number;
+  transaction_count: number;
+  percentage: number;
+  previous_amount_cents: number | null;
 };
 
 export type AgentSpendingSummaryBlock = AgentResponseBlockBase & {
@@ -117,6 +133,8 @@ export type AgentSpendingSummaryBlock = AgentResponseBlockBase & {
   previous_total_cents: number | null;
   change_percent: number | null;
   highlights: string[];
+  top_categories: AgentSpendingBreakdownItem[];
+  top_merchants: AgentSpendingBreakdownItem[];
 };
 
 export type AgentReplenishmentItem = {
@@ -294,6 +312,27 @@ export type AgentMessage = {
 };
 
 export type AgentMessageOut = AgentMessage;
+
+export type AgentRunOut = {
+  public_id: string;
+  status: "queued" | "running" | "completed" | "failed" | "cancelled";
+  model_name: string | null;
+  prompt_version: string | null;
+  input_tokens: number | null;
+  output_tokens: number | null;
+  total_tokens: number | null;
+  error_code: string | null;
+  created_at: string;
+  started_at: string | null;
+  completed_at: string | null;
+};
+
+export type AgentTurnOut = {
+  schema_version: AgentSchemaVersion;
+  run: AgentRunOut;
+  user_message: AgentMessageOut;
+  assistant_message: AgentMessageOut;
+};
 
 export type AgentConversationDetail = {
   conversation: AgentConversation;
