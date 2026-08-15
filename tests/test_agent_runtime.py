@@ -1024,19 +1024,23 @@ def test_run_wall_clock_budget_returns_a_safe_terminal_failure(
     monkeypatch,
 ):
     monkeypatch.setattr(runtime_module, "MAX_AGENT_RUN_SECONDS", 0.05)
+    provider_state = {"cancelled": False}
 
     async def slow_provider(
         _request: RuntimeRequest,
         _executor: ReadToolExecutor,
     ) -> RuntimeResult:
-        await asyncio.sleep(0.2)
+        try:
+            await asyncio.sleep(5)
+        except asyncio.CancelledError:
+            provider_state["cancelled"] = True
+            raise
         return _draft()
 
     runtime = FakeRuntime(slow_provider)
     with _scoped(agent_runtime_db) as db:
         context = agent_runtime_db.contexts["owner"]
         conversation = _conversation(db, context)
-        started = time.monotonic()
         turn = _run_turn(
             db,
             context,
@@ -1046,7 +1050,7 @@ def test_run_wall_clock_budget_returns_a_safe_terminal_failure(
             client_message_id="run-timeout-1",
         )
 
-        assert time.monotonic() - started < 0.15
+        assert provider_state["cancelled"] is True
         assert (turn.run.status, turn.run.error_code) == ("failed", "agent_timeout")
         response = turn.assistant_message.structured_response
         assert response is not None
