@@ -427,7 +427,6 @@ Sandbox runtime state and JSONL logs are ignored by Git.
 The included [Dockerfile](Dockerfile) builds the React app and packages it with
 FastAPI. The shared [railway.json](railway.json) stays neutral. Assign each
 production service its explicit config: [railway.web.json](railway.web.json),
-[railway.migrations.json](railway.migrations.json),
 [railway.outbox.json](railway.outbox.json),
 [railway.gmail-receipts.json](railway.gmail-receipts.json), or
 [railway.gmail-promotions.json](railway.gmail-promotions.json). The final web
@@ -460,11 +459,15 @@ Keep Railway GitHub auto-deploy disabled for production. After review, run the
 protected **Production release** workflow for the compatibility SHA and then its
 hardening descendant. Preserve both commits when merging this cutover; a squash
 merge removes the compatibility rollback/release boundary and is not allowed.
-The private migration service uses the non-superuser
-`expenseops_migrator` role to upgrade Alembic, verify the head, and reconcile
-runtime grants. Only after that succeeds does the workflow deploy outbox and
-both Gmail crons with `expenseops_runtime`; web deploys last. Any migration,
-grant, worker, or cron failure prevents web activation.
+The protected GitHub production job uses the non-superuser
+`expenseops_migrator` credential for one migration stage: it upgrades Alembic,
+verifies the head, reconciles runtime grants, and verifies the head again before
+any Railway application upload. A failure stops the release while the old web
+revision remains active. No sixth Railway migration service, container, or
+long-running process is required. Only after migration success does the
+workflow deploy outbox and both Gmail crons with `expenseops_runtime`; web
+deploys last. Any migration, grant, worker, or cron failure prevents web
+activation.
 
 The current Railway Hobby setup does not provide the managed volume-backup
 schedules or safe sibling Postgres restore needed to claim a daily snapshot or
@@ -483,8 +486,8 @@ SHA-256 are separate evidence.
 Logical-backup RPO is therefore the latest successful release artifact and is
 unbounded between approved releases, not a fictitious 24-hour schedule.
 
-Before the first controlled release, assign the web, migration, outbox, Gmail
-receipts, and Gmail promotions services their corresponding custom config paths.
+Before the first controlled release, assign the web, outbox, Gmail receipts,
+and Gmail promotions services their corresponding custom config paths.
 The Gmail config files deliberately leave cron schedules in Railway service
 settings; record and preserve the existing schedules when changing paths.
 Configure the protected GitHub `production` environment and database credential
@@ -507,9 +510,14 @@ complete disaster-recovery dump include every tenant while `FORCE ROW LEVEL
 SECURITY` remains active; it has no DML, create, temporary, ownership,
 membership, function, or deployed-service access.
 
-The protected GitHub `production` environment stores `RAILWAY_TOKEN` and
-`EXPENSEOPS_BACKUP_DATABASE_URL` as secrets. It stores the base64 public
-certificate and its approved uppercase, colon-delimited SHA-256 fingerprint in
+The protected GitHub `production` environment stores `RAILWAY_TOKEN`,
+`EXPENSEOPS_BACKUP_DATABASE_URL`, and `EXPENSEOPS_MIGRATION_DATABASE_URL` as
+secrets. The two database URLs use TLS, authenticate exactly as
+`expenseops_backup` and `expenseops_migrator`, respectively, and target the
+selected production Postgres host/database. The migration URL exists only in
+the protected one-shot job; neither database credential belongs on a Railway
+service. The environment stores the base64 public certificate and its approved
+uppercase, colon-delimited SHA-256 fingerprint in
 `EXPENSEOPS_BACKUP_RECIPIENT_CERT_B64` and
 `EXPENSEOPS_BACKUP_RECIPIENT_CERT_SHA256`; the Railway project, environment,
 service IDs, and `PRODUCTION_BASE_URL` remain environment variables. Keep the
@@ -524,8 +532,10 @@ runbook's full path and evidence checks.
 The compatibility and hardening phases have different rollback boundaries.
 Before migration `0029`, repair or forward-fix the compatibility phase; after
 `0029`, the controlled app-only rollback can deploy only the reviewed
-compatibility SHA while retaining `0029`. Never run an old migration graph
-against a database already at `0029`; use the exact procedures in the runbook.
+compatibility SHA while retaining `0029`. The rollback gate uses the protected
+migrator secret only to query `alembic_version` directly and never runs
+Alembic. Never run an old migration graph against a database already at `0029`;
+use the exact procedures in the runbook.
 
 Use Railway Variables for secrets and managed PostgreSQL for data. Do not
 deploy `.env`, SQLite databases, receipt files, Sandbox logs, or Sandbox

@@ -2,7 +2,7 @@
 
 ExpenseOps production uses three dedicated PostgreSQL login roles. The public
 web process, outbox worker, and scheduled jobs use `expenseops_runtime`; only
-the dedicated migration service uses `expenseops_migrator`; and only the
+the protected one-shot GitHub migration stage uses `expenseops_migrator`; and only the
 off-platform encrypted logical-backup job uses `expenseops_backup`. The
 Railway-provided `postgres` superuser remains an operator/bootstrap credential
 and must not be stored on an application service.
@@ -94,10 +94,11 @@ The first restricted-role cutover has this guarded sequence:
    full bootstrap revokes `CONNECT`, `CREATE`, and `TEMPORARY` from `PUBLIC`;
    the Railway `postgres` database owner retains owner authority and the three
    ExpenseOps roles receive direct `CONNECT`.
-5. Configure only the dedicated migration service with the migrator URL in
-   `DATABASE_URL`. Do not copy `APP_SECRET_KEY` or
-   `APP_SECRET_KEY_PREVIOUS` to that service; Alembic intentionally loads only
-   migration-safe production settings. Its release barrier must run both
+5. Store the public TLS migrator URL only as the protected GitHub
+   `production` environment secret `EXPENSEOPS_MIGRATION_DATABASE_URL`. Never
+   put it or an application encryption key on a Railway service. The approved
+   one-shot release stage maps it to `DATABASE_URL`; Alembic intentionally
+   loads only migration-safe production settings. Its release barrier runs
    commands in order:
 
    ```bash
@@ -110,14 +111,15 @@ The first restricted-role cutover has this guarded sequence:
    verifies that `current_user` is the exact expected `expenseops_migrator`,
    reapplies only runtime/default ACLs, and runs all postcondition checks in one
    transaction. A migration, identity, grant, or verification failure must
-   block web deployment.
+   block every Railway application upload.
 6. Keep `--reconcile-runtime-grants` after every future Alembic upgrade. This
    ensures newly created allowlisted routing functions are executable before a
    new runtime revision is deployed, without exposing the admin credential to
-   the migration service.
-7. Store the runtime URL only on web/workers/crons. Store the backup URL only
-   as the GitHub production-environment secret
-   `EXPENSEOPS_BACKUP_DATABASE_URL`. Store the base64-encoded public recipient
+   any service or workflow step.
+7. Store the runtime URL only on web/workers/crons. Store the backup and
+   migrator URLs only as the GitHub production-environment secrets
+   `EXPENSEOPS_BACKUP_DATABASE_URL` and
+   `EXPENSEOPS_MIGRATION_DATABASE_URL`. Store the base64-encoded public recipient
    certificate as the GitHub production-environment variable
    `EXPENSEOPS_BACKUP_RECIPIENT_CERT_B64`; it is public key material, not a
    secret. Pin its colon-delimited uppercase SHA-256 fingerprint in

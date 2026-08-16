@@ -52,7 +52,6 @@ jobs:
     env:
       RAILWAY_PROJECT_ID: ${{ vars.RAILWAY_PROJECT_ID }}
       RAILWAY_PRODUCTION_ENVIRONMENT_ID: ${{ vars.RAILWAY_PRODUCTION_ENVIRONMENT_ID }}
-      RAILWAY_MIGRATION_SERVICE_ID: ${{ vars.RAILWAY_MIGRATION_SERVICE_ID }}
       RAILWAY_OUTBOX_SERVICE_ID: ${{ vars.RAILWAY_OUTBOX_SERVICE_ID }}
       RAILWAY_GMAIL_RECEIPTS_SERVICE_ID: ${{ vars.RAILWAY_GMAIL_RECEIPTS_SERVICE_ID }}
       RAILWAY_GMAIL_PROMOTIONS_SERVICE_ID: ${{ vars.RAILWAY_GMAIL_PROMOTIONS_SERVICE_ID }}
@@ -89,6 +88,13 @@ jobs:
             --only-binary=:all: \
             --require-hashes \
             --requirement "${requirements_file}"
+
+      - name: Install pinned application dependencies without production secrets
+        run: |
+          set -Eeuo pipefail
+          python -m pip install \
+            --disable-pip-version-check \
+            --requirement requirements.lock
 
       - name: Install pinned OpenSSL for authenticated CMS encryption
         run: |
@@ -133,7 +139,6 @@ jobs:
           for name in \
             RAILWAY_PROJECT_ID \
             RAILWAY_PRODUCTION_ENVIRONMENT_ID \
-            RAILWAY_MIGRATION_SERVICE_ID \
             RAILWAY_OUTBOX_SERVICE_ID \
             RAILWAY_GMAIL_RECEIPTS_SERVICE_ID \
             RAILWAY_GMAIL_PROMOTIONS_SERVICE_ID \
@@ -146,7 +151,6 @@ jobs:
           for id_name in \
             RAILWAY_PROJECT_ID \
             RAILWAY_PRODUCTION_ENVIRONMENT_ID \
-            RAILWAY_MIGRATION_SERVICE_ID \
             RAILWAY_OUTBOX_SERVICE_ID \
             RAILWAY_GMAIL_RECEIPTS_SERVICE_ID \
             RAILWAY_GMAIL_PROMOTIONS_SERVICE_ID \
@@ -164,7 +168,6 @@ jobs:
             exit 1
           fi
           service_ids=(
-            "${RAILWAY_MIGRATION_SERVICE_ID}"
             "${RAILWAY_OUTBOX_SERVICE_ID}"
             "${RAILWAY_GMAIL_RECEIPTS_SERVICE_ID}"
             "${RAILWAY_GMAIL_PROMOTIONS_SERVICE_ID}"
@@ -286,7 +289,6 @@ jobs:
               and (.services[$id].source.image == null)
             ' <<<"${environment_config}" >/dev/null
           }
-          verify_service_config "${RAILWAY_MIGRATION_SERVICE_ID}" /railway.migrations.json
           verify_service_config "${RAILWAY_OUTBOX_SERVICE_ID}" /railway.outbox.json
           verify_service_config \
             "${RAILWAY_GMAIL_RECEIPTS_SERVICE_ID}" /railway.gmail-receipts.json
@@ -294,7 +296,6 @@ jobs:
             "${RAILWAY_GMAIL_PROMOTIONS_SERVICE_ID}" /railway.gmail-promotions.json
           verify_service_config "${RAILWAY_WEB_SERVICE_ID}" /railway.web.json
           for private_service_id in \
-            "${RAILWAY_MIGRATION_SERVICE_ID}" \
             "${RAILWAY_OUTBOX_SERVICE_ID}" \
             "${RAILWAY_GMAIL_RECEIPTS_SERVICE_ID}" \
             "${RAILWAY_GMAIL_PROMOTIONS_SERVICE_ID}"
@@ -382,13 +383,34 @@ jobs:
           PY
           unset pitr_status PITR_ARCHIVED_AT PITR_RESTORE_AT
 
+      - name: Resolve the selected production Postgres target without database secrets
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          set +x
+          postgres_variables="$(railway variable list \
+            --project "${RAILWAY_PROJECT_ID}" \
+            --environment "${RAILWAY_PRODUCTION_ENVIRONMENT_ID}" \
+            --service "${RAILWAY_POSTGRES_SERVICE_ID}" \
+            --json)"
+          selected_public_url="$(jq -er \
+            '.DATABASE_PUBLIC_URL | select(type == "string" and length > 0)' \
+            <<<"${postgres_variables}")"
+          selected_target_sha256="$(POSTGRES_URL_TO_HASH="${selected_public_url}" python -c \
+            'import hashlib, os, sys; from urllib.parse import unquote, urlsplit; parsed=urlsplit(os.environ["POSTGRES_URL_TO_HASH"]); host=(parsed.hostname or "").casefold(); database=unquote(parsed.path.removeprefix("/")); (host and database and "/" not in database) or sys.exit("Selected Postgres URL must identify one host and database"); port=parsed.port or 5432; print(hashlib.sha256(f"{host}|{port}|{database}".encode()).hexdigest())')"
+          [[ "${selected_target_sha256}" =~ ^[0-9a-f]{64}$ ]]
+          echo "EXPENSEOPS_SELECTED_POSTGRES_PUBLIC_TARGET_SHA256=${selected_target_sha256}" \
+            >>"${GITHUB_ENV}"
+          unset postgres_variables selected_public_url selected_target_sha256
+          unset POSTGRES_URL_TO_HASH RAILWAY_TOKEN
+
       - name: Create and restore-verify a fresh logical backup
         env:
           EXPENSEOPS_BACKUP_DATABASE_URL: ${{ secrets.EXPENSEOPS_BACKUP_DATABASE_URL }}
           EXPENSEOPS_BACKUP_RECIPIENT_CERT_B64: ${{ vars.EXPENSEOPS_BACKUP_RECIPIENT_CERT_B64 }}
           EXPENSEOPS_BACKUP_RECIPIENT_CERT_SHA256: ${{ vars.EXPENSEOPS_BACKUP_RECIPIENT_CERT_SHA256 }}
           POSTGRES_CLIENT_IMAGE: postgres:18.1-bookworm@sha256:cc9f4143a8d2fa8cf3749d0cb4d26ecf2d53a77a2ac807e9ebd67ae22426221a
-          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
           RESTORE_DATABASE_URL: postgresql://postgres:expenseops-ephemeral-restore@127.0.0.1:5432/expenseops_restore
         run: |
           set -Eeuo pipefail
@@ -405,21 +427,9 @@ jobs:
             echo "EXPENSEOPS_BACKUP_RECIPIENT_CERT_SHA256 must be a colon-delimited uppercase SHA-256 fingerprint." >&2
             exit 1
           fi
-          postgres_variables="$(railway variable list \
-            --project "${RAILWAY_PROJECT_ID}" \
-            --environment "${RAILWAY_PRODUCTION_ENVIRONMENT_ID}" \
-            --service "${RAILWAY_POSTGRES_SERVICE_ID}" \
-            --json)"
-          selected_public_url="$(jq -er \
-            '.DATABASE_PUBLIC_URL | select(type == "string" and length > 0)' \
-            <<<"${postgres_variables}")"
-          unset postgres_variables RAILWAY_TOKEN
-
           recovery_dir="${RUNNER_TEMP}/expenseops-recovery"
           install -d -m 0700 "${recovery_dir}"
-          export EXPENSEOPS_SELECTED_POSTGRES_PUBLIC_URL="${selected_public_url}"
           export EXPENSEOPS_RECOVERY_DIR="${recovery_dir}"
-          unset selected_public_url
           python - <<'PY'
           from __future__ import annotations
 
@@ -1059,7 +1069,9 @@ jobs:
 
           def main() -> None:
               source_url = os.environ["EXPENSEOPS_BACKUP_DATABASE_URL"]
-              selected_url = os.environ["EXPENSEOPS_SELECTED_POSTGRES_PUBLIC_URL"]
+              expected_target_sha256 = os.environ[
+                  "EXPENSEOPS_SELECTED_POSTGRES_PUBLIC_TARGET_SHA256"
+              ]
               restore_url = os.environ["RESTORE_DATABASE_URL"]
               recovery_dir = Path(os.environ["EXPENSEOPS_RECOVERY_DIR"])
               dump_path = recovery_dir / "expenseops-production.dump"
@@ -1069,8 +1081,12 @@ jobs:
               backup_started_at = datetime.now(UTC)
 
               source_target = database_target(source_url, backup=True)
-              selected_target = database_target(selected_url, backup=False)
-              if source_target != selected_target:
+              source_target_fingerprint = hashlib.sha256(
+                  "|".join(
+                      (source_target[0], str(source_target[1]), source_target[2])
+                  ).encode()
+              ).hexdigest()
+              if source_target_fingerprint != expected_target_sha256:
                   raise RecoveryGateError(
                       "The backup secret does not target the selected Postgres public endpoint."
                   )
@@ -1190,9 +1206,6 @@ jobs:
                       )
                   verify_owned_sequence_safety(restored)
                   restored_server_version = restored.info.server_version
-              source_target_fingerprint = hashlib.sha256(
-                  "|".join((source_target[0], str(source_target[1]), source_target[2])).encode()
-              ).hexdigest()
               metadata = {
                   "format_version": 1,
                   "backup_started_at": backup_started_at.isoformat(),
@@ -1262,8 +1275,6 @@ jobs:
               )
               raise SystemExit(1) from None
           PY
-          unset EXPENSEOPS_SELECTED_POSTGRES_PUBLIC_URL
-
           recipient_cert="${recovery_dir}/backup-recipient.pem"
           plaintext_bundle="${recovery_dir}/expenseops-production-${RELEASE_SHA}.tar"
           encrypted_bundle="${plaintext_bundle}.cms"
@@ -1373,6 +1384,113 @@ jobs:
             echo "- Logical-backup trigger: this approved production release"
           } >>"${GITHUB_STEP_SUMMARY}"
 
+      - name: Verify the isolated one-shot migration credential
+        env:
+          EXPENSEOPS_MIGRATION_DATABASE_URL: ${{ secrets.EXPENSEOPS_MIGRATION_DATABASE_URL }}
+        run: |
+          set -Eeuo pipefail
+          set +x
+          test -n "${EXPENSEOPS_MIGRATION_DATABASE_URL:-}" || {
+            echo "EXPENSEOPS_MIGRATION_DATABASE_URL is required." >&2
+            exit 1
+          }
+          python - <<'PY'
+          import hashlib
+          import os
+          from urllib.parse import parse_qs, unquote, urlsplit
+
+          import psycopg
+
+          migration_url = os.environ["EXPENSEOPS_MIGRATION_DATABASE_URL"]
+          expected_target_sha256 = os.environ[
+              "EXPENSEOPS_SELECTED_POSTGRES_PUBLIC_TARGET_SHA256"
+          ]
+          migration = urlsplit(migration_url)
+          if migration.scheme not in {"postgres", "postgresql"}:
+              raise SystemExit("Migration URL must use PostgreSQL")
+          if migration.username != "expenseops_migrator" or not migration.password:
+              raise SystemExit("Migration URL must authenticate only expenseops_migrator")
+          if migration.fragment:
+              raise SystemExit("Migration URL must not contain a fragment")
+          query = parse_qs(migration.query, keep_blank_values=True, strict_parsing=True)
+          if set(query) != {"sslmode"} or query["sslmode"] not in [
+              ["require"],
+              ["verify-ca"],
+              ["verify-full"],
+          ]:
+              raise SystemExit("Migration URL must require TLS and contain no other options")
+
+          def target(parsed):
+              host = (parsed.hostname or "").casefold()
+              database = unquote(parsed.path.removeprefix("/"))
+              if not host or not database or "/" in database:
+                  raise SystemExit("Database URL must identify one host and database")
+              return host, parsed.port or 5432, database
+
+          migration_target = target(migration)
+          migration_target_sha256 = hashlib.sha256(
+              "|".join(
+                  (migration_target[0], str(migration_target[1]), migration_target[2])
+              ).encode()
+          ).hexdigest()
+          if migration_target_sha256 != expected_target_sha256:
+              raise SystemExit("Migration URL does not target the selected production Postgres")
+
+          with psycopg.connect(migration_url, connect_timeout=15) as connection:
+              with connection.cursor() as cursor:
+                  cursor.execute(
+                      """
+                      SELECT current_user,
+                             rolsuper,
+                             rolcreatedb,
+                             rolcreaterole,
+                             rolreplication,
+                             rolbypassrls,
+                             rolinherit,
+                             rolcanlogin
+                      FROM pg_roles
+                      WHERE rolname = current_user
+                      """
+                  )
+                  role = cursor.fetchone()
+                  expected = (
+                      "expenseops_migrator",
+                      False,
+                      False,
+                      False,
+                      False,
+                      True,
+                      False,
+                      True,
+                  )
+                  if role != expected:
+                      raise SystemExit("Migration role attributes are unsafe")
+                  cursor.execute(
+                      """
+                      SELECT NOT EXISTS (
+                                 SELECT 1
+                                 FROM pg_auth_members memberships
+                                 JOIN pg_roles role
+                                   ON role.oid = memberships.member
+                                   OR role.oid = memberships.roleid
+                                 WHERE role.rolname = current_user
+                             ),
+                             pg_get_userbyid(database.datdba) <> current_user,
+                             has_database_privilege(current_user, current_database(), 'CONNECT'),
+                             NOT has_database_privilege(current_user, current_database(), 'CREATE'),
+                             NOT has_database_privilege(current_user, current_database(), 'TEMP'),
+                             pg_get_userbyid(namespace.nspowner) = current_user
+                      FROM pg_database database
+                      CROSS JOIN pg_namespace namespace
+                      WHERE database.datname = current_database()
+                        AND namespace.nspname = 'public'
+                      """
+                  )
+                  if cursor.fetchone() != (True, True, True, True, True, True):
+                      raise SystemExit("Migration role ownership or database boundary is unsafe")
+          PY
+          unset EXPENSEOPS_MIGRATION_DATABASE_URL
+
       - name: Verify a normal release starts from hardened production
         if: ${{ inputs.release_phase == 'normal' }}
         run: |
@@ -1383,15 +1501,23 @@ jobs:
       - name: Verify app-only rollback targets the hardened RLS boundary
         if: ${{ inputs.release_phase == 'rollback' }}
         env:
-          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+          EXPENSEOPS_MIGRATION_DATABASE_URL: ${{ secrets.EXPENSEOPS_MIGRATION_DATABASE_URL }}
         run: |
           set -Eeuo pipefail
-          railway ssh \
-            --project "${RAILWAY_PROJECT_ID}" \
-            --environment "${RAILWAY_PRODUCTION_ENVIRONMENT_ID}" \
-            --service "${RAILWAY_MIGRATION_SERVICE_ID}" \
-            -- python -c \
-            'from sqlalchemy import text; from app.db import engine; connection=engine.connect(); revision=connection.scalar(text("SELECT version_num FROM public.alembic_version")); connection.close(); assert revision == "20260815_0029", "database is not at the reviewed hardened RLS boundary"'
+          python - <<'PY'
+          import os
+
+          import psycopg
+
+          with psycopg.connect(
+              os.environ["EXPENSEOPS_MIGRATION_DATABASE_URL"], connect_timeout=15
+          ) as connection:
+              with connection.cursor() as cursor:
+                  cursor.execute("SELECT version_num FROM public.alembic_version")
+                  revision = cursor.fetchone()
+          if revision != ("20260815_0029",):
+              raise SystemExit("database is not at exactly 0029")
+          PY
 
       - name: Verify hardened release follows the compatibility deployment
         if: ${{ inputs.release_phase == 'hardened' }}
@@ -1474,21 +1600,6 @@ jobs:
               echo "Service ${service_id} must explicitly use the production application environment." >&2
               exit 1
             fi
-            if [[ "${expected_user}" == "expenseops_migrator" ]] \
-              && jq --exit-status 'has("EXPENSEOPS_PROCESS")' \
-                <<<"${variables}" >/dev/null
-            then
-              echo "The migration service must not define EXPENSEOPS_PROCESS." >&2
-              exit 1
-            fi
-            if [[ "${expected_user}" == "expenseops_migrator" ]] \
-              && jq --exit-status \
-                'has("APP_SECRET_KEY") or has("APP_SECRET_KEY_PREVIOUS")' \
-                <<<"${variables}" >/dev/null
-            then
-              echo "The migration service must not contain application encryption keys." >&2
-              exit 1
-            fi
             database_url="$(jq -er '.DATABASE_URL' <<<"${variables}")"
             actual_user="$(DATABASE_URL_TO_VERIFY="${database_url}" python -c \
               'import os, re, sys; from urllib.parse import urlsplit; parsed=urlsplit(os.environ["DATABASE_URL_TO_VERIFY"]); re.fullmatch(r"postgres(?:ql)?(?:\+[^:]+)?", parsed.scheme, re.IGNORECASE) or sys.exit("DATABASE_URL must use PostgreSQL"); print(parsed.username or "")')"
@@ -1503,6 +1614,7 @@ jobs:
               EXPENSEOPS_ADMIN_DATABASE_URL \
               EXPENSEOPS_BACKUP_DATABASE_URL \
               EXPENSEOPS_BACKUP_PASSWORD \
+              EXPENSEOPS_MIGRATION_DATABASE_URL \
               EXPENSEOPS_RUNTIME_PASSWORD \
               EXPENSEOPS_MIGRATOR_PASSWORD \
               ADMIN_DATABASE_URL \
@@ -1551,7 +1663,6 @@ jobs:
             unset variables candidate_url candidate_user forbidden_name identity_name identity_value
             unset app_environment database_target_fingerprint candidate_target_fingerprint
           }
-          verify_database_user "${RAILWAY_MIGRATION_SERVICE_ID}" expenseops_migrator
           for service_id in \
             "${RAILWAY_OUTBOX_SERVICE_ID}" \
             "${RAILWAY_GMAIL_RECEIPTS_SERVICE_ID}" \
@@ -1584,16 +1695,19 @@ jobs:
           unset database_target_fingerprints unique_database_target_count
           unset selected_postgres_target_fingerprint
 
-      - name: Deploy migration job and wait for terminal success
+      - name: Apply migrations and reconcile grants before any Railway deployment
         if: ${{ inputs.release_phase != 'rollback' }}
         env:
-          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+          APP_ENV: production
+          DATABASE_URL: ${{ secrets.EXPENSEOPS_MIGRATION_DATABASE_URL }}
+          ENVIRONMENT: production
         run: |
-          bash scripts/railway_deploy_and_wait.sh \
-            "${RAILWAY_MIGRATION_SERVICE_ID}" \
-            /railway.migrations.json \
-            "${RELEASE_SHA}" \
-            migrations
+          set -Eeuo pipefail
+          set +x
+          alembic upgrade head
+          alembic current --check-heads
+          python scripts/bootstrap_database_roles.py --reconcile-runtime-grants
+          alembic current --check-heads
 
       - name: Deploy outbox worker after migrations succeed
         env:

@@ -178,21 +178,26 @@ def test_production_release_is_manual_and_all_runtimes_precede_web():
     assert workflow.count(postgres_image) == 2
     assert "ref: ${{ inputs.release_sha }}" in workflow
     assert "git merge-base --is-ancestor" in workflow
-    assert "RAILWAY_MIGRATION_SERVICE_ID" in workflow
+    assert "RAILWAY_MIGRATION_SERVICE_ID" not in workflow
+    assert (
+        "EXPENSEOPS_MIGRATION_DATABASE_URL: ${{ secrets.EXPENSEOPS_MIGRATION_DATABASE_URL }}"
+    ) in workflow
     assert "RAILWAY_OUTBOX_SERVICE_ID" in workflow
     assert "RAILWAY_GMAIL_RECEIPTS_SERVICE_ID" in workflow
     assert "RAILWAY_GMAIL_PROMOTIONS_SERVICE_ID" in workflow
     assert "RAILWAY_WEB_SERVICE_ID" in workflow
     assert "Each release component must use a distinct Railway service ID." in workflow
-    migration_step = workflow.index("Deploy migration job and wait for terminal success")
+    migration_step = workflow.index(
+        "Apply migrations and reconcile grants before any Railway deployment"
+    )
     outbox_step = workflow.index("Deploy outbox worker after migrations succeed")
     receipts_step = workflow.index("Deploy Gmail receipts cron after outbox succeeds")
     promotions_step = workflow.index("Deploy Gmail promotions cron after receipts succeeds")
     web_step = workflow.index("Deploy web only after every runtime succeeds")
     assert migration_step < outbox_step < receipts_step < promotions_step < web_step
-    assert workflow.count('"${RELEASE_SHA}"') == 5
+    assert workflow.count('"${RELEASE_SHA}"') == 4
     assert "continue-on-error" not in workflow
-    assert "/railway.migrations.json" in workflow
+    assert "/railway.migrations.json" not in workflow
     assert "/railway.outbox.json" in workflow
     assert "/railway.gmail-receipts.json" in workflow
     assert "/railway.gmail-promotions.json" in workflow
@@ -217,8 +222,11 @@ def test_production_release_preflights_topology_hobby_recovery_and_credentials()
     workflow = (ROOT / ".github/workflows/production-release.yml").read_text(encoding="utf-8")
 
     preflight = workflow.index("Verify Railway service topology before any upload")
-    first_upload = workflow.index("Deploy migration job and wait for terminal success")
-    assert preflight < first_upload
+    migration = workflow.index(
+        "Apply migrations and reconcile grants before any Railway deployment"
+    )
+    first_upload = workflow.index("Deploy outbox worker after migrations succeed")
+    assert preflight < migration < first_upload
     assert "railway environment config" in workflow
     assert ".services[$id].configFile == $path" in workflow
     assert ".services[$id].source.repo == null" in workflow
@@ -259,8 +267,19 @@ def test_production_release_preflights_topology_hobby_recovery_and_credentials()
         "${{ vars.EXPENSEOPS_BACKUP_RECIPIENT_CERT_SHA256 }}"
     ) in recovery
     assert 'username != "expenseops_backup"' in recovery
-    assert "EXPENSEOPS_SELECTED_POSTGRES_PUBLIC_URL" in recovery
-    assert "source_target != selected_target" in recovery
+    assert "EXPENSEOPS_SELECTED_POSTGRES_PUBLIC_TARGET_SHA256" in recovery
+    assert "source_target_fingerprint != expected_target_sha256" in recovery
+    resolve_target = workflow[
+        workflow.index(
+            "Resolve the selected production Postgres target without database secrets"
+        ) : backup
+    ]
+    assert "RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}" in resolve_target
+    assert "EXPENSEOPS_BACKUP_DATABASE_URL" not in resolve_target
+    backup_step = workflow[
+        backup : workflow.index("Upload only the authenticated encrypted backup")
+    ]
+    assert "RAILWAY_TOKEN" not in backup_step
     assert '"require",' in recovery
     assert '"verify-ca",' in recovery
     assert '"verify-full",' in recovery
@@ -353,8 +372,30 @@ def test_production_release_preflights_topology_hobby_recovery_and_credentials()
     assert "DATABASE_URL must use PostgreSQL" in workflow
     assert "contains an unexpected PostgreSQL URL" in workflow
     assert "must explicitly use the production application environment" in workflow
-    assert "The migration service must not define EXPENSEOPS_PROCESS" in workflow
-    assert "The migration service must not contain application encryption keys" in workflow
+    assert "Verify the isolated one-shot migration credential" in workflow
+    assert "\n              EXPENSEOPS_MIGRATION_DATABASE_URL \\\n" in credential_isolation
+    assert "Migration URL must authenticate only expenseops_migrator" in workflow
+    assert "Migration URL does not target the selected production Postgres" in workflow
+    assert "Migration role attributes are unsafe" in workflow
+    assert "Migration role ownership or database boundary is unsafe" in workflow
+    migration_credential = workflow[
+        workflow.index("Verify the isolated one-shot migration credential") : workflow.index(
+            "Verify a normal release starts from hardened production"
+        )
+    ]
+    assert "RAILWAY_TOKEN" not in migration_credential
+    migration_commands = workflow[migration:first_upload]
+    assert "set -Eeuo pipefail" in migration_commands
+    assert "DATABASE_URL: ${{ secrets.EXPENSEOPS_MIGRATION_DATABASE_URL }}" in migration_commands
+    upgrade = migration_commands.index("alembic upgrade head")
+    first_head_check = migration_commands.index("alembic current --check-heads")
+    reconcile = migration_commands.index("bootstrap_database_roles.py --reconcile-runtime-grants")
+    second_head_check = migration_commands.index(
+        "alembic current --check-heads", first_head_check + 1
+    )
+    assert upgrade < first_head_check < reconcile < second_head_check
+    assert "railway up" not in migration_commands
+    assert "railway_deploy_and_wait.sh" not in migration_commands
     assert 'test "${migration_heads}" = "20260815_0028"' in workflow
     assert 'test "${migration_heads}" = "20260815_0029"' in workflow
     assert "All production services must target the same PostgreSQL database" in workflow
@@ -371,9 +412,18 @@ def test_production_release_has_explicit_cutover_normal_and_rollback_guards():
     assert "normal)" in workflow
     assert "compatibility_sha already contains the irreversible hardening migration" in workflow
     assert "Verify a normal release starts from hardened production" in workflow
-    assert "Verify app-only rollback targets the hardened RLS boundary" in workflow
-    assert '--service "${RAILWAY_MIGRATION_SERVICE_ID}"' in workflow
-    assert 'revision == "20260815_0029"' in workflow
+    rollback_start = workflow.index("Verify app-only rollback targets the hardened RLS boundary")
+    rollback_end = workflow.index("Verify hardened release follows the compatibility deployment")
+    rollback = workflow[rollback_start:rollback_end]
+    assert "if: ${{ inputs.release_phase == 'rollback' }}" in rollback
+    assert (
+        "EXPENSEOPS_MIGRATION_DATABASE_URL: ${{ secrets.EXPENSEOPS_MIGRATION_DATABASE_URL }}"
+    ) in rollback
+    assert "psycopg.connect(" in rollback
+    assert "SELECT version_num FROM public.alembic_version" in rollback
+    assert 'revision != ("20260815_0029",)' in rollback
+    assert "railway ssh" not in rollback
+    assert "RAILWAY_MIGRATION_SERVICE_ID" not in rollback
     assert "if: ${{ inputs.release_phase != 'rollback' }}" in workflow
 
 

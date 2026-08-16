@@ -71,24 +71,25 @@ oldest permitted application rollback target. Never downgrade `0029`.
    but not `CREATE` or `TEMPORARY`, and only the migrator owns `public` and
    reviewed application objects. Reconcile the backup read allowlist, then
    remove all bootstrap secrets from the operator environment.
-7. Create a private `expenseops-migrations` Railway service with only the
-   migrator database URL and no application encryption key. Put only the
-   runtime URL on web, outbox, and both Gmail cron services. Every URL must
-   identify the same production Postgres host/database while using its assigned
-   role. Stage variable changes without deploying and verify usernames and the
+7. Store the public TLS `expenseops_migrator` URL only as the protected GitHub
+   `production` environment secret `EXPENSEOPS_MIGRATION_DATABASE_URL`; do not
+   put it on any Railway service. Put only the private runtime URL on web,
+   outbox, and both Gmail cron services. Every URL must identify the same
+   production Postgres host/database while using its assigned role. Stage
+   variable changes without deploying and verify usernames and the
    secret-free database target fingerprint against the selected production
    Postgres service. The Railway-provided `postgres` URL must not remain on a
    deployed service.
-8. Assign the explicit config paths: web `/railway.web.json`, migrations
-   `/railway.migrations.json`, outbox `/railway.outbox.json`, Gmail receipts
+8. Assign the explicit config paths: web `/railway.web.json`, outbox
+   `/railway.outbox.json`, Gmail receipts
    `/railway.gmail-receipts.json`, and Gmail promotions
    `/railway.gmail-promotions.json`. The shared `/railway.json` stays neutral.
 9. Explicitly set `AGENT_WRITE_ACTIONS_ENABLED`, `AGENT_PROACTIVE_ENABLED`, and
    `AGENT_PURCHASING_ENABLED` to `false` on every runtime service.
 10. Configure the protected GitHub `production` environment with the exact
-    backup credential and public-certificate contract described below. Keep the
-    certificate private key and its password offline and outside GitHub and
-    Railway.
+    backup/migration credential and public-certificate contract described
+    below. Keep the certificate private key and its password offline and
+    outside GitHub and Railway.
 11. Manually run **Production release** with `release_phase=compatibility` and
     the exact compatibility SHA. The protected `production` environment must
     require approval. Never use direct `railway up` or a GitHub-push deployment
@@ -104,10 +105,14 @@ oldest permitted application rollback target. Never downgrade `0029`.
     restore, manifest, certificate, encryption, or artifact-upload failure
     stops the release before a Railway application deployment.
 13. The workflow verifies credentials, Agent flags, and the exact SHA/config,
-    then deploys migrations. Its fail-closed pre-deploy command upgrades
-    Alembic, verifies the head, and reconciles exact runtime grants. An inert
-    private `sleep infinity` sentinel provides an unambiguous Railway `SUCCESS`;
-    it has no public domain or listener.
+    then runs a protected, one-shot migration stage on the GitHub runner. It
+    authenticates only as `expenseops_migrator`, upgrades Alembic, verifies the
+    head, and reconciles exact runtime grants. The credential is exposed only
+    to the protected credential-verification, migration, or rollback-query
+    steps in that approved job and never to a Railway service. A non-zero result
+    stops the workflow before any Railway application upload. This
+    Hobby-compatible job is the dedicated migration boundary; no sixth Railway
+    service is required.
 14. Only after migration success, the workflow deploys outbox, Gmail receipts,
     and Gmail promotions from the same checkout, requiring `SUCCESS` from each.
     Web deploys last. A failure leaves the old web revision active.
@@ -121,16 +126,14 @@ oldest permitted application rollback target. Never downgrade `0029`.
     repeats the ordered runtimes, and deploys the `/readiness`-gated web last.
 17. Verify `/health` and `/readiness` are 200, then verify sign-in, one
     transaction review, webhook routing, and outbox delivery. Record all IDs.
-18. Keep the private migration sentinel active and non-public. The controlled
-    app-only rollback gate uses it for a read-only revision check; do not attach
-    a domain or application traffic to it.
+18. The controlled app-only rollback gate queries `alembic_version` directly
+    through the protected migrator secret and never runs Alembic.
 
 The service config paths are part of the release boundary:
 
 | Railway service | Config path | Database credential | Process |
 | --- | --- | --- | --- |
 | `expenseops` web | `/railway.web.json` | Restricted runtime role | Uvicorn only; never Alembic |
-| `expenseops-migrations` | `/railway.migrations.json` | `expenseops_migrator` only | Alembic/head/grant verification, then inert sentinel |
 | Outbox worker | `/railway.outbox.json` | Restricted runtime role | `python -m app.jobs.outbox` |
 | Gmail receipts cron | `/railway.gmail-receipts.json` | Restricted runtime role | `python -m app.jobs.gmail_receipts --max-results 25` |
 | Gmail promotions cron | `/railway.gmail-promotions.json` | Restricted runtime role | `python -m app.jobs.promotions sync` |
@@ -145,7 +148,8 @@ unchanged afterward. Do not convert a cron into an always-running service during
 
 Keep automatic GitHub deployments disabled for every production service. Railway does not order
 independent GitHub-push deployments across services. The manual workflow is the release sequencer:
-a failed migration, worker, or cron deployment cannot activate the new web revision.
+a failed migration stage, worker deployment, or cron deployment cannot activate the new web
+revision.
 
 Web, outbox, and crons use `expenseops_runtime`: database `CONNECT`, schema
 `USAGE`, application-table DML, application-sequence `USAGE`/`SELECT`, and the
@@ -162,10 +166,12 @@ runtime role attributes, ownership/grants, exact RLS/FORCE policies, and the
 five narrow SECURITY DEFINER routers. The Railway `postgres` superuser remains
 operator-only bootstrap/recovery access and is never stored on a deployment.
 
-The GitHub `production` environment needs two secrets: `RAILWAY_TOKEN` and
-`EXPENSEOPS_BACKUP_DATABASE_URL`. The latter must be the public TLS URL for
-exactly `expenseops_backup`, point to the selected production host/database,
-and never appear on a Railway service. It also needs public-key variables
+The GitHub `production` environment needs three secrets: `RAILWAY_TOKEN`,
+`EXPENSEOPS_BACKUP_DATABASE_URL`, and
+`EXPENSEOPS_MIGRATION_DATABASE_URL`. The database URLs must be public TLS URLs
+for exactly `expenseops_backup` and `expenseops_migrator`, respectively, point
+to the selected production host/database, and never appear on a Railway
+service. The environment also needs public-key variables
 `EXPENSEOPS_BACKUP_RECIPIENT_CERT_B64` and
 `EXPENSEOPS_BACKUP_RECIPIENT_CERT_SHA256`; the fingerprint is the approved
 uppercase, colon-delimited SHA-256 certificate fingerprint. Keep the matching
@@ -179,7 +185,7 @@ material.
 
 The remaining non-secret variables are `RAILWAY_PROJECT_ID`,
 `RAILWAY_PRODUCTION_ENVIRONMENT_ID`,
-`RAILWAY_MIGRATION_SERVICE_ID`, `RAILWAY_OUTBOX_SERVICE_ID`,
+`RAILWAY_OUTBOX_SERVICE_ID`,
 `RAILWAY_GMAIL_RECEIPTS_SERVICE_ID`, `RAILWAY_GMAIL_PROMOTIONS_SERVICE_ID`,
 `RAILWAY_WEB_SERVICE_ID`, `RAILWAY_POSTGRES_SERVICE_ID`, and
 `PRODUCTION_BASE_URL`. Require a reviewer on that environment. The
@@ -188,21 +194,23 @@ scoped to their Railway services.
 
 ### Migration failure
 
-If the migration deployment is `FAILED`, `CRASHED`, times out, or uses the wrong config file, the
-workflow stops and does not deploy web. Leave the current web revision serving, inspect the bounded
-migration logs, correct the cause through a reviewed change or safe configuration repair, and rerun
-the same reviewed SHA only when appropriate. Alembic migrations are retryable after a rolled-back
-failure. Do not stamp the database, edit `alembic_version`, recreate the database, or manually
-rewrite customer/domain rows to force progress.
+If the protected migration stage fails, times out, targets the wrong database,
+or fails its role/head/grant checks, the workflow stops before any Railway
+upload. Leave the current web revision serving, inspect the bounded Actions
+logs, correct the cause through a reviewed change or safe configuration repair,
+and rerun the same reviewed SHA only when appropriate. Alembic migrations are
+retryable after a rolled-back failure. Do not stamp the database, edit
+`alembic_version`, recreate the database, or manually rewrite customer/domain
+rows to force progress.
 
-The migration deployment contains separate Alembic and grant-reconciliation
+The migration stage contains separate Alembic and grant-reconciliation
 transactions. If Alembic fails inside its transaction, that transaction rolls
 back. If Alembic reaches the requested head but the later head check or runtime
 grant reconciliation fails, the new schema may already be committed even
-though the Railway migration deployment is failed and no new web revision is
+though the protected migration stage is failed and no new web revision is
 activated. Inspect `alembic current` and the migration logs, correct the
 reviewed migration/allowlist/ACL cause, and rerun the same release barrier. Do
-not assume every failed migration deployment left the database at its prior
+not assume every failed migration stage left the database at its prior
 revision.
 
 If a runtime deployment fails after one or more earlier runtime services reached `SUCCESS`, web
@@ -221,7 +229,7 @@ application and do not advance to `0029` until compatibility is stable.
 After `0029`, use `release_phase=rollback` with the reviewed compatibility SHA.
 The workflow must first pass the same fresh logical backup, PostgreSQL 18
 restore, manifest, encryption, and ciphertext-artifact gate. This app-only path
-then SSHes to the private hardened migration sentinel. It proves the database is at exactly `0029`
+then queries through the isolated migrator credential. It proves the database is at exactly `0029`
 and never runs Alembic, then deploys compatibility runtimes and web last.
 `/readiness` will be 503 because that revision expects the older head, so keep
 the incident open and forward-fix with a descendant that retains `0029`. The
