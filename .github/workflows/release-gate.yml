@@ -3,7 +3,7 @@ name: Release gate
 on:
   pull_request:
   push:
-    branches: [main, agent/launch-readiness]
+    branches: [main, agent/launch-readiness, "release/compatibility-*"]
 
 permissions:
   contents: read
