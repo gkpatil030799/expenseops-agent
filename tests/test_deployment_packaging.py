@@ -248,7 +248,10 @@ def test_production_release_preflights_topology_hobby_recovery_and_credentials()
     assert ".live.available == true" in recovery
     assert ".live.archiverHealthy == true" in recovery
     assert ".live.archiverError == null" in recovery
-    assert "strict 15-minute recovery window" in recovery
+    assert "for attempt in 1 2 3 4 5 6" in recovery
+    assert "sleep 10" in recovery
+    assert "timedelta(minutes=15)" in recovery
+    assert "Railway PITR status remained unsafe after bounded retries." in recovery
     assert '"SSH command failed (exit exit status: 31):"' in recovery
     assert "railway ssh" not in pitr_recovery
     assert "railway postgres pitr backup list" not in workflow
