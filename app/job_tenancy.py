@@ -6,13 +6,14 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.config import Settings
-from app.models import GmailAccount, TelegramIdentity, User, Workspace
+from app.models import GmailAccount, TelegramIdentity, User
 from app.security import decrypt_secret
 from app.tenancy import (
     DEFAULT_USER_EMAIL,
     clear_session_tenant,
     ensure_default_tenancy,
     set_trusted_workspace,
+    workspace_ids,
 )
 
 
@@ -24,42 +25,45 @@ class WorkspaceJobContext:
 
 def all_workspace_job_contexts(db: Session, settings: Settings) -> list[WorkspaceJobContext]:
     clear_session_tenant(db)
-    workspace_ids = list(db.scalars(select(Workspace.id).order_by(Workspace.id)))
-    if not workspace_ids:
-        workspace_ids = [ensure_default_tenancy(db).workspace_id]
+    values = workspace_ids(db)
+    if not values:
+        values = [ensure_default_tenancy(db).workspace_id]
     return [
         WorkspaceJobContext(
             workspace_id=value,
             settings=telegram_settings_for_workspace(db, value, settings),
         )
-        for value in workspace_ids
+        for value in values
     ]
 
 
 def gmail_job_contexts(db: Session, settings: Settings) -> list[WorkspaceJobContext]:
     clear_session_tenant(db)
-    accounts = list(
-        db.scalars(
+    contexts: list[WorkspaceJobContext] = []
+    for workspace_id in workspace_ids(db):
+        set_trusted_workspace(db, workspace_id)
+        account = db.scalar(
             select(GmailAccount).where(GmailAccount.enabled.is_(True)).order_by(GmailAccount.id)
         )
-    )
-    if accounts:
-        return [
-            WorkspaceJobContext(
-                workspace_id=account.workspace_id,
-                settings=telegram_settings_for_workspace(
-                    db,
-                    account.workspace_id,
-                    settings.model_copy(
-                        update={
-                            "gmail_refresh_token": decrypt_secret(account.refresh_token_encrypted),
-                            "gmail_user_id": account.google_user_id,
-                        }
-                    ),
-                ),
+        if account is not None:
+            account_settings = settings.model_copy(
+                update={
+                    "gmail_refresh_token": decrypt_secret(account.refresh_token_encrypted),
+                    "gmail_user_id": account.google_user_id,
+                }
             )
-            for account in accounts
-        ]
+            contexts.append(
+                WorkspaceJobContext(
+                    workspace_id=workspace_id,
+                    settings=telegram_settings_for_workspace(
+                        db,
+                        workspace_id,
+                        account_settings,
+                    ),
+                )
+            )
+    if contexts:
+        return contexts
     # Existing installations keep working, but the legacy env token is bound only
     # to the backfilled default workspace rather than copied across tenants.
     default = ensure_default_tenancy(db)
@@ -74,7 +78,6 @@ def gmail_job_contexts(db: Session, settings: Settings) -> list[WorkspaceJobCont
 def enter_job_workspace(db: Session, workspace_id: int) -> None:
     db.rollback()
     db.expunge_all()
-    clear_session_tenant(db)
     set_trusted_workspace(db, workspace_id)
     from app.tenancy import set_active_workspace
 
@@ -118,6 +121,7 @@ def telegram_settings_for_workspace(
     settings: Settings,
     user_id: int | None = None,
 ) -> Settings:
+    set_trusted_workspace(db, workspace_id)
     filters = [
         TelegramIdentity.workspace_id == workspace_id,
         TelegramIdentity.enabled.is_(True),
@@ -125,13 +129,7 @@ def telegram_settings_for_workspace(
     if user_id is not None:
         filters.append(TelegramIdentity.user_id == user_id)
     identities = list(
-        db.scalars(
-            select(TelegramIdentity)
-            .execution_options(skip_tenant_scope=True)
-            .where(*filters)
-            .order_by(TelegramIdentity.id)
-            .limit(2)
-        )
+        db.scalars(select(TelegramIdentity).where(*filters).order_by(TelegramIdentity.id).limit(2))
     )
     # Never guess a recipient when a workspace has several personal identities.
     identity = identities[0] if len(identities) == 1 else None

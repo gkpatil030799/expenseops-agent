@@ -25,6 +25,7 @@ from app.models import (
     TelegramWebhookUpdate,
     TransactionStatus,
     User,
+    WorkspaceMembership,
     utc_now,
 )
 from app.services.agent_service import friend_display_name
@@ -115,6 +116,11 @@ from app.tenancy import (
     set_active_user,
     set_active_workspace,
     set_trusted_workspace,
+)
+from app.tenant_routing import (
+    route_active_telegram_identity_by_link_code,
+    route_telegram_identity,
+    route_telegram_link_code,
 )
 
 logger = logging.getLogger(__name__)
@@ -239,26 +245,34 @@ def _telegram_update_queue_context(db: DbSession, update: dict) -> tuple[int, in
     chat = (callback_query.get("message") or {}).get("chat") or message.get("chat") or {}
     telegram_user_id = str(from_user.get("id") or "")
     chat_id = str(chat.get("id") or "")
-    identity = db.scalar(
-        select(TelegramIdentity)
-        .execution_options(skip_tenant_scope=True)
-        .where(
-            TelegramIdentity.telegram_user_id == telegram_user_id,
-            TelegramIdentity.chat_id == chat_id,
-            TelegramIdentity.enabled.is_(True),
-        )
-    )
-    if identity is not None:
-        return identity.workspace_id, identity.user_id
+    identity_route = route_telegram_identity(db, telegram_user_id, chat_id)
+    if identity_route is not None:
+        identity = db.get(TelegramIdentity, identity_route.telegram_identity_id)
+        if (
+            identity is not None
+            and identity.enabled
+            and _has_active_workspace_membership(
+                db,
+                identity.user_id,
+                identity.workspace_id,
+            )
+        ):
+            return identity_route.workspace_id, identity_route.user_id
     code = _telegram_connect_code(str(message.get("text") or "").strip())
     if code is None:
         return None
-    link = db.scalar(
-        select(TelegramLinkCode)
-        .execution_options(skip_tenant_scope=True)
-        .where(TelegramLinkCode.code_hash == hash_api_token(code))
+    link_route = route_telegram_link_code(db, hash_api_token(code))
+    link = (
+        db.get(TelegramLinkCode, link_route.telegram_link_code_id)
+        if link_route is not None
+        else None
     )
-    if link is None or link.used_at is not None or _aware_datetime(link.expires_at) <= utc_now():
+    if (
+        link is None
+        or not _has_active_workspace_membership(db, link.user_id, link.workspace_id)
+        or link.used_at is not None
+        or _aware_datetime(link.expires_at) <= utc_now()
+    ):
         return None
     return link.workspace_id, link.user_id
 
@@ -421,13 +435,22 @@ def _handle_telegram_connect(update: dict, db: DbSession) -> bool:
     if not telegram_user_id or not chat_id:
         raise HTTPException(status_code=400, detail="Telegram identity is missing")
     now = utc_now()
-    link = db.scalar(
-        select(TelegramLinkCode)
-        .execution_options(skip_tenant_scope=True)
-        .where(TelegramLinkCode.code_hash == hash_api_token(code))
-        .with_for_update()
+    link_route = route_telegram_link_code(db, hash_api_token(code))
+    link = (
+        db.scalar(
+            select(TelegramLinkCode)
+            .where(TelegramLinkCode.id == link_route.telegram_link_code_id)
+            .with_for_update()
+        )
+        if link_route is not None
+        else None
     )
-    if link is None or link.used_at is not None or _aware_datetime(link.expires_at) <= now:
+    if (
+        link is None
+        or not _has_active_workspace_membership(db, link.user_id, link.workspace_id)
+        or link.used_at is not None
+        or _aware_datetime(link.expires_at) <= now
+    ):
         if link is not None:
             record_audit(
                 db,
@@ -448,22 +471,17 @@ def _handle_telegram_connect(update: dict, db: DbSession) -> bool:
     # attempts made with two independently generated link codes.
     db.scalar(select(User.id).where(User.id == link.user_id).with_for_update())
 
-    existing = db.scalar(
-        select(TelegramIdentity)
-        .execution_options(skip_tenant_scope=True)
-        .where(
-            TelegramIdentity.telegram_user_id == telegram_user_id,
-            TelegramIdentity.chat_id == chat_id,
-        )
-        .with_for_update()
-    )
-    if existing is not None and (
-        existing.user_id != link.user_id or existing.workspace_id != link.workspace_id
+    link_workspace_id = link.workspace_id
+    link_user_id = link.user_id
+    existing_route = route_telegram_identity(db, telegram_user_id, chat_id)
+    if existing_route is not None and (
+        existing_route.user_id != link_user_id or existing_route.workspace_id != link_workspace_id
     ):
+        set_trusted_workspace(db, link_workspace_id)
         record_audit(
             db,
-            workspace_id=link.workspace_id,
-            user_id=link.user_id,
+            workspace_id=link_workspace_id,
+            user_id=link_user_id,
             event_type="telegram_connect_failed",
             resource_type="telegram_identity",
             metadata={"reason": "identity_already_linked"},
@@ -475,20 +493,15 @@ def _handle_telegram_connect(update: dict, db: DbSession) -> bool:
         )
         return True
 
-    active_for_user = db.scalar(
-        select(TelegramIdentity)
-        .execution_options(skip_tenant_scope=True)
-        .where(
-            TelegramIdentity.user_id == link.user_id,
-            TelegramIdentity.enabled.is_(True),
-        )
-        .with_for_update()
-    )
-    if active_for_user is not None and active_for_user.id != getattr(existing, "id", None):
+    active_route = route_active_telegram_identity_by_link_code(db, hash_api_token(code))
+    if active_route is not None and active_route.telegram_identity_id != getattr(
+        existing_route, "telegram_identity_id", None
+    ):
+        set_trusted_workspace(db, link_workspace_id)
         record_audit(
             db,
-            workspace_id=link.workspace_id,
-            user_id=link.user_id,
+            workspace_id=link_workspace_id,
+            user_id=link_user_id,
             event_type="telegram_connect_failed",
             resource_type="telegram_identity",
             metadata={"reason": "user_already_linked"},
@@ -504,9 +517,34 @@ def _handle_telegram_connect(update: dict, db: DbSession) -> bool:
     # The conditional update is the actual one-time-code claim. The row lock
     # serializes PostgreSQL callers; the predicate also protects databases where
     # SELECT FOR UPDATE has weaker/no semantics and makes stale claims fail closed.
+    set_trusted_workspace(db, link_workspace_id)
+    link = db.scalar(
+        select(TelegramLinkCode)
+        .where(TelegramLinkCode.id == link_route.telegram_link_code_id)
+        .with_for_update()
+    )
+    if link is None or not _has_active_workspace_membership(
+        db,
+        link.user_id,
+        link.workspace_id,
+    ):
+        TelegramService().send_message(
+            "That ExpenseOps link code is invalid or expired. Generate a new one in Settings.",
+            chat_id=chat_id,
+        )
+        return True
+    existing = (
+        db.scalar(
+            select(TelegramIdentity)
+            .where(TelegramIdentity.id == existing_route.telegram_identity_id)
+            .with_for_update()
+        )
+        if existing_route is not None
+        else None
+    )
     claimed = db.execute(
         sql_update(TelegramLinkCode)
-        .execution_options(skip_tenant_scope=True, synchronize_session=False)
+        .execution_options(synchronize_session=False)
         .where(
             TelegramLinkCode.id == link.id,
             TelegramLinkCode.used_at.is_(None),
@@ -522,7 +560,6 @@ def _handle_telegram_connect(update: dict, db: DbSession) -> bool:
         )
         return True
 
-    set_trusted_workspace(db, link.workspace_id)
     if existing is None:
         db.add(
             TelegramIdentity(
@@ -585,6 +622,25 @@ def _aware_datetime(value: datetime) -> datetime:
     return value if value.tzinfo else value.replace(tzinfo=UTC)
 
 
+def _has_active_workspace_membership(
+    db: DbSession,
+    user_id: int,
+    workspace_id: int,
+) -> bool:
+    return (
+        db.scalar(
+            select(WorkspaceMembership.id)
+            .join(User, User.id == WorkspaceMembership.user_id)
+            .where(
+                WorkspaceMembership.user_id == user_id,
+                WorkspaceMembership.workspace_id == workspace_id,
+                User.status == "active",
+            )
+        )
+        is not None
+    )
+
+
 def _resolve_telegram_tenant(update: dict, db: DbSession) -> TelegramIdentity | None:
     callback_query = update.get("callback_query")
     message = update.get("message")
@@ -596,15 +652,21 @@ def _resolve_telegram_tenant(update: dict, db: DbSession) -> TelegramIdentity | 
         chat = (message or {}).get("chat") or {}
     user_id = str(from_user.get("id") or "")
     chat_id = str(chat.get("id") or "")
-    identity = db.scalar(
-        select(TelegramIdentity).where(
-            TelegramIdentity.telegram_user_id == user_id,
-            TelegramIdentity.chat_id == chat_id,
-            TelegramIdentity.enabled.is_(True),
-        )
+    identity_route = route_telegram_identity(db, user_id, chat_id)
+    identity = (
+        db.get(TelegramIdentity, identity_route.telegram_identity_id)
+        if identity_route is not None
+        else None
     )
-    if identity is not None:
-        set_trusted_workspace(db, identity.workspace_id)
+    if (
+        identity is not None
+        and identity.enabled
+        and _has_active_workspace_membership(
+            db,
+            identity.user_id,
+            identity.workspace_id,
+        )
+    ):
         db.info["user_id"] = identity.user_id
         db.info["interaction_channel"] = "telegram"
         set_active_user(identity.user_id)

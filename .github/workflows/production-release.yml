@@ -1,0 +1,586 @@
+name: Production release
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_sha:
+        description: Full reviewed commit SHA from main to release
+        required: true
+        type: string
+      release_phase:
+        description: One-time RLS cutover phase or an ordinary hardened release
+        required: true
+        default: normal
+        type: choice
+        options:
+          - normal
+          - hardened
+          - compatibility
+          - rollback
+      compatibility_sha:
+        description: Previously deployed compatibility SHA (required for hardened cutover)
+        required: false
+        type: string
+      recovery_backup_id:
+        description: Fresh locked pre-release Railway backup ID approved for this deployment
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: expenseops-production-release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Migrate, deploy runtimes, then web
+    runs-on: ubuntu-24.04
+    environment: production
+    timeout-minutes: 60
+    env:
+      RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+      RAILWAY_PROJECT_ID: ${{ vars.RAILWAY_PROJECT_ID }}
+      RAILWAY_PRODUCTION_ENVIRONMENT_ID: ${{ vars.RAILWAY_PRODUCTION_ENVIRONMENT_ID }}
+      RAILWAY_MIGRATION_SERVICE_ID: ${{ vars.RAILWAY_MIGRATION_SERVICE_ID }}
+      RAILWAY_OUTBOX_SERVICE_ID: ${{ vars.RAILWAY_OUTBOX_SERVICE_ID }}
+      RAILWAY_GMAIL_RECEIPTS_SERVICE_ID: ${{ vars.RAILWAY_GMAIL_RECEIPTS_SERVICE_ID }}
+      RAILWAY_GMAIL_PROMOTIONS_SERVICE_ID: ${{ vars.RAILWAY_GMAIL_PROMOTIONS_SERVICE_ID }}
+      RAILWAY_WEB_SERVICE_ID: ${{ vars.RAILWAY_WEB_SERVICE_ID }}
+      RAILWAY_POSTGRES_SERVICE_ID: ${{ vars.RAILWAY_POSTGRES_SERVICE_ID }}
+      PRODUCTION_BASE_URL: ${{ vars.PRODUCTION_BASE_URL }}
+      RAILWAY_CALLER: skill:use-railway@1.3.7
+      RAILWAY_AGENT_SESSION: github-production-release
+    steps:
+      - name: Check out the exact release commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.release_sha }}
+          fetch-depth: 0
+
+      - name: Set up Python for fail-closed release validation
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11.13"
+
+      - name: Verify release commit and required configuration
+        env:
+          REQUESTED_RELEASE_SHA: ${{ inputs.release_sha }}
+          RELEASE_PHASE: ${{ inputs.release_phase }}
+          COMPATIBILITY_SHA_INPUT: ${{ inputs.compatibility_sha }}
+        run: |
+          set -Eeuo pipefail
+          if [[ ! "${REQUESTED_RELEASE_SHA}" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "release_sha must be a full lowercase 40-character Git commit SHA" >&2
+            exit 1
+          fi
+          actual_sha="$(git rev-parse HEAD)"
+          test "${actual_sha}" = "${REQUESTED_RELEASE_SHA}"
+          git merge-base --is-ancestor "${actual_sha}" origin/main
+          test -z "$(git status --porcelain)"
+          for name in \
+            RAILWAY_TOKEN \
+            RAILWAY_PROJECT_ID \
+            RAILWAY_PRODUCTION_ENVIRONMENT_ID \
+            RAILWAY_MIGRATION_SERVICE_ID \
+            RAILWAY_OUTBOX_SERVICE_ID \
+            RAILWAY_GMAIL_RECEIPTS_SERVICE_ID \
+            RAILWAY_GMAIL_PROMOTIONS_SERVICE_ID \
+            RAILWAY_WEB_SERVICE_ID \
+            RAILWAY_POSTGRES_SERVICE_ID \
+            PRODUCTION_BASE_URL
+          do
+            test -n "${!name:-}" || { echo "${name} is required" >&2; exit 1; }
+          done
+          for id_name in \
+            RAILWAY_PROJECT_ID \
+            RAILWAY_PRODUCTION_ENVIRONMENT_ID \
+            RAILWAY_MIGRATION_SERVICE_ID \
+            RAILWAY_OUTBOX_SERVICE_ID \
+            RAILWAY_GMAIL_RECEIPTS_SERVICE_ID \
+            RAILWAY_GMAIL_PROMOTIONS_SERVICE_ID \
+            RAILWAY_WEB_SERVICE_ID \
+            RAILWAY_POSTGRES_SERVICE_ID
+          do
+            if [[ ! "${!id_name}" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]]; then
+              echo "${id_name} must be a lowercase Railway UUID." >&2
+              exit 1
+            fi
+          done
+          production_origin="${PRODUCTION_BASE_URL%/}"
+          if [[ ! "${production_origin}" =~ ^https://[A-Za-z0-9.-]+(:[0-9]{1,5})?$ ]]; then
+            echo "PRODUCTION_BASE_URL must be an HTTPS origin without a path or credentials." >&2
+            exit 1
+          fi
+          service_ids=(
+            "${RAILWAY_MIGRATION_SERVICE_ID}"
+            "${RAILWAY_OUTBOX_SERVICE_ID}"
+            "${RAILWAY_GMAIL_RECEIPTS_SERVICE_ID}"
+            "${RAILWAY_GMAIL_PROMOTIONS_SERVICE_ID}"
+            "${RAILWAY_WEB_SERVICE_ID}"
+            "${RAILWAY_POSTGRES_SERVICE_ID}"
+          )
+          unique_service_count="$(printf '%s\n' "${service_ids[@]}" | sort -u | wc -l | tr -d ' ')"
+          if [[ "${unique_service_count}" != "${#service_ids[@]}" ]]; then
+            echo "Each release component must use a distinct Railway service ID." >&2
+            exit 1
+          fi
+          migration_heads="$(python - <<'PY'
+          import ast
+          from pathlib import Path
+
+          revisions: set[str] = set()
+          parents: set[str] = set()
+          for path in Path("alembic/versions").glob("*.py"):
+              values: dict[str, object] = {}
+              for node in ast.parse(path.read_text(encoding="utf-8")).body:
+                  if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+                      if node.target.id in {"revision", "down_revision"} and node.value is not None:
+                          values[node.target.id] = ast.literal_eval(node.value)
+                  elif isinstance(node, ast.Assign):
+                      for target in node.targets:
+                          if isinstance(target, ast.Name) and target.id in {
+                              "revision",
+                              "down_revision",
+                          }:
+                              values[target.id] = ast.literal_eval(node.value)
+              revision = values.get("revision")
+              if not isinstance(revision, str):
+                  raise SystemExit(f"Missing revision in {path}")
+              revisions.add(revision)
+              down_revision = values.get("down_revision")
+              if isinstance(down_revision, str):
+                  parents.add(down_revision)
+              elif isinstance(down_revision, (tuple, list)):
+                  parents.update(str(value) for value in down_revision)
+          print("\n".join(sorted(revisions - parents)))
+          PY
+          )"
+          case "${RELEASE_PHASE}" in
+            compatibility|rollback)
+              test "${migration_heads}" = "20260815_0028"
+              test -f alembic/versions/20260815_0028_tenant_routing_functions.py
+              test ! -f alembic/versions/20260815_0029_harden_tenant_rls_policies.py
+              test "$(jq -r '.deploy.healthcheckPath' railway.web.json)" = "/health"
+              if [[ -n "${COMPATIBILITY_SHA_INPUT}" ]]; then
+                echo "compatibility_sha is accepted only for a hardened release." >&2
+                exit 1
+              fi
+              ;;
+            hardened)
+              test "${migration_heads}" = "20260815_0029"
+              test -f alembic/versions/20260815_0029_harden_tenant_rls_policies.py
+              test "$(jq -r '.deploy.healthcheckPath' railway.web.json)" = "/readiness"
+              compatibility_sha="${COMPATIBILITY_SHA_INPUT}"
+              if [[ ! "${compatibility_sha}" =~ ^[0-9a-f]{40}$ ]]; then
+                echo "compatibility_sha is required for a hardened release." >&2
+                exit 1
+              fi
+              test "${compatibility_sha}" != "${actual_sha}"
+              git merge-base --is-ancestor "${compatibility_sha}" "${actual_sha}"
+              git cat-file -e \
+                "${compatibility_sha}:alembic/versions/20260815_0028_tenant_routing_functions.py"
+              if git cat-file -e \
+                "${compatibility_sha}:alembic/versions/20260815_0029_harden_tenant_rls_policies.py" \
+                2>/dev/null
+              then
+                echo "compatibility_sha already contains the irreversible hardening migration." >&2
+                exit 1
+              fi
+              test "$(git show "${compatibility_sha}:railway.web.json" \
+                | jq -r '.deploy.healthcheckPath')" = "/health"
+              ;;
+            normal)
+              test -f alembic/versions/20260815_0029_harden_tenant_rls_policies.py
+              test "$(jq -r '.deploy.healthcheckPath' railway.web.json)" = "/readiness"
+              if [[ -n "${COMPATIBILITY_SHA_INPUT}" ]]; then
+                echo "compatibility_sha must be empty for a normal release." >&2
+                exit 1
+              fi
+              ;;
+            *)
+              echo "release_phase must be compatibility, hardened, normal, or rollback." >&2
+              exit 1
+              ;;
+          esac
+          echo "RELEASE_SHA=${actual_sha}" >> "${GITHUB_ENV}"
+
+      - name: Set up Node.js for the pinned Railway CLI
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20.19.4"
+
+      - name: Install Railway CLI
+        run: npm install --global @railway/cli@5.41.2
+
+      - name: Verify Railway service topology before any upload
+        run: |
+          set -Eeuo pipefail
+          railway link \
+            --project "${RAILWAY_PROJECT_ID}" \
+            --environment "${RAILWAY_PRODUCTION_ENVIRONMENT_ID}" \
+            --json >/dev/null
+          environment_config="$(railway environment config \
+            --environment "${RAILWAY_PRODUCTION_ENVIRONMENT_ID}" --json)"
+          jq --exit-status '.privateNetworkDisabled != true' \
+            <<<"${environment_config}" >/dev/null
+          verify_service_config() {
+            local service_id="$1"
+            local expected_path="$2"
+            jq --exit-status --arg id "${service_id}" --arg path "${expected_path}" '
+              .services[$id].configFile == $path
+              and (.services[$id].source.repo == null)
+              and (.services[$id].source.image == null)
+            ' <<<"${environment_config}" >/dev/null
+          }
+          verify_service_config "${RAILWAY_MIGRATION_SERVICE_ID}" /railway.migrations.json
+          verify_service_config "${RAILWAY_OUTBOX_SERVICE_ID}" /railway.outbox.json
+          verify_service_config \
+            "${RAILWAY_GMAIL_RECEIPTS_SERVICE_ID}" /railway.gmail-receipts.json
+          verify_service_config \
+            "${RAILWAY_GMAIL_PROMOTIONS_SERVICE_ID}" /railway.gmail-promotions.json
+          verify_service_config "${RAILWAY_WEB_SERVICE_ID}" /railway.web.json
+          for private_service_id in \
+            "${RAILWAY_MIGRATION_SERVICE_ID}" \
+            "${RAILWAY_OUTBOX_SERVICE_ID}" \
+            "${RAILWAY_GMAIL_RECEIPTS_SERVICE_ID}" \
+            "${RAILWAY_GMAIL_PROMOTIONS_SERVICE_ID}"
+          do
+            jq --exit-status --arg id "${private_service_id}" '
+              ((.services[$id].networking.serviceDomains // {}) | length) == 0
+              and ((.services[$id].networking.customDomains // {}) | length) == 0
+              and ((.services[$id].networking.tcpProxies // {}) | length) == 0
+            ' <<<"${environment_config}" >/dev/null
+          done
+          jq --exit-status --arg id "${RAILWAY_WEB_SERVICE_ID}" '
+            (
+              ((.services[$id].networking.serviceDomains // {}) | length)
+              + ((.services[$id].networking.customDomains // {}) | length)
+            ) > 0
+            and ((.services[$id].networking.tcpProxies // {}) | length) == 0
+          ' <<<"${environment_config}" >/dev/null
+          for cron_id in \
+            "${RAILWAY_GMAIL_RECEIPTS_SERVICE_ID}" \
+            "${RAILWAY_GMAIL_PROMOTIONS_SERVICE_ID}"
+          do
+            jq --exit-status --arg id "${cron_id}" '
+              ((.services[$id].deploy.cronSchedule // "") | length) > 0
+            ' <<<"${environment_config}" >/dev/null
+          done
+          unset environment_config
+
+      - name: Verify production recovery evidence
+        env:
+          RECOVERY_BACKUP_ID: ${{ inputs.recovery_backup_id }}
+        run: |
+          set -Eeuo pipefail
+          test -n "${RECOVERY_BACKUP_ID}" || {
+            echo "recovery_backup_id is required for every production deployment." >&2
+            exit 1
+          }
+          pitr_status="$(railway postgres pitr status \
+            --project "${RAILWAY_PROJECT_ID}" \
+            --environment "${RAILWAY_PRODUCTION_ENVIRONMENT_ID}" \
+            --service "${RAILWAY_POSTGRES_SERVICE_ID}" \
+            --json)"
+          jq --exit-status '
+            .enabled == true
+            and .bucketWired == true
+            and ((.blockers // []) | length == 0)
+            and .live.available == true
+            and (.live.backupCoverageError == null)
+            and (.live.backupSetCount > 0)
+            and ((.live.latestBackupAt // "") | length > 0)
+            and ((.live.walMin // "") | length > 0)
+            and ((.live.walMax // "") | length > 0)
+            and (.live.archiverError == null)
+            and .live.archiverHealthy == true
+            and ((.live.archiverLastArchivedAt // "") | length > 0)
+            and ((.live.maxRestoreTime // "") | length > 0)
+          ' \
+            <<<"${pitr_status}" >/dev/null
+          backups="$(railway postgres pitr backup list \
+            --project "${RAILWAY_PROJECT_ID}" \
+            --environment "${RAILWAY_PRODUCTION_ENVIRONMENT_ID}" \
+            --service "${RAILWAY_POSTGRES_SERVICE_ID}" \
+            --json)"
+          jq --exit-status --arg backup_id "${RECOVERY_BACKUP_ID}" \
+            'any(.[];
+              .id == $backup_id
+              and ((.externalId // "") | length > 0)
+              and .expiresAt == null
+              and .scheduleId == null
+              and ((now - (.createdAt | sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601)) >= 0)
+              and ((now - (.createdAt | sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601)) <= 86400)
+            )' \
+            <<<"${backups}" >/dev/null
+          schedules="$(railway postgres pitr schedule list \
+            --project "${RAILWAY_PROJECT_ID}" \
+            --environment "${RAILWAY_PRODUCTION_ENVIRONMENT_ID}" \
+            --service "${RAILWAY_POSTGRES_SERVICE_ID}" \
+            --json)"
+          jq --exit-status \
+            '([.[].kind] | sort) == ["DAILY", "MONTHLY", "WEEKLY"]' \
+            <<<"${schedules}" >/dev/null
+          unset pitr_status backups schedules
+
+      - name: Verify a normal release starts from hardened production
+        if: ${{ inputs.release_phase == 'normal' }}
+        run: |
+          set -Eeuo pipefail
+          curl --fail --silent --show-error --max-time 20 \
+            --output /dev/null -- "${PRODUCTION_BASE_URL%/}/readiness"
+
+      - name: Verify app-only rollback targets the hardened RLS boundary
+        if: ${{ inputs.release_phase == 'rollback' }}
+        run: |
+          set -Eeuo pipefail
+          railway ssh \
+            --project "${RAILWAY_PROJECT_ID}" \
+            --environment "${RAILWAY_PRODUCTION_ENVIRONMENT_ID}" \
+            --service "${RAILWAY_MIGRATION_SERVICE_ID}" \
+            -- python -c \
+            'from sqlalchemy import text; from app.db import engine; connection=engine.connect(); revision=connection.scalar(text("SELECT version_num FROM public.alembic_version")); connection.close(); assert revision == "20260815_0029", "database is not at the reviewed hardened RLS boundary"'
+
+      - name: Verify hardened release follows the compatibility deployment
+        if: ${{ inputs.release_phase == 'hardened' }}
+        env:
+          COMPATIBILITY_SHA: ${{ inputs.compatibility_sha }}
+        run: |
+          set -Eeuo pipefail
+          deployments="$(railway deployment list \
+            --project "${RAILWAY_PROJECT_ID}" \
+            --environment "${RAILWAY_PRODUCTION_ENVIRONMENT_ID}" \
+            --service "${RAILWAY_WEB_SERVICE_ID}" \
+            --limit 20 \
+            --json)"
+          latest_success_message="$(jq -r \
+            '[.[] | select(.status == "SUCCESS")][0] \
+             | (.meta.cliMessage // .meta.commitMessage // "")' \
+            <<<"${deployments}")"
+          expected_message="ExpenseOps production web ${COMPATIBILITY_SHA}"
+          if [[ "${latest_success_message}" != "${expected_message}" ]]; then
+            echo "The latest successful web deployment is not the approved compatibility SHA." >&2
+            exit 1
+          fi
+          readiness_code="$(curl --silent --show-error --max-time 20 \
+            --output /dev/null --write-out '%{http_code}' \
+            -- "${PRODUCTION_BASE_URL%/}/readiness")"
+          test "${readiness_code}" = "503"
+          unset deployments latest_success_message expected_message readiness_code
+
+      - name: Verify the Agent remains read only
+        run: |
+          set -Eeuo pipefail
+          for service_id in \
+            "${RAILWAY_OUTBOX_SERVICE_ID}" \
+            "${RAILWAY_GMAIL_RECEIPTS_SERVICE_ID}" \
+            "${RAILWAY_GMAIL_PROMOTIONS_SERVICE_ID}" \
+            "${RAILWAY_WEB_SERVICE_ID}"
+          do
+            variables="$(railway variable list \
+              --project "${RAILWAY_PROJECT_ID}" \
+              --environment "${RAILWAY_PRODUCTION_ENVIRONMENT_ID}" \
+              --service "${service_id}" \
+              --json)"
+            for flag in \
+              AGENT_WRITE_ACTIONS_ENABLED \
+              AGENT_PROACTIVE_ENABLED \
+              AGENT_PURCHASING_ENABLED
+            do
+              value="$(jq -r --arg flag "${flag}" '.[$flag] // ""' <<<"${variables}")"
+              if [[ "${value,,}" != "false" ]]; then
+                echo "${flag} must be explicitly false on service ${service_id}." >&2
+                exit 1
+              fi
+            done
+          done
+          unset variables
+
+      - name: Verify database credentials are isolated by service
+        run: |
+          set -Eeuo pipefail
+          database_target_fingerprints=()
+          verify_database_user() {
+            local service_id="$1"
+            local expected_user="$2"
+            local variables database_url actual_user database_target_fingerprint
+            local candidate_url candidate_user candidate_target_fingerprint
+            local forbidden_name identity_name identity_value app_environment
+            variables="$(railway variable list \
+              --project "${RAILWAY_PROJECT_ID}" \
+              --environment "${RAILWAY_PRODUCTION_ENVIRONMENT_ID}" \
+              --service "${service_id}" \
+              --json)"
+            app_environment="$(jq -r '.APP_ENV // .ENVIRONMENT // ""' \
+              <<<"${variables}")"
+            if [[ "${app_environment,,}" != "production" ]]; then
+              echo "Service ${service_id} must explicitly use the production application environment." >&2
+              exit 1
+            fi
+            if [[ "${expected_user}" == "expenseops_migrator" ]] \
+              && jq --exit-status 'has("EXPENSEOPS_PROCESS")' \
+                <<<"${variables}" >/dev/null
+            then
+              echo "The migration service must not define EXPENSEOPS_PROCESS." >&2
+              exit 1
+            fi
+            if [[ "${expected_user}" == "expenseops_migrator" ]] \
+              && jq --exit-status \
+                'has("APP_SECRET_KEY") or has("APP_SECRET_KEY_PREVIOUS")' \
+                <<<"${variables}" >/dev/null
+            then
+              echo "The migration service must not contain application encryption keys." >&2
+              exit 1
+            fi
+            database_url="$(jq -er '.DATABASE_URL' <<<"${variables}")"
+            actual_user="$(DATABASE_URL_TO_VERIFY="${database_url}" python -c \
+              'import os, re, sys; from urllib.parse import urlsplit; parsed=urlsplit(os.environ["DATABASE_URL_TO_VERIFY"]); re.fullmatch(r"postgres(?:ql)?(?:\+[^:]+)?", parsed.scheme, re.IGNORECASE) or sys.exit("DATABASE_URL must use PostgreSQL"); print(parsed.username or "")')"
+            database_target_fingerprint="$(DATABASE_URL_TO_VERIFY="${database_url}" python -c \
+              'import hashlib, os, sys; from urllib.parse import unquote, urlsplit; parsed=urlsplit(os.environ["DATABASE_URL_TO_VERIFY"]); host=(parsed.hostname or "").casefold(); database=unquote(parsed.path.removeprefix("/")); (host and database and "/" not in database) or sys.exit("DATABASE_URL must identify one PostgreSQL host and database"); port=parsed.port or 5432; print(hashlib.sha256(f"{host}|{port}|{database}".encode()).hexdigest())')"
+            unset database_url DATABASE_URL_TO_VERIFY
+            if [[ "${actual_user}" != "${expected_user}" ]]; then
+              echo "Service ${service_id} does not use the expected isolated database role." >&2
+              exit 1
+            fi
+            for forbidden_name in \
+              EXPENSEOPS_ADMIN_DATABASE_URL \
+              EXPENSEOPS_RUNTIME_PASSWORD \
+              EXPENSEOPS_MIGRATOR_PASSWORD \
+              ADMIN_DATABASE_URL \
+              MIGRATION_DATABASE_URL \
+              DATABASE_PASSWORD \
+              DB_PASSWORD \
+              POSTGRES_PASSWORD \
+              PGPASSWORD \
+              PGPASSFILE
+            do
+              if jq --exit-status --arg name "${forbidden_name}" \
+                'has($name)' <<<"${variables}" >/dev/null
+              then
+                echo "Forbidden bootstrap/admin variable ${forbidden_name} is present on service ${service_id}." >&2
+                exit 1
+              fi
+            done
+            for identity_name in PGUSER POSTGRES_USER DATABASE_USER DB_USER; do
+              if jq --exit-status --arg name "${identity_name}" \
+                'has($name)' <<<"${variables}" >/dev/null
+              then
+                identity_value="$(jq -r --arg name "${identity_name}" '.[$name]' \
+                  <<<"${variables}")"
+                if [[ "${identity_value}" != "${expected_user}" ]]; then
+                  echo "Service ${service_id} contains a database username for an unexpected role." >&2
+                  exit 1
+                fi
+              fi
+            done
+            while IFS= read -r candidate_url; do
+              candidate_user="$(DATABASE_URL_TO_VERIFY="${candidate_url}" python -c \
+                'import os; from urllib.parse import urlsplit; value=os.environ["DATABASE_URL_TO_VERIFY"].replace("postgresql+psycopg://", "postgresql://", 1); print(urlsplit(value).username or "")')"
+              candidate_target_fingerprint="$(DATABASE_URL_TO_VERIFY="${candidate_url}" python -c \
+                'import hashlib, os, sys; from urllib.parse import unquote, urlsplit; value=os.environ["DATABASE_URL_TO_VERIFY"].replace("postgresql+psycopg://", "postgresql://", 1); parsed=urlsplit(value); host=(parsed.hostname or "").casefold(); database=unquote(parsed.path.removeprefix("/")); (host and database and "/" not in database) or sys.exit("PostgreSQL URL must identify one host and database"); port=parsed.port or 5432; print(hashlib.sha256(f"{host}|{port}|{database}".encode()).hexdigest())')"
+              unset DATABASE_URL_TO_VERIFY
+              if [[ "${candidate_user}" != "${expected_user}" ]] \
+                || [[ "${candidate_target_fingerprint}" != "${database_target_fingerprint}" ]]
+              then
+                echo "Service ${service_id} contains an unexpected PostgreSQL URL." >&2
+                exit 1
+              fi
+            done < <(jq -r \
+              'to_entries[] | select(.value | type == "string") | .value | select(test("^postgres(ql(\\+[^:]*)?)?://"; "i"))' \
+              <<<"${variables}")
+            database_target_fingerprints+=("${database_target_fingerprint}")
+            unset variables candidate_url candidate_user forbidden_name identity_name identity_value
+            unset app_environment database_target_fingerprint candidate_target_fingerprint
+          }
+          verify_database_user "${RAILWAY_MIGRATION_SERVICE_ID}" expenseops_migrator
+          for service_id in \
+            "${RAILWAY_OUTBOX_SERVICE_ID}" \
+            "${RAILWAY_GMAIL_RECEIPTS_SERVICE_ID}" \
+            "${RAILWAY_GMAIL_PROMOTIONS_SERVICE_ID}" \
+            "${RAILWAY_WEB_SERVICE_ID}"
+          do
+            verify_database_user "${service_id}" expenseops_runtime
+          done
+          unique_database_target_count="$(printf '%s\n' "${database_target_fingerprints[@]}" \
+            | sort -u | wc -l | tr -d ' ')"
+          if [[ "${unique_database_target_count}" != "1" ]]; then
+            echo "All production services must target the same PostgreSQL database." >&2
+            exit 1
+          fi
+          postgres_variables="$(railway variable list \
+            --project "${RAILWAY_PROJECT_ID}" \
+            --environment "${RAILWAY_PRODUCTION_ENVIRONMENT_ID}" \
+            --service "${RAILWAY_POSTGRES_SERVICE_ID}" \
+            --json)"
+          postgres_database_url="$(jq -er '.DATABASE_URL' <<<"${postgres_variables}")"
+          selected_postgres_target_fingerprint="$(DATABASE_URL_TO_VERIFY="${postgres_database_url}" python -c \
+            'import hashlib, os, sys; from urllib.parse import unquote, urlsplit; parsed=urlsplit(os.environ["DATABASE_URL_TO_VERIFY"]); host=(parsed.hostname or "").casefold(); database=unquote(parsed.path.removeprefix("/")); (host and database and "/" not in database) or sys.exit("Selected Postgres service URL must identify one host and database"); port=parsed.port or 5432; print(hashlib.sha256(f"{host}|{port}|{database}".encode()).hexdigest())')"
+          unset DATABASE_URL_TO_VERIFY postgres_database_url postgres_variables
+          if [[ "${database_target_fingerprints[0]}" != \
+            "${selected_postgres_target_fingerprint}" ]]
+          then
+            echo "Application services do not target the selected production Postgres service." >&2
+            exit 1
+          fi
+          unset database_target_fingerprints unique_database_target_count
+          unset selected_postgres_target_fingerprint
+
+      - name: Deploy migration job and wait for terminal success
+        if: ${{ inputs.release_phase != 'rollback' }}
+        run: |
+          bash scripts/railway_deploy_and_wait.sh \
+            "${RAILWAY_MIGRATION_SERVICE_ID}" \
+            /railway.migrations.json \
+            "${RELEASE_SHA}" \
+            migrations
+
+      - name: Deploy outbox worker after migrations succeed
+        run: |
+          bash scripts/railway_deploy_and_wait.sh \
+            "${RAILWAY_OUTBOX_SERVICE_ID}" \
+            /railway.outbox.json \
+            "${RELEASE_SHA}" \
+            outbox
+
+      - name: Deploy Gmail receipts cron after outbox succeeds
+        run: |
+          bash scripts/railway_deploy_and_wait.sh \
+            "${RAILWAY_GMAIL_RECEIPTS_SERVICE_ID}" \
+            /railway.gmail-receipts.json \
+            "${RELEASE_SHA}" \
+            gmail-receipts
+
+      - name: Deploy Gmail promotions cron after receipts succeeds
+        run: |
+          bash scripts/railway_deploy_and_wait.sh \
+            "${RAILWAY_GMAIL_PROMOTIONS_SERVICE_ID}" \
+            /railway.gmail-promotions.json \
+            "${RELEASE_SHA}" \
+            gmail-promotions
+
+      - name: Deploy web only after every runtime succeeds
+        run: |
+          bash scripts/railway_deploy_and_wait.sh \
+            "${RAILWAY_WEB_SERVICE_ID}" \
+            /railway.web.json \
+            "${RELEASE_SHA}" \
+            web
+
+      - name: Verify production liveness and readiness
+        env:
+          RELEASE_PHASE: ${{ inputs.release_phase }}
+        run: |
+          set -Eeuo pipefail
+          base_url="${PRODUCTION_BASE_URL%/}"
+          curl --fail --silent --show-error --max-time 20 \
+            --output /dev/null -- "${base_url}/health"
+          if [[ "${RELEASE_PHASE}" == "compatibility" || "${RELEASE_PHASE}" == "rollback" ]]; then
+            readiness_code="$(curl --silent --show-error --max-time 20 \
+              --output /dev/null --write-out '%{http_code}' -- "${base_url}/readiness")"
+            test "${readiness_code}" = "503"
+          else
+            curl --fail --silent --show-error --max-time 20 \
+              --output /dev/null -- "${base_url}/readiness"
+          fi

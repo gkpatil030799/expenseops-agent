@@ -188,13 +188,20 @@ class Settings(BaseSettings):
             return self
 
         errors: list[str] = []
-        if not self.app_secret_key or self.app_secret_key == "paste-a-generated-fernet-key-here":
-            errors.append("APP_SECRET_KEY must be configured for production.")
-        if not self.app_secret_key_version.strip():
-            errors.append("APP_SECRET_KEY_VERSION must be configured for production.")
         if self.allow_unverified_plaid_webhooks_for_local_test:
             errors.append(
                 "ALLOW_UNVERIFIED_PLAID_WEBHOOKS_FOR_LOCAL_TEST must be false in production."
+            )
+        if any(
+            (
+                self.agent_write_actions_enabled,
+                self.agent_proactive_enabled,
+                self.agent_purchasing_enabled,
+            )
+        ):
+            errors.append(
+                "Agent write actions, proactive behavior, and purchasing must remain disabled "
+                "for the production read-only rollout."
             )
         if errors:
             raise ValueError("Unsafe production configuration: " + " ".join(errors))
@@ -205,7 +212,7 @@ class Settings(BaseSettings):
         if not self.is_production_mode:
             return
 
-        errors: list[str] = []
+        errors = self._production_secret_errors()
         errors.extend(self._production_database_errors())
         if not self.trusted_hosts or "*" in self.trusted_hosts:
             errors.append("TRUSTED_HOSTS must explicitly list production hosts.")
@@ -234,18 +241,25 @@ class Settings(BaseSettings):
         if not self.plaid_webhook_verification_required:
             errors.append("Plaid webhook verification must be enabled for production.")
         if self.agent_enabled and self.agent_read_tools_enabled and not self.openai_api_key:
-            errors.append(
-                "OPENAI_API_KEY must be configured when the read-only agent is enabled."
-            )
+            errors.append("OPENAI_API_KEY must be configured when the read-only agent is enabled.")
         if errors:
             raise ValueError("Unsafe production web configuration: " + " ".join(errors))
 
     def validate_worker_runtime(self) -> None:
         if not self.is_production_mode:
             return
-        errors = self._production_database_errors()
+        errors = self._production_secret_errors()
+        errors.extend(self._production_database_errors())
         if errors:
             raise ValueError("Unsafe production worker configuration: " + " ".join(errors))
+
+    def _production_secret_errors(self) -> list[str]:
+        errors: list[str] = []
+        if not self.app_secret_key or self.app_secret_key == "paste-a-generated-fernet-key-here":
+            errors.append("APP_SECRET_KEY must be configured for production.")
+        if not self.app_secret_key_version.strip():
+            errors.append("APP_SECRET_KEY_VERSION must be configured for production.")
+        return errors
 
     def _production_database_errors(self) -> list[str]:
         errors: list[str] = []

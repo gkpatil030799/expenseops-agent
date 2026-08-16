@@ -19,12 +19,14 @@ from app.models import (
     AgentConversation,
     AuditEvent,
     AuthIdentity,
+    DataConsent,
     GmailAccount,
     OAuthState,
     PlaidItem,
     SplitwiseIntegration,
     TelegramIdentity,
     TelegramLinkCode,
+    TelegramSession,
     User,
     Workspace,
     WorkspaceInvitation,
@@ -343,6 +345,116 @@ def _invite(client: TestClient, workspace_id: int, email: str = "guest@example.t
     return response.json()["invite_token"]
 
 
+def _add_member_credentials(db, *, workspace_id: int, user_id: int, prefix: str) -> int:
+    plaid = PlaidItem(
+        workspace_id=workspace_id,
+        item_id=f"{prefix}-plaid",
+        owner_user_id=user_id,
+        ownership_verified_at=utc_now(),
+        access_token_encrypted=f"{prefix}-plaid-secret",
+    )
+    db.add_all(
+        [
+            DataConsent(
+                workspace_id=workspace_id,
+                user_id=user_id,
+                purpose="gmail_receipts",
+                granted=True,
+            ),
+            GmailAccount(
+                workspace_id=workspace_id,
+                user_id=user_id,
+                google_user_id=f"{prefix}@gmail.test",
+                refresh_token_encrypted=f"{prefix}-gmail-secret",
+            ),
+            SplitwiseIntegration(
+                workspace_id=workspace_id,
+                user_id=user_id,
+                credentials_encrypted=f"{prefix}-splitwise-secret",
+            ),
+            TelegramIdentity(
+                workspace_id=workspace_id,
+                user_id=user_id,
+                telegram_user_id=f"{prefix}-telegram-user",
+                chat_id=f"{prefix}-telegram-chat",
+            ),
+            TelegramLinkCode(
+                workspace_id=workspace_id,
+                user_id=user_id,
+                code_hash=f"{prefix}-telegram-link",
+                expires_at=utc_now() + timedelta(minutes=10),
+            ),
+            TelegramSession(
+                workspace_id=workspace_id,
+                user_id=f"{prefix}-telegram-user",
+                chat_id=f"{prefix}-telegram-chat",
+                state_data={"private": "pending action"},
+            ),
+            OAuthState(
+                provider="gmail",
+                workspace_id=workspace_id,
+                user_id=user_id,
+                state_hash=f"{prefix}-oauth-state",
+                payload_encrypted=f"{prefix}-oauth-secret",
+                expires_at=utc_now() + timedelta(minutes=10),
+            ),
+            plaid,
+        ]
+    )
+    db.flush()
+    return plaid.id
+
+
+def _assert_member_credentials_revoked(
+    db,
+    *,
+    workspace_id: int,
+    user_id: int,
+    prefix: str,
+) -> None:
+    for model in (
+        DataConsent,
+        GmailAccount,
+        SplitwiseIntegration,
+        TelegramIdentity,
+        TelegramLinkCode,
+    ):
+        assert (
+            db.scalar(
+                select(model.id).where(
+                    model.workspace_id == workspace_id,
+                    model.user_id == user_id,
+                )
+            )
+            is None
+        )
+    assert (
+        db.scalar(
+            select(TelegramSession.id).where(
+                TelegramSession.workspace_id == workspace_id,
+                TelegramSession.user_id == f"{prefix}-telegram-user",
+                TelegramSession.chat_id == f"{prefix}-telegram-chat",
+            )
+        )
+        is None
+    )
+    assert (
+        db.scalar(
+            select(OAuthState.id).where(
+                OAuthState.workspace_id == workspace_id,
+                OAuthState.user_id == user_id,
+            )
+        )
+        is None
+    )
+    plaid = db.scalar(select(PlaidItem).where(PlaidItem.item_id == f"{prefix}-plaid"))
+    assert plaid is not None
+    assert plaid.owner_user_id is None
+    assert plaid.ownership_verified_at is None
+    assert plaid.access_token_encrypted is None
+    assert plaid.enabled is False
+
+
 def test_request_id_is_sanitized_before_invitation_audit_is_persisted(onboarding_app):
     client, database, contexts = onboarding_app
     untrusted_request_id = "oversized-" + "x" * 100
@@ -509,6 +621,18 @@ def test_owner_can_transfer_ownership_and_new_owner_can_remove_member(onboarding
                 title="Private agent history",
             )
         )
+        _add_member_credentials(
+            db,
+            workspace_id=contexts["owner"].workspace_id,
+            user_id=contexts["owner"].user_id,
+            prefix="removed-owner",
+        )
+        _add_member_credentials(
+            db,
+            workspace_id=contexts["owner"].workspace_id,
+            user_id=contexts["guest"].user_id,
+            prefix="remaining-owner",
+        )
         db.commit()
 
     removed = client.delete(
@@ -526,6 +650,27 @@ def test_owner_can_transfer_ownership_and_new_owner_can_remove_member(onboarding
             )
             is None
         )
+        _assert_member_credentials_revoked(
+            db,
+            workspace_id=contexts["owner"].workspace_id,
+            user_id=contexts["owner"].user_id,
+            prefix="removed-owner",
+        )
+        assert (
+            db.scalar(
+                select(GmailAccount.id).where(
+                    GmailAccount.workspace_id == contexts["owner"].workspace_id,
+                    GmailAccount.user_id == contexts["guest"].user_id,
+                )
+            )
+            is not None
+        )
+        remaining_plaid = db.scalar(
+            select(PlaidItem).where(PlaidItem.item_id == "remaining-owner-plaid")
+        )
+        assert remaining_plaid is not None
+        assert remaining_plaid.enabled is True
+        assert remaining_plaid.access_token_encrypted == "remaining-owner-plaid-secret"
         assert (
             db.scalar(
                 select(AgentConversation.id)
@@ -533,6 +678,49 @@ def test_owner_can_transfer_ownership_and_new_owner_can_remove_member(onboarding
                 .execution_options(skip_tenant_scope=True)
             )
             is None
+        )
+
+
+def test_leaving_workspace_revokes_departing_members_credentials(onboarding_app):
+    client, database, contexts = onboarding_app
+    token = _invite(client, contexts["owner"].workspace_id)
+    accepted = client.post(
+        "/api/workspaces/invitations/accept",
+        headers={"Authorization": "Bearer guest-token"},
+        json={"token": token},
+    )
+    assert accepted.status_code == 200
+
+    with database() as db:
+        _add_member_credentials(
+            db,
+            workspace_id=contexts["owner"].workspace_id,
+            user_id=contexts["guest"].user_id,
+            prefix="departing-member",
+        )
+        db.commit()
+
+    left = client.delete(
+        f"/api/workspaces/{contexts['owner'].workspace_id}/membership",
+        headers={"Authorization": "Bearer guest-token"},
+    )
+    assert left.status_code == 204
+
+    with database() as db:
+        assert (
+            db.scalar(
+                select(WorkspaceMembership.id).where(
+                    WorkspaceMembership.workspace_id == contexts["owner"].workspace_id,
+                    WorkspaceMembership.user_id == contexts["guest"].user_id,
+                )
+            )
+            is None
+        )
+        _assert_member_credentials_revoked(
+            db,
+            workspace_id=contexts["owner"].workspace_id,
+            user_id=contexts["guest"].user_id,
+            prefix="departing-member",
         )
 
 

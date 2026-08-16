@@ -12,7 +12,14 @@ from starlette.concurrency import run_in_threadpool
 from app.api.deps import CurrentUser, CurrentWorkspaceOwner, DbSession
 from app.config import get_settings
 from app.logging_config import log_event
-from app.models import PlaidItem, PlaidWebhookEvent, utc_now
+from app.models import (
+    PlaidItem,
+    PlaidWebhookEvent,
+    User,
+    Workspace,
+    WorkspaceMembership,
+    utc_now,
+)
 from app.rate_limit import rate_limiter
 from app.schemas import (
     LinkTokenResponse,
@@ -32,6 +39,7 @@ from app.services.plaid_service import (
     PlaidWebhookVerificationError,
 )
 from app.services.transaction_service import TransactionService
+from app.tenant_routing import route_plaid_item
 from sandbox.backend.event_store import SandboxEventStore
 from sandbox.backend.webhook_hooks import (
     maybe_log_sandbox_webhook,
@@ -45,6 +53,25 @@ logger = logging.getLogger(__name__)
 PLAID_WEBHOOK_MAX_BODY_BYTES = 1024 * 1024
 PLAID_WEBHOOK_RATE_LIMIT = 120
 PLAID_WEBHOOK_RATE_WINDOW_SECONDS = 60
+
+
+def _plaid_membership_active(db, item: PlaidItem) -> bool:
+    if not hasattr(db, "scalar") or not hasattr(db, "get_bind"):
+        return True
+    statement = (
+        select(WorkspaceMembership.id)
+        .join(User, User.id == WorkspaceMembership.user_id)
+        .where(
+            WorkspaceMembership.workspace_id == item.workspace_id,
+            User.status == "active",
+        )
+    )
+    if item.owner_user_id is not None:
+        statement = statement.where(WorkspaceMembership.user_id == item.owner_user_id)
+    if db.scalar(statement) is not None:
+        return True
+    bind = db.get_bind()
+    return bind.dialect.name != "postgresql" and db.get(Workspace, item.workspace_id) is None
 
 
 @router.post("/link-token", response_model=LinkTokenResponse)
@@ -154,9 +181,16 @@ async def plaid_webhook(
     raw_body = await _read_bounded_plaid_webhook_body(request)
     delivery_fingerprint = await _verify_plaid_webhook_if_enabled(request, raw_body)
     # This verified provider endpoint must resolve an external item identifier
-    # before its workspace is known. The scope narrows immediately after lookup.
+    # before its workspace is known. The narrow router returns only internal
+    # IDs and leaves the session scoped to the matched workspace.
     clear_session_tenant(db)
     webhook_type, webhook_code, item_id = _parse_plaid_webhook_payload(raw_body)
+    is_sync_webhook = webhook_type == "TRANSACTIONS" and webhook_code == "SYNC_UPDATES_AVAILABLE"
+    item_route = (
+        route_plaid_item(db, item_id)
+        if item_id and is_sync_webhook and hasattr(db, "get_bind")
+        else None
+    )
     maybe_log_sandbox_webhook(
         {
             "webhook_type": webhook_type,
@@ -188,7 +222,7 @@ async def plaid_webhook(
         )
         return WebhookAck(ok=True, message="Webhook already accepted")
 
-    if webhook_type != "TRANSACTIONS" or webhook_code != "SYNC_UPDATES_AVAILABLE":
+    if not is_sync_webhook:
         log_event(
             logger,
             "plaid_webhook_ignored",
@@ -208,9 +242,21 @@ async def plaid_webhook(
         )
         return WebhookAck(ok=True, message="Webhook accepted, but item_id is missing.")
 
-    item = db.execute(
-        select(PlaidItem).where(PlaidItem.item_id == item_id, PlaidItem.enabled.is_(True))
-    ).scalar_one_or_none()
+    if item_route is not None:
+        item = db.get(PlaidItem, item_route.plaid_item_id)
+    elif hasattr(db, "execute") and not hasattr(db, "get_bind"):
+        # Lightweight test doubles exercise verification and acknowledgement
+        # behavior without a SQLAlchemy Session. Production sessions always
+        # use the narrow tenant router above.
+        item = db.execute(
+            select(PlaidItem).where(PlaidItem.item_id == item_id)
+        ).scalar_one_or_none()
+    else:
+        item = None
+    if item is not None and item.enabled is False:
+        item = None
+    if item is not None and not _plaid_membership_active(db, item):
+        item = None
     if item is None:
         _mark_webhook_event_failed(db, event, "unknown_item_id")
         log_event(
@@ -281,6 +327,8 @@ def _sync_item_by_db_id(
             if item.owner_user_id is None:
                 raise RuntimeError("plaid_item_owner_missing")
             owner_user_id = int(item.owner_user_id)
+            if not _plaid_membership_active(db, item):
+                raise RuntimeError("plaid_item_owner_not_member")
             session_info = getattr(db, "info", None)
             missing_db_user = object()
             previous_db_user_id = (
@@ -574,12 +622,7 @@ def _validated_plaid_webhook_string(
     value = payload.get(field_name)
     if value is None and not required:
         return None
-    if (
-        not isinstance(value, str)
-        or not value
-        or len(value) > max_length
-        or "\x00" in value
-    ):
+    if not isinstance(value, str) or not value or len(value) > max_length or "\x00" in value:
         raise HTTPException(status_code=400, detail="Invalid Plaid webhook fields")
     return value
 

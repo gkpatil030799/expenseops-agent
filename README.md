@@ -425,12 +425,15 @@ Sandbox runtime state and JSONL logs are ignored by Git.
 ## Deploy on Railway
 
 The included [Dockerfile](Dockerfile) builds the React app and packages it with
-FastAPI. [railway.json](railway.json) currently declares only the Railway schema;
-it does not encode migrations, service topology, or health checks. Configure a
-dedicated one-shot migration job and use `/readiness` as the deployment health
-gate, following
-[the production operations runbook](docs/PRODUCTION_OPERATIONS_RUNBOOK.md).
-Keep `/health` for lightweight process liveness.
+FastAPI. The shared [railway.json](railway.json) stays neutral. Assign each
+production service its explicit config: [railway.web.json](railway.web.json),
+[railway.migrations.json](railway.migrations.json),
+[railway.outbox.json](railway.outbox.json),
+[railway.gmail-receipts.json](railway.gmail-receipts.json), or
+[railway.gmail-promotions.json](railway.gmail-promotions.json). The final web
+config starts only Uvicorn and uses `/readiness`; `/health` remains lightweight
+process liveness. The one-time RLS cutover first deploys a reviewed compatibility
+commit on `/health`, then its hardened descendant on `/readiness`.
 
 At minimum, production should have:
 
@@ -448,26 +451,40 @@ ENABLE_POSTGRES_RLS=true
 RATE_LIMIT_BACKEND="postgres"
 ENABLE_EXPENSEOPS_SANDBOX_LAB=false
 ALLOW_UNVERIFIED_PLAID_WEBHOOKS_FOR_LOCAL_TEST=false
+AGENT_WRITE_ACTIONS_ENABLED=false
+AGENT_PROACTIVE_ENABLED=false
+AGENT_PURCHASING_ENABLED=false
 ```
 
-Add integration variables in the Railway dashboard, then deploy:
+Keep Railway GitHub auto-deploy disabled for production. After review, run the
+protected **Production release** workflow for the compatibility SHA and then its
+hardening descendant. Preserve both commits when merging this cutover; a squash
+merge removes the compatibility rollback/release boundary and is not allowed.
+The private migration service uses the non-superuser
+`expenseops_migrator` role to upgrade Alembic, verify the head, and reconcile
+runtime grants. Only after that succeeds does the workflow deploy outbox and
+both Gmail crons with `expenseops_runtime`; web deploys last. Any migration,
+grant, worker, or cron failure prevents web activation.
 
-```bash
-railway up --detach
-```
+Before the first controlled release, assign the web, migration, outbox, Gmail
+receipts, and Gmail promotions services their corresponding custom config paths.
+The Gmail config files deliberately leave cron schedules in Railway service
+settings; record and preserve the existing schedules when changing paths.
+Configure the protected GitHub `production` environment and database credential
+separation exactly as documented in
+[the production operations runbook](docs/PRODUCTION_OPERATIONS_RUNBOOK.md) and
+[the database-role contract](docs/PRODUCTION_DATABASE_ROLES.md). The runtime
+role has only database connect, schema usage, reviewed table DML, sequence use,
+and the five routing-function grants. The migrator owns the reviewed schema
+objects but is neither a database owner nor a superuser. Keep the Railway
+`postgres` owner credential and both bootstrap passwords out of every deployed
+service.
 
-Run migrations once through the dedicated migration job before rolling out the
-web and worker services:
-
-```bash
-alembic upgrade head
-```
-
-The container itself starts Uvicorn by default. Set
-`EXPENSEOPS_PROCESS="outbox"` on the separate outbox service to run
-`python -m app.jobs.outbox`. Railway service commands and schedules are
-currently external configuration and must be checked against the runbook before
-each release.
+The compatibility and hardening phases have different rollback boundaries.
+Before migration `0029`, repair or forward-fix the compatibility phase; after
+`0029`, the controlled app-only rollback can deploy only the reviewed
+compatibility SHA while retaining `0029`. Never run an old migration graph
+against a database already at `0029`; use the exact procedures in the runbook.
 
 Use Railway Variables for secrets and managed PostgreSQL for data. Do not
 deploy `.env`, SQLite databases, receipt files, Sandbox logs, or Sandbox

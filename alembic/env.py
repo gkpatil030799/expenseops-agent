@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from logging.config import fileConfig
 
-from sqlalchemy import engine_from_config, pool
+from sqlalchemy import engine_from_config, pool, text
 
 from alembic import context
 from app import models  # noqa: F401
@@ -18,6 +18,7 @@ settings = get_settings()
 config.set_main_option("sqlalchemy.url", settings.database_url)
 
 target_metadata = Base.metadata
+_MIGRATION_ADVISORY_LOCK_KEY = 0x4558504F5053  # "EXPOPS"
 
 
 def run_migrations_offline() -> None:
@@ -48,6 +49,24 @@ def run_migrations_online() -> None:
         )
 
         with context.begin_transaction():
+            if connection.dialect.name == "postgresql":
+                # One migration transaction per database. A second release
+                # fails immediately instead of racing DDL/data repair or
+                # waiting indefinitely behind a lost deployment.
+                connection.execute(
+                    text("SELECT set_config('lock_timeout', :value, true)"),
+                    {"value": f"{settings.database_lock_timeout_ms}ms"},
+                )
+                connection.execute(
+                    text("SELECT set_config('statement_timeout', :value, true)"),
+                    {"value": f"{settings.database_statement_timeout_ms}ms"},
+                )
+                acquired = connection.scalar(
+                    text("SELECT pg_try_advisory_xact_lock(:key)"),
+                    {"key": _MIGRATION_ADVISORY_LOCK_KEY},
+                )
+                if not acquired:
+                    raise RuntimeError("Another ExpenseOps database migration is already running")
             context.run_migrations()
 
 

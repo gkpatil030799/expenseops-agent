@@ -23,9 +23,7 @@ def enqueue_outbox_event(
     payload: dict[str, Any],
 ) -> OutboxEvent:
     existing = db.scalar(
-        select(OutboxEvent)
-        .execution_options(skip_tenant_scope=True)
-        .where(
+        select(OutboxEvent).where(
             OutboxEvent.workspace_id == workspace_id,
             OutboxEvent.dedupe_key == dedupe_key,
         )
@@ -47,9 +45,7 @@ def enqueue_outbox_event(
             db.flush()
     except IntegrityError:
         existing = db.scalar(
-            select(OutboxEvent)
-            .execution_options(skip_tenant_scope=True)
-            .where(
+            select(OutboxEvent).where(
                 OutboxEvent.workspace_id == workspace_id,
                 OutboxEvent.dedupe_key == dedupe_key,
             )
@@ -70,7 +66,6 @@ def claim_outbox_batch(
     candidates = list(
         db.scalars(
             select(OutboxEvent)
-            .execution_options(skip_tenant_scope=True)
             .where(
                 OutboxEvent.state.in_(("pending", "retry", "in_flight")),
                 OutboxEvent.available_at <= now,
@@ -125,7 +120,6 @@ def replay_dead_outbox_events(
 ) -> int:
     stmt = (
         select(OutboxEvent)
-        .execution_options(skip_tenant_scope=True)
         .where(OutboxEvent.state == "dead")
         .order_by(OutboxEvent.updated_at, OutboxEvent.id)
         .limit(limit)
@@ -177,9 +171,7 @@ def fail_outbox_event(
 
 def _leased_event(db: Session, event_id: int, lease_token: str) -> OutboxEvent | None:
     return db.scalar(
-        select(OutboxEvent)
-        .execution_options(skip_tenant_scope=True)
-        .where(
+        select(OutboxEvent).where(
             OutboxEvent.id == event_id,
             OutboxEvent.state == "in_flight",
             OutboxEvent.lease_token == lease_token,

@@ -48,6 +48,252 @@ jobs:
       - run: pytest -q
       - run: pip-audit --requirement requirements.lock
 
+  postgres-security:
+    runs-on: ubuntu-24.04
+    services:
+      postgres:
+        image: postgres:16.4-bookworm
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: expenseops-admin-test
+          POSTGRES_DB: postgres
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres -d postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    env:
+      ADMIN_DATABASE_URL: postgresql://postgres:expenseops-admin-test@127.0.0.1:5432/postgres
+      ADMIN_FRESH_DATABASE_URL: postgresql://postgres:expenseops-admin-test@127.0.0.1:5432/expenseops_fresh
+      ADMIN_INCREMENTAL_DATABASE_URL: postgresql://postgres:expenseops-admin-test@127.0.0.1:5432/expenseops_incremental
+      MIGRATOR_FRESH_DATABASE_URL: postgresql+psycopg://expenseops_migrator:ci-expenseops-migrator-password-2026@127.0.0.1:5432/expenseops_fresh
+      MIGRATOR_FRESH_PSQL_URL: postgresql://expenseops_migrator:ci-expenseops-migrator-password-2026@127.0.0.1:5432/expenseops_fresh
+      RUNTIME_FRESH_DATABASE_URL: postgresql+psycopg://expenseops_runtime:ci-expenseops-runtime-password-2026@127.0.0.1:5432/expenseops_fresh
+      MIGRATOR_INCREMENTAL_DATABASE_URL: postgresql+psycopg://expenseops_migrator:ci-expenseops-migrator-password-2026@127.0.0.1:5432/expenseops_incremental
+      MIGRATOR_INCREMENTAL_PSQL_URL: postgresql://expenseops_migrator:ci-expenseops-migrator-password-2026@127.0.0.1:5432/expenseops_incremental
+      RUNTIME_INCREMENTAL_DATABASE_URL: postgresql+psycopg://expenseops_runtime:ci-expenseops-runtime-password-2026@127.0.0.1:5432/expenseops_incremental
+      APP_ENV: production
+      APP_SECRET_KEY: 1CwLk4SP7M7b9r0mvJtvXyHaWnBqAvDrMJe7EIHhsa8=
+      APP_SECRET_KEY_VERSION: ci-v1
+      ENABLE_POSTGRES_RLS: "true"
+      RATE_LIMIT_BACKEND: postgres
+      TRUSTED_HOSTS: testserver,localhost,127.0.0.1
+      ENFORCE_HTTPS: "true"
+      SUPPORT_EMAIL: support@example.com
+      TELEGRAM_WEBHOOK_SECRET: release-gate-webhook-secret
+      AUTH_MODE: oidc
+      OIDC_ISSUER: https://identity.example.test
+      OIDC_AUDIENCE: expenseops
+      OIDC_CLIENT_ID: release-gate-client
+      OIDC_REDIRECT_URI: https://expenseops.example.test/auth/callback
+      PLAID_ENV: production
+      AGENT_WRITE_ACTIONS_ENABLED: "false"
+      AGENT_PROACTIVE_ENABLED: "false"
+      AGENT_PURCHASING_ENABLED: "false"
+      RUN_POSTGRES_RELEASE_SECURITY: "1"
+      EXPECTED_RUNTIME_ROLE: expenseops_runtime
+      RLS_TEST_FIRST_WORKSPACE_ID: "1"
+      RLS_TEST_SECOND_WORKSPACE_ID: "900002"
+    steps:
+      - uses: actions/checkout@v4
+      - name: Detect the reviewed tenant-security phase
+        id: tenant-security-phase
+        run: |
+          if test -f alembic/versions/20260815_0029_harden_tenant_rls_policies.py; then
+            echo "hardened=1" >> "$GITHUB_OUTPUT"
+          elif test -f alembic/versions/20260815_0028_tenant_routing_functions.py; then
+            echo "hardened=0" >> "$GITHUB_OUTPUT"
+          else
+            echo "The reviewed tenant-routing migration is missing" >&2
+            exit 1
+          fi
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11.13"
+          cache: pip
+      - run: python -m pip install --requirement requirements.lock
+      - run: python -m pip install --no-deps --editable .
+      - run: python -m pip install pytest==9.0.3
+      - name: Create isolated databases as the bootstrap owner
+        run: |
+          psql "$ADMIN_DATABASE_URL" --set ON_ERROR_STOP=1 <<'SQL'
+          CREATE DATABASE expenseops_fresh OWNER postgres;
+          CREATE DATABASE expenseops_incremental OWNER postgres;
+          SQL
+      - name: Build the legacy PostgreSQL 0023 database before role cutover
+        run: |
+          DATABASE_URL="$ADMIN_INCREMENTAL_DATABASE_URL" \
+            alembic upgrade 20260813_0023
+          psql "$ADMIN_INCREMENTAL_DATABASE_URL" --set ON_ERROR_STOP=1 <<'SQL'
+          INSERT INTO telegram_identities
+            (workspace_id, user_id, telegram_user_id, chat_id, enabled, created_at)
+          VALUES
+            (1, 1, 'ci-older-user', 'ci-older-chat', true, CURRENT_TIMESTAMP),
+            (1, 1, 'ci-newer-user', 'ci-newer-chat', true, CURRENT_TIMESTAMP);
+          SQL
+      - name: Exercise the guarded production role bootstrap on both databases
+        run: |
+          for admin_url in \
+            "$ADMIN_FRESH_DATABASE_URL" "$ADMIN_INCREMENTAL_DATABASE_URL"; do
+            EXPENSEOPS_ADMIN_DATABASE_URL="$admin_url" \
+            EXPENSEOPS_RUNTIME_PASSWORD="ci-expenseops-runtime-password-2026" \
+            EXPENSEOPS_MIGRATOR_PASSWORD="ci-expenseops-migrator-password-2026" \
+              python scripts/bootstrap_database_roles.py --apply
+          done
+      - name: Verify fresh migration to head and schema drift
+        run: |
+          DATABASE_URL="$MIGRATOR_FRESH_DATABASE_URL" alembic upgrade head
+          DATABASE_URL="$MIGRATOR_FRESH_DATABASE_URL" alembic current --check-heads
+          DATABASE_URL="$MIGRATOR_FRESH_DATABASE_URL" \
+            python scripts/bootstrap_database_roles.py --reconcile-runtime-grants
+          DATABASE_URL="$MIGRATOR_FRESH_DATABASE_URL" alembic upgrade head
+          DATABASE_URL="$MIGRATOR_FRESH_DATABASE_URL" alembic check
+      - name: Verify PostgreSQL 0023 to head incremental migration
+        run: |
+          DATABASE_URL="$MIGRATOR_INCREMENTAL_DATABASE_URL" alembic upgrade head
+          DATABASE_URL="$MIGRATOR_INCREMENTAL_DATABASE_URL" alembic current --check-heads
+          DATABASE_URL="$MIGRATOR_INCREMENTAL_DATABASE_URL" \
+            python scripts/bootstrap_database_roles.py --reconcile-runtime-grants
+          DATABASE_URL="$MIGRATOR_INCREMENTAL_DATABASE_URL" alembic upgrade head
+          DATABASE_URL="$MIGRATOR_INCREMENTAL_DATABASE_URL" alembic check
+          test "$(psql "$MIGRATOR_INCREMENTAL_PSQL_URL" --tuples-only --no-align \
+            --command "SELECT count(*) FROM telegram_identities")" = "2"
+          test "$(psql "$MIGRATOR_INCREMENTAL_PSQL_URL" --tuples-only --no-align \
+            --command "SELECT count(*) FROM telegram_identities WHERE enabled")" = "1"
+      - name: Seed two isolated workspaces
+        run: |
+          for database_url in \
+            "$MIGRATOR_FRESH_PSQL_URL" "$MIGRATOR_INCREMENTAL_PSQL_URL"; do
+            psql "$database_url" --set ON_ERROR_STOP=1 <<'SQL'
+          INSERT INTO users
+            (id, email, display_name, status, created_at, updated_at)
+          VALUES
+            (900002, 'ci-rls-second@example.test', 'CI RLS second', 'active',
+             CURRENT_TIMESTAMP, CURRENT_TIMESTAMP);
+          INSERT INTO workspaces
+            (id, name, workspace_type, created_by_user_id, created_at, updated_at)
+          VALUES
+            (900002, 'CI RLS second', 'personal', 900002,
+             CURRENT_TIMESTAMP, CURRENT_TIMESTAMP);
+          INSERT INTO workspace_memberships
+            (workspace_id, user_id, role, is_default, created_at)
+          VALUES
+            (900002, 900002, 'owner', true, CURRENT_TIMESTAMP);
+          INSERT INTO scheduled_job_leases
+            (workspace_id, job_name, lease_token, lease_expires_at, acquired_at, updated_at)
+          VALUES
+            (1, 'ci-rls-first', 'first', CURRENT_TIMESTAMP,
+             CURRENT_TIMESTAMP, CURRENT_TIMESTAMP),
+            (900002, 'ci-rls-second', 'second', CURRENT_TIMESTAMP,
+             CURRENT_TIMESTAMP, CURRENT_TIMESTAMP);
+          INSERT INTO household_items
+            (id, workspace_id, name, replenishment_mode, cadence_days, enabled,
+             created_at, updated_at)
+          VALUES
+            (900011, 1, 'CI first household item', 'either', 30, true,
+             CURRENT_TIMESTAMP, CURRENT_TIMESTAMP),
+            (900012, 900002, 'CI second household item', 'either', 30, true,
+             CURRENT_TIMESTAMP, CURRENT_TIMESTAMP);
+          INSERT INTO household_item_aliases
+            (id, household_item_id, merchant_normalized, raw_pattern,
+             normalized_alias, confidence, source, created_at)
+          VALUES
+            (900011, 900011, 'ci-first', 'CI first alias', 'ci-first-alias',
+             1.0, 'user', CURRENT_TIMESTAMP),
+            (900012, 900012, 'ci-second', 'CI second alias', 'ci-second-alias',
+             1.0, 'user', CURRENT_TIMESTAMP);
+          INSERT INTO purchase_receipts
+            (id, workspace_id, source, source_external_id, currency, parse_status,
+             created_at, updated_at)
+          VALUES
+            (900021, 1, 'ci', 'ci-first-receipt', 'USD', 'confirmed',
+             CURRENT_TIMESTAMP, CURRENT_TIMESTAMP),
+            (900022, 900002, 'ci', 'ci-second-receipt', 'USD', 'confirmed',
+             CURRENT_TIMESTAMP, CURRENT_TIMESTAMP);
+          INSERT INTO purchase_receipt_items
+            (id, receipt_id, raw_name, normalized_name, household_item_id,
+             match_status, created_at, updated_at)
+          VALUES
+            (900021, 900021, 'CI first receipt item', 'ci-first-receipt-item',
+             900011, 'matched', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP),
+            (900022, 900022, 'CI second receipt item', 'ci-second-receipt-item',
+             900012, 'matched', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP);
+          INSERT INTO promotion_messages
+            (id, workspace_id, gmail_message_id, subject, received_at,
+             gmail_label_snapshot, parse_status, created_at, updated_at)
+          VALUES
+            (900031, 1, 'ci-first-promotion-message', 'CI first promotion',
+             CURRENT_TIMESTAMP, '[]'::json, 'parsed', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP),
+            (900032, 900002, 'ci-second-promotion-message', 'CI second promotion',
+             CURRENT_TIMESTAMP, '[]'::json, 'parsed', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP);
+          INSERT INTO promotion_offers
+            (id, workspace_id, promotion_message_id, merchant_raw,
+             merchant_normalized, primary_category, secondary_categories,
+             offer_type, headline, expiry_precision, confidence, trust_status,
+             status, campaign_fingerprint, score, score_breakdown_json, saved,
+             source_message_ids, created_at, updated_at)
+          VALUES
+            (900031, 1, 900031, 'CI first merchant', 'ci-first-merchant', 'Other',
+             '[]'::json, 'other', 'CI first offer', 'unknown', 1.0, 'trusted',
+             'active', 'ci-first-campaign', 100.0, '{}'::json, false, '[]'::json,
+             CURRENT_TIMESTAMP, CURRENT_TIMESTAMP),
+            (900032, 900002, 900032, 'CI second merchant', 'ci-second-merchant',
+             'Other', '[]'::json, 'other', 'CI second offer', 'unknown', 1.0,
+             'trusted', 'active', 'ci-second-campaign', 100.0, '{}'::json, false,
+             '[]'::json, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP);
+          INSERT INTO promotion_feedback
+            (id, promotion_offer_id, feedback_type, occurred_at, metadata_json, created_at)
+          VALUES
+            (900031, 900031, 'saved', CURRENT_TIMESTAMP, '{}'::json, CURRENT_TIMESTAMP),
+            (900032, 900032, 'saved', CURRENT_TIMESTAMP, '{}'::json, CURRENT_TIMESTAMP);
+          INSERT INTO errands
+            (id, workspace_id, title, errand_type, place_resolution_status,
+             priority, status, source, included_in_next_plan, created_at, updated_at)
+          VALUES
+            (900041, 1, 'CI first errand', 'purchase', 'unresolved', 'normal',
+             'open', 'manual', true, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP),
+            (900042, 900002, 'CI second errand', 'purchase', 'unresolved', 'normal',
+             'open', 'manual', true, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP);
+          INSERT INTO errand_household_items
+            (id, errand_id, household_item_id, created_at)
+          VALUES
+            (900041, 900041, 900011, CURRENT_TIMESTAMP),
+            (900042, 900042, 900012, CURRENT_TIMESTAMP);
+          INSERT INTO errand_plans
+            (id, workspace_id, status, routing_provider, routing_is_optimized,
+             estimated_stop_minutes, planning_mode, created_at, updated_at)
+          VALUES
+            (900051, 1, 'planned', 'deterministic_fallback', false, 0, 'standard',
+             CURRENT_TIMESTAMP, CURRENT_TIMESTAMP),
+            (900052, 900002, 'planned', 'deterministic_fallback', false, 0,
+             'standard', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP);
+          INSERT INTO errand_plan_stops
+            (id, plan_id, stop_order, place_name, created_at)
+          VALUES
+            (900051, 900051, 1, 'CI first stop', CURRENT_TIMESTAMP),
+            (900052, 900052, 1, 'CI second stop', CURRENT_TIMESTAMP);
+          INSERT INTO errand_plan_stop_errands
+            (id, stop_id, errand_id, created_at)
+          VALUES
+            (900061, 900051, 900041, CURRENT_TIMESTAMP),
+            (900062, 900052, 900042, CURRENT_TIMESTAMP);
+          INSERT INTO errand_plan_stop_household_items
+            (id, stop_id, household_item_id, reason, created_at)
+          VALUES
+            (900071, 900051, 900011, 'CI first link', CURRENT_TIMESTAMP),
+            (900072, 900052, 900012, 'CI second link', CURRENT_TIMESTAMP);
+          SQL
+          done
+      - name: Exercise readiness and cross-workspace RLS as runtime
+        run: |
+          EXPECTED_HARDENED_RLS="${{ steps.tenant-security-phase.outputs.hardened }}" \
+            DATABASE_URL="$RUNTIME_FRESH_DATABASE_URL" \
+            pytest -q tests/test_postgres_release_security.py
+          EXPECTED_HARDENED_RLS="${{ steps.tenant-security-phase.outputs.hardened }}" \
+            DATABASE_URL="$RUNTIME_INCREMENTAL_DATABASE_URL" \
+            pytest -q tests/test_postgres_release_security.py
+
   frontend:
     runs-on: ubuntu-24.04
     defaults:

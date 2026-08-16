@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from fastapi import HTTPException
 from sqlalchemy import event, select, text
 from sqlalchemy.orm import Session, with_loader_criteria
+from sqlalchemy.sql import Select
 
 from app.models import TenantScoped, User, Workspace, WorkspaceMembership
 
@@ -138,12 +139,51 @@ def set_trusted_workspace(db: Session, workspace_id: int) -> None:
 
 
 def clear_session_tenant(db: Session) -> None:
+    """Clear application tenant context without granting database-wide access.
+
+    Tenant-scoped rows are intentionally invisible while no workspace is set.
+    Callers that need to discover a tenant from a trusted external identifier
+    must use :func:`find_tenant_row_across_workspaces`, which evaluates the
+    lookup under one concrete workspace at a time.
+    """
     if not hasattr(db, "info"):
         return
     db.info.pop("user_id", None)
     db.info.pop("workspace_id", None)
-    db.info["trusted_global_scope"] = True
-    _set_database_bypass(db, enabled=True)
+    db.info.pop("trusted_global_scope", None)
+    _clear_database_workspace(db)
+
+
+def workspace_ids(db: Session) -> list[int]:
+    """Return trusted workspace identifiers from the non-tenant directory."""
+    return list(db.scalars(select(Workspace.id).order_by(Workspace.id)))
+
+
+def find_tenant_row_across_workspaces(db: Session, statement: Select):
+    """Resolve one tenant row without ever enabling a global RLS bypass.
+
+    The statement must target a ``TenantScoped`` model and should contain a
+    selective, server-owned predicate. The session is left scoped to the
+    matching workspace so the caller can safely continue the operation.
+    """
+    clear_session_tenant(db)
+    known_workspace_ids = workspace_ids(db)
+    for workspace_id in known_workspace_ids:
+        set_trusted_workspace(db, workspace_id)
+        row = db.scalar(statement)
+        if row is not None:
+            return row
+    # Legacy SQLite fixtures can contain tenant rows created before the
+    # workspace directory was seeded. SQLite has no PostgreSQL RLS to bypass,
+    # so a direct fallback keeps local migration/test compatibility without
+    # weakening the production path.
+    if not known_workspace_ids and db.get_bind().dialect.name != "postgresql":
+        row = db.scalar(statement)
+        if row is not None:
+            set_trusted_workspace(db, row.workspace_id)
+            return row
+    clear_session_tenant(db)
+    return None
 
 
 def _set_database_workspace(db: Session, workspace_id: int) -> None:
@@ -157,26 +197,22 @@ def _set_database_workspace(db: Session, workspace_id: int) -> None:
     )
 
 
-def _set_database_bypass(db: Session, *, enabled: bool) -> None:
+def _clear_database_workspace(db: Session) -> None:
     bind = db.get_bind()
     if bind.dialect.name != "postgresql":
         return
-    db.execute(
-        text("SELECT set_config('expenseops.bypass_rls', :value, true)"),
-        {"value": "on" if enabled else "off"},
-    )
+    db.execute(text("SELECT set_config('expenseops.bypass_rls', 'off', true)"))
+    db.execute(text("SELECT set_config('expenseops.workspace_id', '', true)"))
 
 
 @event.listens_for(Session, "after_begin")
 def _restore_database_workspace(session: Session, _transaction, connection) -> None:
     workspace_id = session.info.get("workspace_id")
-    trusted_global_scope = session.info.get("trusted_global_scope")
     if connection.dialect.name != "postgresql":
         return
-    if trusted_global_scope:
-        connection.execute(text("SELECT set_config('expenseops.bypass_rls', 'on', true)"))
-        return
     if workspace_id is None:
+        connection.execute(text("SELECT set_config('expenseops.bypass_rls', 'off', true)"))
+        connection.execute(text("SELECT set_config('expenseops.workspace_id', '', true)"))
         return
     connection.execute(text("SELECT set_config('expenseops.bypass_rls', 'off', true)"))
     connection.execute(
