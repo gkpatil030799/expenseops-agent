@@ -324,119 +324,28 @@ jobs:
           RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
         run: |
           set -Eeuo pipefail
-          pitr_status=""
-          pitr_safe=false
-          for attempt in 1 2 3 4 5 6
-          do
-            base_safe=false
-            coverage_safe=false
-            freshness_safe=false
-            if pitr_status="$(railway postgres pitr status \
-              --project "${RAILWAY_PROJECT_ID}" \
-              --environment "${RAILWAY_PRODUCTION_ENVIRONMENT_ID}" \
-              --service "${RAILWAY_POSTGRES_SERVICE_ID}" \
-              --json)"
-            then
-              if jq --exit-status '
-                .enabled == true
-                and .bucketWired == true
-                and ((.blockers // []) | length == 0)
-                and .live.available == true
-                and (.live.archiverError == null)
-                and .live.archiverHealthy == true
-                and ((.live.archiverLastArchivedAt // "") | length > 0)
-                and ((.live.maxRestoreTime // "") | length > 0)
-              ' <<<"${pitr_status}" >/dev/null
-              then
-                base_safe=true
-              fi
-              if jq --exit-status '
-                .live.backupCoverageError == null
-                or (
-                  (.live.backupCoverageError | type) == "string"
-                  and (
-                    .live.backupCoverageError
-                    | sub("[[:space:]]+$"; "")
-                  ) == "SSH command failed (exit exit status: 31):"
-                )
-              ' <<<"${pitr_status}" >/dev/null
-              then
-                coverage_safe=true
-              fi
-              if PITR_ARCHIVED_AT="$(jq -r '.live.archiverLastArchivedAt // ""' \
-                <<<"${pitr_status}")" \
-              PITR_RESTORE_AT="$(jq -r '.live.maxRestoreTime // ""' \
-                <<<"${pitr_status}")" \
-              python - <<'PY'
-          import os
-          from datetime import UTC, datetime, timedelta
-
-          now = datetime.now(UTC)
-          valid = True
-          for name in ("PITR_ARCHIVED_AT", "PITR_RESTORE_AT"):
-              raw = os.environ[name].strip().replace("Z", "+00:00")
-              try:
-                  value = datetime.fromisoformat(raw)
-              except ValueError:
-                  valid = False
-                  continue
-              if value.tzinfo is None:
-                  valid = False
-                  continue
-              age = now - value.astimezone(UTC)
-              if age < -timedelta(minutes=5) or age > timedelta(minutes=15):
-                  valid = False
-          raise SystemExit(0 if valid else 1)
-          PY
-              then
-                freshness_safe=true
-              fi
-            fi
-            if [[ "${base_safe}" == "true" \
-              && "${coverage_safe}" == "true" \
-              && "${freshness_safe}" == "true" ]]
-            then
-              pitr_safe=true
-              break
-            fi
-            if [[ "${attempt}" != "6" ]]; then
-              sleep 10
-            fi
-          done
+          pitr_status="$(railway postgres pitr status \
+            --project "${RAILWAY_PROJECT_ID}" \
+            --environment "${RAILWAY_PRODUCTION_ENVIRONMENT_ID}" \
+            --service "${RAILWAY_POSTGRES_SERVICE_ID}" \
+            --json)"
           unset RAILWAY_TOKEN
-          if [[ "${pitr_safe}" != "true" ]]; then
-            echo "Railway PITR status remained unsafe after bounded retries." >&2
-            if [[ -n "${pitr_status}" ]]; then
-              jq --compact-output '
-                {
-                  enabled: (.enabled == true),
-                  bucketWired: (.bucketWired == true),
-                  blockersClear: (((.blockers // []) | length) == 0),
-                  liveAvailable: (.live.available == true),
-                  archiverHealthy: (.live.archiverHealthy == true),
-                  archiverErrorClear: (.live.archiverError == null),
-                  archivedAt: (.live.archiverLastArchivedAt // null),
-                  restoreAt: (.live.maxRestoreTime // null),
-                  coverageErrorRecognized: (
-                    .live.backupCoverageError == null
-                    or (
-                      (.live.backupCoverageError | type) == "string"
-                      and (
-                        .live.backupCoverageError
-                        | sub("[[:space:]]+$"; "")
-                      ) == "SSH command failed (exit exit status: 31):"
-                    )
-                  )
-                }
-              ' <<<"${pitr_status}" >&2
-            fi
-            exit 1
-          fi
-          if [[ -n "$(jq -r '.live.backupCoverageError // ""' <<<"${pitr_status}")" ]]
-          then
-            echo "Railway PITR WAL archiving is live, but the CLI root-probe bug leaves base-backup coverage unproven; the exact logical restore below is the primary release recovery gate."
-          fi
-          unset pitr_status pitr_safe base_safe coverage_safe freshness_safe
+          jq --exit-status '
+            .enabled == true
+            and .bucketWired == true
+            and ((.blockers // []) | length == 0)
+          ' <<<"${pitr_status}" >/dev/null
+          jq --compact-output '
+            {
+              enabled: (.enabled == true),
+              bucketWired: (.bucketWired == true),
+              blockersClear: (((.blockers // []) | length) == 0),
+              liveProbeAvailable: (.live.available == true),
+              archiverHealthyWhenProbed: (.live.archiverHealthy == true)
+            }
+          ' <<<"${pitr_status}"
+          echo "Railway's SSH-based PITR live probe is informational under project-token authentication; the fresh encrypted PostgreSQL 18 restore below is the fail-closed recovery gate."
+          unset pitr_status
 
       - name: Resolve the selected production Postgres target without database secrets
         env:

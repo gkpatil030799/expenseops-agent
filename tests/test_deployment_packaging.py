@@ -245,14 +245,10 @@ def test_production_release_preflights_topology_hobby_recovery_and_credentials()
     assert ".enabled == true" in recovery
     assert ".bucketWired == true" in recovery
     assert "((.blockers // []) | length == 0)" in recovery
-    assert ".live.available == true" in recovery
-    assert ".live.archiverHealthy == true" in recovery
-    assert ".live.archiverError == null" in recovery
-    assert "for attempt in 1 2 3 4 5 6" in recovery
-    assert "sleep 10" in recovery
-    assert "timedelta(minutes=15)" in recovery
-    assert "Railway PITR status remained unsafe after bounded retries." in recovery
-    assert '"SSH command failed (exit exit status: 31):"' in recovery
+    assert "liveProbeAvailable: (.live.available == true)" in recovery
+    assert "archiverHealthyWhenProbed: (.live.archiverHealthy == true)" in recovery
+    assert "PITR live probe is informational under project-token" in recovery
+    assert "fresh encrypted PostgreSQL 18 restore below is the fail-closed" in recovery
     assert "railway ssh" not in pitr_recovery
     assert "railway postgres pitr backup list" not in workflow
     assert "railway postgres pitr schedule list" not in workflow

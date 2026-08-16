@@ -4,9 +4,9 @@
 **Recovery objectives:** the proven logical-backup RPO is the latest successful
 release artifact; there is no bounded logical RPO between approved production
 releases. Ciphertext release artifacts are retained for **90 days**. Railway
-PITR is defense in depth with a near-current WAL target of **5 minutes** and a
-strict **15-minute** release freshness gate, but it is not credited as a proven
-restore path on the current Hobby setup. Target RTO is **4 hours**.
+PITR is enabled as defense in depth, but its Railway SSH-based live probe is
+not available to the project-scoped release token and it is not credited as a
+proven restore path on the current Hobby setup. Target RTO is **4 hours**.
 **Status:** every release must pass the isolated PostgreSQL 18 logical restore
 gate. The launch gate remains open until its artifact evidence and the alert
 delivery test are recorded against the release revision.
@@ -28,13 +28,13 @@ oldest permitted application rollback target. Never downgrade `0029`.
    must preserve the standalone compatibility and hardening commits; do not
    squash this cutover PR. Use a merge commit, or another non-squashing method
    that preserves both reviewed SHAs on `main`.
-2. Enable Railway PITR and wait until it is enabled and bucket-wired with no
-   blockers, reports available live status, has a healthy archiver, and reports
-   both its latest archived WAL time and maximum restore time no more than 15
-   minutes old. Treat PITR as a secondary layer, not the release's restore
-   proof. On the current Railway Hobby setup, managed volume-backup schedules
-   and a safe sibling-service PITR restore are unavailable; do not claim a
-   daily snapshot schedule or completed PITR drill.
+2. Enable Railway PITR and require it to remain enabled, bucket-wired, and free
+   of configuration blockers. Treat its project-token live-probe fields as
+   informational because Railway obtains them through an SSH capability the
+   release token does not have. PITR is a secondary layer, not the release's
+   restore proof. On the current Railway Hobby setup, managed volume-backup
+   schedules and a safe sibling-service PITR restore are unavailable; do not
+   claim live coverage, a daily snapshot schedule, or a completed PITR drill.
 3. Before the one-time role bootstrap mutates privileges, create an
    authenticated encrypted logical backup with the Railway PostgreSQL operator
    credential, retain no plaintext copy, and prove offline decryption plus an
@@ -94,8 +94,9 @@ oldest permitted application rollback target. Never downgrade `0029`.
     the exact compatibility SHA. The protected `production` environment must
     require approval. Never use direct `railway up` or a GitHub-push deployment
     for production. There is no operator-supplied backup ID: before any Railway
-    upload, the workflow requires healthy/fresh PITR and independently creates
-    and restore-validates a new logical backup through `expenseops_backup`.
+    upload, the workflow verifies that PITR remains configured and independently
+    creates and restore-validates a new logical backup through
+    `expenseops_backup`.
 12. Only after the restore matches the source snapshot does the workflow
     package the dump, source/restored manifests, and recovery metadata, then
     encrypt that bundle using authenticated CMS AES-256-GCM to the approved
@@ -268,13 +269,12 @@ does not create a schedule. An ad hoc manual `pg_dump` is not equivalent
 release evidence.
 
 Keep PITR enabled as defense in depth. Every release requires it to be enabled,
-bucket-wired, blocker-free, live, and archiver-healthy, with the latest archived
-WAL and maximum restore timestamps no more than 15 minutes old. The Railway CLI
-may return the single known root-level pgBackRest coverage-probe exit-31 error
-even while those independent live fields are healthy. The workflow accepts
-only that exact error or no error and rejects every other coverage error. This
-narrow allowance does not count as backup-set or restore proof; the logical
-restore gate remains primary.
+bucket-wired, and blocker-free. The protected workflow records the SSH-derived
+live and archiver booleans as telemetry, but does not treat them as release
+proof because project-token authentication cannot perform Railway's live SSH
+probe. This does not count as backup-set or restore proof; the fresh encrypted
+logical backup and exact isolated PostgreSQL 18 restore remain the fail-closed
+recovery gate.
 
 PITR documentation: <https://docs.railway.com/volumes/point-in-time-recovery>
 
