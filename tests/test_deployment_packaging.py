@@ -287,8 +287,14 @@ def test_production_release_preflights_topology_hobby_recovery_and_credentials()
     assert "SELECT pg_export_snapshot()" in recovery
     assert '"--format=custom"' in recovery
     assert 'f"--snapshot={snapshot}"' in recovery
-    assert 'environment["PGDATABASE"] = database_url' in recovery
-    assert '"--env",\n                  "PGDATABASE"' in recovery
+    assert 'environment["PGHOST"] = host' in recovery
+    assert 'environment["PGPORT"] = str(parsed.port or 5432)' in recovery
+    assert 'environment["PGDATABASE"] = database' in recovery
+    assert 'environment["PGUSER"] = username' in recovery
+    assert 'environment["PGPASSWORD"] = password' in recovery
+    assert 'environment["PGSSLMODE"] = parameters["sslmode"]' in recovery
+    assert 'environment["PGDATABASE"] = database_url' not in recovery
+    assert 'for item in ("--env", variable)' in recovery
     assert 'f"--dbname={source_url}"' not in recovery
     assert "source_rows = row_manifest(source, relations)" in recovery
     assert "APPLICATION_TABLES = frozenset(" in recovery

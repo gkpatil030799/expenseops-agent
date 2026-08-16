@@ -726,19 +726,49 @@ jobs:
               arguments: list[str],
               recovery_dir: Path,
           ) -> None:
+              parsed = urlsplit(database_url)
+              host = parsed.hostname or ""
+              database = unquote(parsed.path.removeprefix("/"))
+              username = unquote(parsed.username or "")
+              password = unquote(parsed.password or "")
+              if not host or not database or not username or not password:
+                  raise RecoveryGateError(
+                      "The PostgreSQL client URL is missing a connection component."
+                  )
+              parameters = {
+                  key.casefold(): value
+                  for key, value in parse_qsl(parsed.query, keep_blank_values=True)
+              }
               environment = os.environ.copy()
-              environment["PGDATABASE"] = database_url
+              environment["PGHOST"] = host
+              environment["PGPORT"] = str(parsed.port or 5432)
+              environment["PGDATABASE"] = database
+              environment["PGUSER"] = username
+              environment["PGPASSWORD"] = password
               environment["PGCONNECT_TIMEOUT"] = "15"
+              if "sslmode" in parameters:
+                  environment["PGSSLMODE"] = parameters["sslmode"]
+              client_variables = [
+                  "PGHOST",
+                  "PGPORT",
+                  "PGDATABASE",
+                  "PGUSER",
+                  "PGPASSWORD",
+                  "PGCONNECT_TIMEOUT",
+              ]
+              if "PGSSLMODE" in environment:
+                  client_variables.append("PGSSLMODE")
               command = [
                   "docker",
                   "run",
                   "--rm",
                   "--network",
                   "host",
-                  "--env",
-                  "PGDATABASE",
-                  "--env",
-                  "PGCONNECT_TIMEOUT",
+                  *[
+                      item
+                      for variable in client_variables
+                      for item in ("--env", variable)
+                  ],
                   "--volume",
                   f"{recovery_dir}:/recovery",
                   os.environ["POSTGRES_CLIENT_IMAGE"],
