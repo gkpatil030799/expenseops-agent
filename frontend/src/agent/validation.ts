@@ -163,6 +163,125 @@ function parseSupportedBlock(value: unknown): void {
         requireBoolean(transaction.pending);
       });
       return;
+    case "replenishment_summary":
+      requireString(block.title, 160);
+      requireNonNegativeInteger(block.total_count);
+      requireBoolean(block.items_truncated);
+      if (!Array.isArray(block.items) || block.items.length > 50) throw new AgentProtocolError();
+      block.items.forEach((item) => {
+        const row = requireRecord(item);
+        requireString(row.public_id, 128);
+        requireString(row.name, 255);
+        requireNullableString(row.predicted_due_on, 32);
+        requireNullableNumberRange(row.confidence, 0, 1);
+        requireOneOf(row.confidence_level, ["insufficient", "low", "medium", "high"]);
+        requireOneOf(row.evidence_basis, [
+          "configured_cadence",
+          "purchase_pattern",
+          "validated_model",
+          "insufficient_history",
+        ]);
+        requireOneOf(row.due_state, ["likely_due", "probably_due", "not_due", "learning"]);
+        requireNullableString(row.reason, 500);
+        requireNullableString(row.quantity, 64);
+        requireNullableString(row.unit, 64);
+        requireNullableString(row.last_acquired_on, 32);
+        requireNonNegativeInteger(row.confirmed_acquisition_count);
+      });
+      if (!Array.isArray(block.acquisition_history) || block.acquisition_history.length > 20) {
+        throw new AgentProtocolError();
+      }
+      requireBoolean(block.acquisition_history_truncated);
+      block.acquisition_history.forEach((item) => {
+        const row = requireRecord(item);
+        requireString(row.acquired_on, 32);
+        requireNullableString(row.merchant, 255);
+        requireNullableFiniteNumber(row.quantity);
+        requireNullableString(row.unit, 64);
+        requireOneOf(row.evidence_type, ["manual", "receipt", "transaction", "imported", "correction"]);
+      });
+      return;
+    case "receipt_summary":
+      requireString(block.public_id, 128);
+      requireNullableString(block.merchant, 255);
+      requireNullableString(block.purchased_at, 128);
+      requireNullableString(block.ingested_at, 128);
+      requireNullableIntegerValue(block.total_cents);
+      requireString(block.currency_code, 8);
+      requireString(block.status, 64);
+      requireBoolean(block.transaction_linked);
+      requireNonNegativeInteger(block.matched_line_count);
+      requireNonNegativeInteger(block.ignored_line_count);
+      requireNonNegativeInteger(block.unmatched_line_count);
+      requireNonNegativeInteger(block.total_line_count);
+      requireBoolean(block.items_truncated);
+      if (!Array.isArray(block.items) || block.items.length > 100) throw new AgentProtocolError();
+      block.items.forEach((item) => {
+        const row = requireRecord(item);
+        requireString(row.name, 500);
+        requireNullableFiniteNumber(row.quantity);
+        requireNullableString(row.unit, 64);
+        requireNullableIntegerValue(row.line_total_cents);
+        requireOneOf(row.match_status, ["matched", "possible", "unmatched", "ignored"]);
+        requireNullableString(row.household_item_name, 255);
+        requireBoolean(row.confirmed_acquisition);
+      });
+      return;
+    case "deal_list":
+      requireString(block.title, 160);
+      requireNonNegativeInteger(block.total_count);
+      if (!Array.isArray(block.deals) || block.deals.length > 50) throw new AgentProtocolError();
+      block.deals.forEach((item) => {
+        const row = requireRecord(item);
+        requireString(row.public_id, 128);
+        requireString(row.merchant, 255);
+        requireString(row.headline, 500);
+        requireNullableString(row.expires_at, 128);
+        requireNullableNumberRange(row.score, 0, 100);
+        requireNullableString(row.category, 64);
+        requireNullableString(row.offer_type, 32);
+        requireNullableNumberRange(row.percent_off, 0, 100);
+        requireNullableNonNegativeInteger(row.amount_off_cents);
+        requireNullableString(row.currency_code, 8);
+        requireNullableNonNegativeInteger(row.minimum_spend_cents);
+        requireNullableString(row.promo_code, 128);
+        requireOneOf(row.trust_status, ["trusted", "review"]);
+        requireBoolean(row.saved);
+        requireBoolean(row.relevant_to_need);
+        requireStringArray(row.relevance_reasons, 5, 160);
+      });
+      return;
+    case "errand_summary":
+      requireString(block.title, 160);
+      requireNonNegativeInteger(block.total_count);
+      requireBoolean(block.errands_truncated);
+      if (!Array.isArray(block.errands) || block.errands.length > 50) throw new AgentProtocolError();
+      block.errands.forEach(parseErrand);
+      if (block.plan !== null && block.plan !== undefined) parseErrandPlan(block.plan);
+      return;
+    case "integration_status":
+      requireString(block.title, 160);
+      if (!Array.isArray(block.integrations) || block.integrations.length > 25) {
+        throw new AgentProtocolError();
+      }
+      block.integrations.forEach((item) => {
+        const row = requireRecord(item);
+        requireString(row.provider, 64);
+        if (row.scope !== null && row.scope !== undefined) {
+          requireOneOf(row.scope, ["personal", "workspace", "application"]);
+        }
+        requireOneOf(row.status, [
+          "connected",
+          "ready",
+          "attention_required",
+          "disconnected",
+          "disabled",
+          "unavailable",
+        ]);
+        requireNullableString(row.message, 500);
+        requireNullableString(row.last_successful_sync_at, 128);
+      });
+      return;
     case "error":
       requireString(block.code, 100);
       requireString(block.title, 160);
@@ -198,6 +317,45 @@ function parseBreakdowns(value: unknown): void {
     if (row.previous_amount_cents !== null && row.previous_amount_cents !== undefined) {
       requireInteger(row.previous_amount_cents);
     }
+  });
+}
+
+function parseErrand(value: unknown): void {
+  const row = requireRecord(value);
+  requireString(row.public_id, 128);
+  requireString(row.title, 255);
+  requireString(row.status, 64);
+  requireString(row.priority, 32);
+  requireString(row.errand_type, 32);
+  requireNullableString(row.due_on, 32);
+  requireNullableString(row.place_name, 255);
+  requireString(row.place_resolution_status, 32);
+  requireBoolean(row.included_in_next_plan);
+  requireStringArray(row.household_items, 20, 255);
+}
+
+function parseErrandPlan(value: unknown): void {
+  const plan = requireRecord(value);
+  requireString(plan.public_id, 128);
+  requireString(plan.status, 32);
+  requireNullableString(plan.planned_for, 128);
+  requireBoolean(plan.is_stale);
+  requireNullableString(plan.stale_reason, 255);
+  requireNonNegativeInteger(plan.estimated_stop_minutes);
+  requireNullableNonNegativeInteger(plan.travel_duration_minutes);
+  requireNullableNonNegativeInteger(plan.distance_meters);
+  requireNonNegativeInteger(plan.total_stop_count);
+  requireBoolean(plan.stops_truncated);
+  if (!Array.isArray(plan.stops) || plan.stops.length > 12) throw new AgentProtocolError();
+  plan.stops.forEach((item) => {
+    const stop = requireRecord(item);
+    requireNonNegativeInteger(stop.order);
+    if (stop.order === 0) throw new AgentProtocolError();
+    requireString(stop.place_name, 255);
+    requireStringArray(stop.errands, 20, 255);
+    requireBoolean(stop.errands_truncated);
+    requireStringArray(stop.household_items, 20, 255);
+    requireBoolean(stop.household_items_truncated);
   });
 }
 
@@ -244,6 +402,16 @@ function requireNullableInteger(value: unknown): void {
   requireNonNegativeInteger(value);
 }
 
+function requireNullableIntegerValue(value: unknown): void {
+  if (value === null || value === undefined) return;
+  requireInteger(value);
+}
+
+function requireNullableNonNegativeInteger(value: unknown): void {
+  if (value === null || value === undefined) return;
+  requireNonNegativeInteger(value);
+}
+
 function requireFiniteNumber(value: unknown): void {
   if (typeof value !== "number" || !Number.isFinite(value)) throw new AgentProtocolError();
 }
@@ -253,11 +421,31 @@ function requireNullableFiniteNumber(value: unknown): void {
   requireFiniteNumber(value);
 }
 
+function requireNullableNumberRange(value: unknown, minimum: number, maximum: number): void {
+  if (value === null || value === undefined) return;
+  requireFiniteNumber(value);
+  if ((value as number) < minimum || (value as number) > maximum) {
+    throw new AgentProtocolError();
+  }
+}
+
 function requireStringArray(value: unknown, maxItems: number, maxLength: number): void {
   if (!Array.isArray(value) || value.length > maxItems) throw new AgentProtocolError();
   value.forEach((item) => requireString(item, maxLength));
 }
 
 function requireToolActivity(value: unknown): void {
-  if (value !== "spending" && value !== "transactions") throw new AgentProtocolError();
+  requireOneOf(value, [
+    "spending",
+    "transactions",
+    "replenishment",
+    "receipts",
+    "deals",
+    "errands",
+    "integrations",
+  ]);
+}
+
+function requireOneOf(value: unknown, allowed: readonly string[]): void {
+  if (typeof value !== "string" || !allowed.includes(value)) throw new AgentProtocolError();
 }

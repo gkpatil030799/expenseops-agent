@@ -245,7 +245,7 @@ export default function AgentExperience({
             }}
             rows={1}
             disabled={controller.sending || controller.conversationBusy}
-            placeholder="Ask about spending or transactions"
+            placeholder="Ask about spending, household, receipts, deals, or errands"
             className="max-h-32 min-h-11 min-w-0 flex-1 resize-none bg-transparent px-2 py-2.5 text-base leading-6 text-slate-950 outline-none placeholder:text-slate-500 disabled:opacity-60 sm:text-sm"
           />
           <Button
@@ -341,7 +341,9 @@ function AgentWelcome({
 }) {
   const prompts = [
     "How much did I spend last month?",
-    "Show my recent transactions",
+    "What household items might I need this week?",
+    "Which receipts need my attention?",
+    "Do I have deals relevant to things I need?",
   ];
   return (
     <div className="mx-auto flex min-h-[22rem] max-w-sm flex-col items-center justify-center px-3 text-center">
@@ -350,7 +352,8 @@ function AgentWelcome({
       </span>
       <h2 className="mt-4 text-xl font-semibold text-slate-950">Ask ExpenseOps</h2>
       <p className="mt-2 text-sm leading-6 text-slate-600">
-        Explore grounded spending insights and find transactions without changing your data.
+        Explore grounded ExpenseOps data across spending, household, receipts, deals, errands, and
+        integrations without changing anything.
       </p>
       <div className="mt-5 grid w-full gap-2">
         {prompts.map((prompt) => (

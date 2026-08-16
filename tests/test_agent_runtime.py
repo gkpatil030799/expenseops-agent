@@ -574,6 +574,12 @@ def test_adversarial_merchant_text_remains_inert_tool_data(agent_runtime_db):
         "Split this purchase with Rahul in Splitwise",
         "Delete this transaction",
         "Buy groceries for me",
+        "Mark detergent as bought",
+        "Create paper towels as a staple",
+        "Map this receipt line to milk",
+        "Save this Target deal",
+        "Complete my Aldi errand",
+        "Re-plan the route",
     ],
 )
 def test_consequential_requests_do_not_call_provider_or_mutate_domain_data(
@@ -1224,3 +1230,72 @@ def test_runtime_error_class_preserves_only_stable_error_contract() -> None:
         "Safe message",
         True,
     )
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Show me the plan for my next trip.",
+        "What is the match status for this receipt?",
+        "Which receipt lines matched household items?",
+    ],
+)
+def test_day4_read_intents_are_not_misclassified_as_writes(text: str) -> None:
+    assert runtime_module._is_consequential_request(text) is False
+
+
+def test_errand_grounding_preserves_every_bounded_row_and_plan_truncation() -> None:
+    rows = [
+        {
+            "public_id": str(index),
+            "title": f"Errand {index}",
+            "errand_type": "other",
+            "status": "open",
+            "priority": "normal",
+            "due_on": None,
+            "included_in_next_plan": True,
+            "place_resolution_status": "resolved",
+            "resolved_place_name": f"Stop {index}",
+            "household_items": [],
+        }
+        for index in range(1, 26)
+    ]
+    response = runtime_module._errand_response(
+        {
+            "errands": rows,
+            "total_count": 25,
+            "truncated": False,
+            "plan": {
+                "public_id": "7",
+                "status": "planned",
+                "planned_for": None,
+                "is_stale": False,
+                "stale_reason": None,
+                "estimated_stop_minutes": 30,
+                "travel_duration_minutes": 12,
+                "distance_meters": 1_500,
+                "stops": [
+                    {
+                        "order": index,
+                        "place_name": f"Stop {index}",
+                        "errands": [f"Errand {index}"],
+                        "errands_truncated": index == 1,
+                        "household_items": [],
+                        "household_items_truncated": index == 1,
+                    }
+                    for index in range(1, 13)
+                ],
+                "total_stop_count": 13,
+                "stops_truncated": True,
+            },
+        }
+    )
+
+    block = next(item for item in response.blocks if item.type == "errand_summary")
+    assert len(block.errands) == 25
+    assert block.errands_truncated is False
+    assert block.plan is not None
+    assert (len(block.plan.stops), block.plan.total_stop_count) == (12, 13)
+    assert block.plan.stops_truncated is True
+    assert block.plan.stops[0].errands_truncated is True
+    assert block.plan.stops[0].household_items_truncated is True

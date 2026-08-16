@@ -6,7 +6,8 @@ Day 3 makes the read-only ExpenseOps Agent available inside the authenticated we
 adds a responsive conversation surface and a semantic streaming transport over the Day 1 durable
 agent foundation and the Day 2 read-only runtime. It does not expand the Agent's authority.
 
-The shipped slice can answer grounded questions about spending and transactions. It cannot change
+The original Day 3 slice answered grounded questions about spending and transactions. The current
+read-only domain expansion is documented in `EXPANDED_READ_ONLY_AGENT.md`. It cannot change
 a transaction, create a Splitwise expense, buy anything, send a Telegram message, modify an
 errand, or call an arbitrary application endpoint. Those exclusions are enforced by the server's
 tool registry and effect policy, not merely by UI copy or a model instruction.
@@ -163,8 +164,8 @@ one terminal assistant message, run metadata, and audited tool calls. It does no
 delta. Final assistant persistence and the terminal run transition share one transaction so the UI
 does not observe a completed run without its canonical answer.
 
-Only successful same-run read-tool evidence may supply user-specific financial facts. The current
-runtime exposes exactly:
+Only successful same-run read-tool evidence may supply user-specific facts. At its Day 3 boundary,
+the runtime exposed exactly:
 
 - `get_spending_insights`, backed by the canonical Insights service;
 - `search_transactions`, backed by a tenant-scoped transaction query.
@@ -243,7 +244,7 @@ numbers; it does not claim durable or monotonic sequence replay across HTTP deli
 
 ### Strict block rendering
 
-The Day 3 renderer supports only the read-only blocks produced by the runtime:
+The Day 3 renderer initially supported these read-only blocks:
 
 - `text`;
 - `spending_summary`;

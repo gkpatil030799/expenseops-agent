@@ -1,11 +1,29 @@
-import { AlertCircle, ArrowRight, BarChart3, Inbox, ReceiptText } from "lucide-react";
+import {
+  AlertCircle,
+  ArrowRight,
+  BarChart3,
+  CheckCircle2,
+  ClipboardList,
+  Inbox,
+  PackageCheck,
+  PlugZap,
+  ReceiptText,
+  Tags,
+} from "lucide-react";
+import type { ReactNode } from "react";
 
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 
 import type {
   AgentEmptyStateBlock,
+  AgentErrandSummaryBlock,
+  AgentIntegrationStatusBlock,
   AgentNavigationBlock,
+  AgentReceiptSummaryBlock,
+  AgentReplenishmentSummaryBlock,
+  AgentDealListBlock,
   AgentSpendingBreakdownItem,
   AgentSpendingSummaryBlock,
   AgentStructuredResponse,
@@ -55,6 +73,16 @@ export function AgentResponseRenderer({
             );
           case "transaction_list":
             return <TransactionListCard key={key} block={block} onNavigate={onNavigate} />;
+          case "replenishment_summary":
+            return <ReplenishmentSummaryCard key={key} block={block} />;
+          case "receipt_summary":
+            return <ReceiptSummaryCard key={key} block={block} />;
+          case "deal_list":
+            return <DealListCard key={key} block={block} />;
+          case "errand_summary":
+            return <ErrandSummaryCard key={key} block={block} />;
+          case "integration_status":
+            return <IntegrationStatusCard key={key} block={block} />;
           case "error":
             return (
               <Card key={key} className="border-rose-200 bg-rose-50/70">
@@ -80,6 +108,224 @@ export function AgentResponseRenderer({
             return <UnsupportedResponse key={key} onRetry={onRetry} />;
         }
       })}
+    </div>
+  );
+}
+
+function ReplenishmentSummaryCard({ block }: { block: AgentReplenishmentSummaryBlock }) {
+  return (
+    <Card>
+      <CardHeader className="pb-3">
+        <CardHeading icon={<PackageCheck className="size-5" aria-hidden="true" />} title={block.title} subtitle={`${block.items.length} of ${block.total_count}`} />
+      </CardHeader>
+      <CardContent className="space-y-3 pt-0">
+        {block.items.length ? (
+          <div className="divide-y divide-slate-200 overflow-hidden rounded-control border border-slate-200 bg-white">
+            {block.items.map((item) => (
+              <div key={item.public_id} className="flex min-h-14 items-start justify-between gap-3 px-3 py-2.5">
+                <div className="min-w-0 flex-1">
+                  <p className="font-semibold text-slate-900 [overflow-wrap:anywhere]">{item.name}</p>
+                  <p className="mt-0.5 text-xs text-slate-600 [overflow-wrap:anywhere]">
+                    {item.reason || replenishmentStateLabel(item.due_state)}
+                  </p>
+                  <p className="mt-1 text-xs text-slate-500">
+                    Evidence: {humanize(item.confidence_level)} · {humanize(item.evidence_basis)}
+                  </p>
+                  <p className="mt-1 text-xs text-slate-500">
+                    {[item.quantity ? `${item.quantity}${item.unit ? ` ${item.unit}` : ""}` : null, item.last_acquired_on ? `Last acquired ${formatDate(item.last_acquired_on)}` : "No confirmed purchase yet"].filter(Boolean).join(" · ")}
+                  </p>
+                </div>
+                <Badge variant="secondary" className="shrink-0">{replenishmentStateLabel(item.due_state)}</Badge>
+              </div>
+            ))}
+          </div>
+        ) : null}
+        {block.acquisition_history.length ? (
+          <section aria-label="Recent confirmed purchases">
+            <h4 className="text-xs font-semibold uppercase tracking-wide text-slate-500">Recent confirmed purchases</h4>
+            <ul className="mt-2 space-y-2 text-sm text-slate-700">
+              {block.acquisition_history.map((item, index) => (
+                <li key={`${item.acquired_on}-${index}`} className="rounded-control bg-slate-50 px-3 py-2 [overflow-wrap:anywhere]">
+                  {formatDate(item.acquired_on)}{item.merchant ? ` · ${item.merchant}` : ""}
+                  {item.quantity != null ? ` · ${item.quantity}${item.unit ? ` ${item.unit}` : ""}` : ""}
+                </li>
+              ))}
+            </ul>
+            {block.acquisition_history_truncated ? (
+              <p className="mt-2 text-xs text-slate-500">
+                Showing the {block.acquisition_history.length} most recent confirmed purchases.
+              </p>
+            ) : null}
+          </section>
+        ) : null}
+      </CardContent>
+    </Card>
+  );
+}
+
+function ReceiptSummaryCard({ block }: { block: AgentReceiptSummaryBlock }) {
+  const receiptDate = block.purchased_at || block.ingested_at;
+  return (
+    <Card>
+      <CardHeader className="pb-3">
+        <CardHeading
+          icon={<ReceiptText className="size-5" aria-hidden="true" />}
+          title={block.merchant || "Receipt"}
+          subtitle={[receiptDate ? formatDateTime(receiptDate) : null, block.total_cents != null ? formatMinor(block.total_cents, block.currency_code) : null].filter(Boolean).join(" · ")}
+        />
+      </CardHeader>
+      <CardContent className="space-y-3 pt-0">
+        <div className="flex flex-wrap gap-2 text-xs">
+          <Badge variant="secondary">{humanize(block.status)}</Badge>
+          {block.transaction_linked ? <Badge variant="outline">Card transaction linked</Badge> : null}
+          {block.unmatched_line_count ? <Badge variant="outline">{block.unmatched_line_count} need review</Badge> : null}
+        </div>
+        {block.items.length ? (
+          <div className="divide-y divide-slate-200 overflow-hidden rounded-control border border-slate-200 bg-white">
+            {block.items.map((item, index) => (
+              <div key={`${item.name}-${index}`} className="flex min-h-12 items-start justify-between gap-3 px-3 py-2">
+                <div className="min-w-0 flex-1">
+                  <p className="text-sm font-medium text-slate-900 [overflow-wrap:anywhere]">{item.name}</p>
+                  <p className="mt-0.5 text-xs text-slate-600 [overflow-wrap:anywhere]">
+                    {[item.quantity != null ? `${item.quantity}${item.unit ? ` ${item.unit}` : ""}` : null, item.household_item_name ? `Matched to ${item.household_item_name}` : humanize(item.match_status)].filter(Boolean).join(" · ")}
+                  </p>
+                </div>
+                {item.line_total_cents != null ? <span className="shrink-0 text-sm tabular-nums">{formatMinor(item.line_total_cents, block.currency_code)}</span> : null}
+              </div>
+            ))}
+          </div>
+        ) : null}
+        {block.items_truncated ? <p className="text-xs text-slate-500">Showing {block.items.length} of {block.total_line_count} lines.</p> : null}
+      </CardContent>
+    </Card>
+  );
+}
+
+function DealListCard({ block }: { block: AgentDealListBlock }) {
+  return (
+    <Card>
+      <CardHeader className="pb-3">
+        <CardHeading icon={<Tags className="size-5" aria-hidden="true" />} title={block.title} subtitle={`${block.deals.length} of ${block.total_count}`} />
+      </CardHeader>
+      <CardContent className="pt-0">
+        <div className="space-y-2">
+          {block.deals.map((deal) => (
+            <article key={deal.public_id} className="rounded-control border border-slate-200 bg-white p-3">
+              <div className="flex items-start justify-between gap-3">
+                <div className="min-w-0">
+                  <p className="text-sm font-semibold text-slate-900 [overflow-wrap:anywhere]">{deal.merchant}</p>
+                  <p className="mt-1 text-sm text-slate-700 [overflow-wrap:anywhere]">{deal.headline}</p>
+                </div>
+                {deal.saved ? (
+                  <Badge className="shrink-0">Saved</Badge>
+                ) : deal.relevant_to_need ? (
+                  <Badge className="shrink-0">Relevant to a need</Badge>
+                ) : (
+                  <Badge variant="secondary" className="shrink-0">Current offer</Badge>
+                )}
+              </div>
+              <p className="mt-2 text-xs text-slate-600 [overflow-wrap:anywhere]">
+                {[deal.category, dealValueLabel(deal), deal.expires_at ? `Expires ${formatDateTime(deal.expires_at)}` : null, deal.promo_code ? `Code ${deal.promo_code}` : null].filter(Boolean).join(" · ")}
+              </p>
+              {deal.relevance_reasons.length ? <p className="mt-2 text-xs text-slate-600 [overflow-wrap:anywhere]">{deal.relevance_reasons.join(" · ")}</p> : null}
+            </article>
+          ))}
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
+function ErrandSummaryCard({ block }: { block: AgentErrandSummaryBlock }) {
+  return (
+    <Card>
+      <CardHeader className="pb-3">
+        <CardHeading icon={<ClipboardList className="size-5" aria-hidden="true" />} title={block.title} subtitle={`${block.errands.length} of ${block.total_count}`} />
+      </CardHeader>
+      <CardContent className="space-y-4 pt-0">
+        {block.errands.length ? (
+          <div className="divide-y divide-slate-200 overflow-hidden rounded-control border border-slate-200 bg-white">
+            {block.errands.map((errand) => (
+              <div key={errand.public_id} className="flex min-h-14 items-start gap-3 px-3 py-2.5">
+                <CheckCircle2 className="mt-0.5 size-4 shrink-0 text-slate-500" aria-hidden="true" />
+                <div className="min-w-0 flex-1">
+                  <p className="text-sm font-semibold text-slate-900 [overflow-wrap:anywhere]">{errand.title}</p>
+                  <p className="mt-0.5 text-xs text-slate-600 [overflow-wrap:anywhere]">
+                    {[humanize(errand.status), humanize(errand.priority), errand.due_on ? formatDate(errand.due_on) : null, errand.place_name || humanize(errand.place_resolution_status)].filter(Boolean).join(" · ")}
+                  </p>
+                </div>
+                {errand.included_in_next_plan ? <Badge variant="outline" className="shrink-0">Next trip</Badge> : null}
+              </div>
+            ))}
+          </div>
+        ) : null}
+        {block.plan ? (
+          <section aria-label="Stored errand plan" className="rounded-control bg-indigo-50 p-3">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <h4 className="text-sm font-semibold text-indigo-950">Stored plan</h4>
+              <Badge variant={block.plan.is_stale ? "outline" : "secondary"}>{block.plan.is_stale ? "Needs refresh" : humanize(block.plan.status)}</Badge>
+            </div>
+            {block.plan.stale_reason ? <p className="mt-1 text-xs text-indigo-800 [overflow-wrap:anywhere]">{block.plan.stale_reason}</p> : null}
+            <p className="mt-1 text-xs text-indigo-800">
+              {[block.plan.travel_duration_minutes != null ? `${block.plan.travel_duration_minutes} min travel` : null, block.plan.estimated_stop_minutes ? `${block.plan.estimated_stop_minutes} min at stops` : null, block.plan.distance_meters != null ? formatDistance(block.plan.distance_meters) : null].filter(Boolean).join(" · ")}
+            </p>
+            <ol className="mt-3 space-y-2">
+              {block.plan.stops.map((stop) => (
+                <li key={stop.order} className="flex gap-2 text-sm text-indigo-950">
+                  <span className="flex size-6 shrink-0 items-center justify-center rounded-full bg-white font-semibold">{stop.order}</span>
+                  <span className="min-w-0 [overflow-wrap:anywhere]">
+                    {stop.place_name}{stop.errands.length ? ` · ${stop.errands.join(", ")}` : ""}
+                    {stop.errands_truncated || stop.household_items_truncated ? " · More tasks not shown" : ""}
+                  </span>
+                </li>
+              ))}
+            </ol>
+            {block.plan.stops_truncated ? (
+              <p className="mt-2 text-xs text-indigo-800">
+                Showing {block.plan.stops.length} of {block.plan.total_stop_count} planned stops.
+              </p>
+            ) : null}
+          </section>
+        ) : null}
+      </CardContent>
+    </Card>
+  );
+}
+
+function IntegrationStatusCard({ block }: { block: AgentIntegrationStatusBlock }) {
+  return (
+    <Card>
+      <CardHeader className="pb-3">
+        <CardHeading icon={<PlugZap className="size-5" aria-hidden="true" />} title={block.title} />
+      </CardHeader>
+      <CardContent className="pt-0">
+        <dl className="divide-y divide-slate-200 overflow-hidden rounded-control border border-slate-200 bg-white">
+          {block.integrations.map((integration) => (
+            <div key={integration.provider} className="flex min-h-14 items-center justify-between gap-3 px-3 py-2">
+              <div className="min-w-0">
+                <dt className="text-sm font-semibold text-slate-900 [overflow-wrap:anywhere]">{humanize(integration.provider)}</dt>
+                {integration.message ? <dd className="mt-0.5 text-xs text-slate-600 [overflow-wrap:anywhere]">{integration.message}</dd> : null}
+                {integration.last_successful_sync_at ? <dd className="mt-0.5 text-xs text-slate-500">Last sync {formatDateTime(integration.last_successful_sync_at)}</dd> : null}
+              </div>
+              <Badge variant={integration.status === "connected" || integration.status === "ready" ? "secondary" : "outline"} className="shrink-0">
+                {humanize(integration.status)}
+              </Badge>
+            </div>
+          ))}
+        </dl>
+      </CardContent>
+    </Card>
+  );
+}
+
+function CardHeading({ icon, title, subtitle }: { icon: ReactNode; title: string; subtitle?: string }) {
+  return (
+    <div className="flex items-center justify-between gap-3">
+      <div className="min-w-0">
+        <CardTitle className="text-base [overflow-wrap:anywhere]">{title}</CardTitle>
+        {subtitle ? <p className="mt-1 text-xs text-slate-600 [overflow-wrap:anywhere]">{subtitle}</p> : null}
+      </div>
+      <span className="flex size-10 shrink-0 items-center justify-center rounded-control bg-indigo-100 text-indigo-700">{icon}</span>
     </div>
   );
 }
@@ -305,6 +551,46 @@ function formatDate(value: string): string {
   return Number.isNaN(date.getTime())
     ? value
     : new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric", year: "numeric", timeZone: "UTC" }).format(date);
+}
+
+function formatDateTime(value: string): string {
+  const parsed = new Date(value);
+  return Number.isNaN(parsed.getTime())
+    ? value
+    : new Intl.DateTimeFormat("en-US", {
+        month: "short",
+        day: "numeric",
+        year: "numeric",
+        timeZone: "UTC",
+      }).format(parsed);
+}
+
+function humanize(value: string): string {
+  return value
+    .split("_")
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ");
+}
+
+function replenishmentStateLabel(value: string): string {
+  if (value === "likely_due") return "Likely due";
+  if (value === "probably_due") return "Probably due";
+  if (value === "not_due") return "Not due";
+  return "Learning";
+}
+
+function dealValueLabel(deal: AgentDealListBlock["deals"][number]): string | null {
+  if (deal.percent_off != null) return `${deal.percent_off}% off`;
+  if (deal.amount_off_cents != null && deal.currency_code) {
+    return `${formatMinor(deal.amount_off_cents, deal.currency_code)} off`;
+  }
+  return null;
+}
+
+function formatDistance(distanceMeters: number): string {
+  if (distanceMeters < 1_000) return `${distanceMeters} m`;
+  return `${(distanceMeters / 1_609.344).toFixed(1)} mi`;
 }
 
 function formatDateRange(start: string, end: string): string {

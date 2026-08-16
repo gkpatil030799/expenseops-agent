@@ -231,7 +231,12 @@ def test_structured_response_accepts_every_versioned_platform_neutral_block():
                 {
                     "type": "integration_status",
                     "title": "Connections",
-                    "integrations": [{"provider": "Plaid", "status": "connected"}],
+                    "integrations": [
+                        {
+                            "provider": "plaid",
+                            "status": "connected",
+                        }
+                    ],
                 },
                 {
                     "type": "navigation",
@@ -281,6 +286,53 @@ def test_structured_response_accepts_every_versioned_platform_neutral_block():
         "empty",
     ]
     assert "html" not in str(dumped).casefold()
+
+
+def test_v1_structured_response_still_hydrates_original_domain_bounds_and_fields():
+    response = AgentStructuredResponse.model_validate(
+        {
+            "schema_version": "1.0",
+            "blocks": [
+                {
+                    "type": "replenishment_summary",
+                    "title": "Legacy household items",
+                    "items": [
+                        {"public_id": f"item-{index}", "name": f"Item {index}"}
+                        for index in range(21)
+                    ],
+                },
+                {
+                    "type": "receipt_summary",
+                    "public_id": "receipt-legacy",
+                    "status": "confirmed",
+                    "items": [{"name": f"Line {index}"} for index in range(26)],
+                },
+                {
+                    "type": "errand_summary",
+                    "title": "Legacy errands",
+                    "errands": [
+                        {
+                            "public_id": f"errand-{index}",
+                            "title": f"Errand {index}",
+                            "status": "open",
+                        }
+                        for index in range(26)
+                    ],
+                },
+                {
+                    "type": "integration_status",
+                    "title": "Legacy integration",
+                    "integrations": [{"provider": "legacy_provider", "status": "connected"}],
+                },
+            ],
+        }
+    )
+
+    dumped = response.model_dump(mode="json")
+    assert dumped["blocks"][0]["total_count"] == 21
+    assert dumped["blocks"][1]["total_line_count"] == 26
+    assert dumped["blocks"][2]["total_count"] == 26
+    assert dumped["blocks"][3]["integrations"][0]["scope"] is None
 
 
 def test_structured_response_rejects_unknown_blocks_and_extra_rendering_fields():
