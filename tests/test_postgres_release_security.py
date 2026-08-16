@@ -25,7 +25,7 @@ def test_runtime_readiness_reports_real_restricted_role_and_rls():
     payload = json.loads(response.body)
     checks = payload["checks"]
 
-    assert response.status_code == (200 if HARDENED_RLS_EXPECTED else 503)
+    assert response.status_code == (200 if HARDENED_RLS_EXPECTED else 503), checks
     assert payload["status"] == ("ready" if HARDENED_RLS_EXPECTED else "not_ready")
     assert checks["database"] == "ok"
     assert checks["migration_current"] is True
