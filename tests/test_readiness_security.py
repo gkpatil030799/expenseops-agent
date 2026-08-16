@@ -100,6 +100,25 @@ def test_readiness_accepts_catalog_rendering_of_parent_derived_child_policy():
     assert _policies_are_hardened([row], {table: expression})
 
 
+def test_purchase_receipt_policy_matches_postgres_omitted_outer_qualifier():
+    table = "purchase_receipt_items"
+    expression = _CHILD_WORKSPACE_POLICY_EXPRESSIONS[table]
+    catalog_expression = expression.replace("public.", "").replace(" AS ", " ")
+    row = {
+        "tablename": table,
+        "policyname": "expenseops_workspace_isolation",
+        "permissive": "PERMISSIVE",
+        "roles": ["public"],
+        "cmd": "ALL",
+        "qual": catalog_expression,
+        "with_check": catalog_expression,
+    }
+
+    assert "purchase_receipt_items.household_item_id IS NULL" not in expression
+    assert "household_item_id IS NULL" in catalog_expression
+    assert _policies_are_hardened([row], {table: expression})
+
+
 def test_readiness_policy_comparison_preserves_boolean_precedence():
     expected = "workspace_id = 1 AND (parent_id IS NULL OR workspace_id = 1)"
     precedence_drift = "(workspace_id = 1 AND parent_id IS NULL) OR workspace_id = 1"

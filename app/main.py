@@ -60,7 +60,7 @@ _CHILD_WORKSPACE_POLICY_EXPRESSIONS = {
         "EXISTS (SELECT 1 FROM public.purchase_receipts AS receipt "
         "WHERE receipt.id = purchase_receipt_items.receipt_id AND "
         f"receipt.workspace_id = {_WORKSPACE_SETTING_EXPRESSION}) "
-        "AND (purchase_receipt_items.household_item_id IS NULL OR EXISTS ("
+        "AND (household_item_id IS NULL OR EXISTS ("
         "SELECT 1 FROM public.household_items AS item WHERE "
         "item.id = purchase_receipt_items.household_item_id AND "
         f"item.workspace_id = {_WORKSPACE_SETTING_EXPRESSION}))"

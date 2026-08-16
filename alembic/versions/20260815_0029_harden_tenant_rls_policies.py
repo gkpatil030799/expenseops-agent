@@ -72,7 +72,7 @@ TENANT_CHILD_POLICIES = {
         "EXISTS (SELECT 1 FROM public.purchase_receipts AS receipt "
         "WHERE receipt.id = purchase_receipt_items.receipt_id "
         f"AND receipt.workspace_id = {_WORKSPACE_SETTING}) AND ("
-        "purchase_receipt_items.household_item_id IS NULL OR EXISTS ("
+        "household_item_id IS NULL OR EXISTS ("
         "SELECT 1 FROM public.household_items AS item "
         "WHERE item.id = purchase_receipt_items.household_item_id "
         f"AND item.workspace_id = {_WORKSPACE_SETTING}))"
