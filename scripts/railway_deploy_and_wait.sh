@@ -67,10 +67,6 @@ fi
 # Config-as-code selection is a dashboard setting, not a `railway up` flag. Check
 # it immediately before uploading so a migration service can never fall back to
 # the neutral config and start the Dockerfile's web command with migrator access.
-"${railway_bin}" link \
-  --project "${RAILWAY_PROJECT_ID}" \
-  --environment "${RAILWAY_PRODUCTION_ENVIRONMENT_ID}" \
-  --json >/dev/null
 environment_config="$("${railway_bin}" environment config \
   --environment "${RAILWAY_PRODUCTION_ENVIRONMENT_ID}" \
   --json)"
