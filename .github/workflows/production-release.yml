@@ -260,7 +260,7 @@ jobs:
           echo "RELEASE_SHA=${actual_sha}" >> "${GITHUB_ENV}"
 
       - name: Set up Node.js for the pinned Railway CLI
-        uses: actions/setup-node@1e60f620b9541d0c243d1e353a113f0012eb2ea2 # v4.0.3
+        uses: actions/setup-node@1e60f620b9541d16bece96c5465dc8ee9832be0b # v4.0.3
         with:
           node-version: "20.19.4"
 
