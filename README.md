@@ -466,6 +466,23 @@ runtime grants. Only after that succeeds does the workflow deploy outbox and
 both Gmail crons with `expenseops_runtime`; web deploys last. Any migration,
 grant, worker, or cron failure prevents web activation.
 
+The current Railway Hobby setup does not provide the managed volume-backup
+schedules or safe sibling Postgres restore needed to claim a daily snapshot or
+a completed PITR restore drill. PITR remains enabled as a health- and
+freshness-gated secondary layer. The proven release path is a fresh consistent
+logical dump through the dedicated `expenseops_backup` login, restored into an
+ephemeral PostgreSQL 18 service and checked for exact table-row counts,
+sequence inventory/static configuration, Alembic revision, and collision-safe
+effective next values before any Railway upload. Sequence counters are not
+MVCC snapshot data, so exact live `last_value` equality is not claimed while
+writers run. The validated dump, manifests, and recovery metadata are then
+bundled and encrypted to an approved public certificate whose private key is
+held offline, using authenticated CMS AES-256-GCM. Only ciphertext is retained
+as a 90-day GitHub Actions artifact. Its Actions archive digest and raw CMS
+SHA-256 are separate evidence.
+Logical-backup RPO is therefore the latest successful release artifact and is
+unbounded between approved releases, not a fictitious 24-hour schedule.
+
 Before the first controlled release, assign the web, migration, outbox, Gmail
 receipts, and Gmail promotions services their corresponding custom config paths.
 The Gmail config files deliberately leave cron schedules in Railway service
@@ -477,8 +494,32 @@ separation exactly as documented in
 role has only database connect, schema usage, reviewed table DML, sequence use,
 and the five routing-function grants. The migrator owns the reviewed schema
 objects but is neither a database owner nor a superuser. Keep the Railway
-`postgres` owner credential and both bootstrap passwords out of every deployed
-service.
+`postgres` owner credential and all bootstrap password inputs out of every
+deployed service.
+
+The initial role cutover order is fixed: verify healthy/fresh PITR and an
+encrypted operator backup with recorded manual decrypt/restore evidence; run
+the guarded `--bootstrap-backup-role` mode; create and PostgreSQL-18-restore a
+fresh dump as `expenseops_backup`; only then run the full runtime/migrator
+ownership cutover. The backup login is `NOSUPERUSER` and read-only. Its sole
+exceptional `BYPASSRLS` attribute lets a
+complete disaster-recovery dump include every tenant while `FORCE ROW LEVEL
+SECURITY` remains active; it has no DML, create, temporary, ownership,
+membership, function, or deployed-service access.
+
+The protected GitHub `production` environment stores `RAILWAY_TOKEN` and
+`EXPENSEOPS_BACKUP_DATABASE_URL` as secrets. It stores the base64 public
+certificate and its approved uppercase, colon-delimited SHA-256 fingerprint in
+`EXPENSEOPS_BACKUP_RECIPIENT_CERT_B64` and
+`EXPENSEOPS_BACKUP_RECIPIENT_CERT_SHA256`; the Railway project, environment,
+service IDs, and `PRODUCTION_BASE_URL` remain environment variables. Keep the
+recipient private key and its password offline and outside GitHub and Railway.
+Separately escrow `APP_SECRET_KEY` and every still-required previous
+application-encryption key outside those systems; the CMS key alone cannot
+decrypt provider credentials stored in the database. Offline recovery must
+authenticate CMS to a protected temporary file before consuming plaintext—it
+must never stream decryption directly into `tar` or `pg_restore`. Follow the
+runbook's full path and evidence checks.
 
 The compatibility and hardening phases have different rollback boundaries.
 Before migration `0029`, repair or forward-fix the compatibility phase; after

@@ -2,9 +2,14 @@
 """Provision the ExpenseOps PostgreSQL role split with an explicit apply guard.
 
 The command is a dry run unless ``--apply`` is supplied.  Apply mode reads the
-admin URL and both generated role passwords from environment variables; secret
+admin URL and all three generated role passwords from environment variables; secret
 values are always sent as bind parameters and are never rendered in the plan or
 success output.
+
+Before the first role cutover, ``--bootstrap-backup-role`` can provision only
+the least-privilege logical-backup login so a Hobby-plan encrypted recovery
+artifact can be created and restore-tested.  It does not create the other roles
+or transfer ownership.
 
 Run ``--apply`` once before the first restricted-role migration to transfer the
 existing application objects.  The private migration service then runs
@@ -22,14 +27,17 @@ import psycopg
 
 RUNTIME_ROLE = "expenseops_runtime"
 MIGRATOR_ROLE = "expenseops_migrator"
+BACKUP_ROLE = "expenseops_backup"
 
 ADMIN_URL_ENV = "EXPENSEOPS_ADMIN_DATABASE_URL"
 RUNTIME_PASSWORD_ENV = "EXPENSEOPS_RUNTIME_PASSWORD"
 MIGRATOR_PASSWORD_ENV = "EXPENSEOPS_MIGRATOR_PASSWORD"
+BACKUP_PASSWORD_ENV = "EXPENSEOPS_BACKUP_PASSWORD"
 MIGRATION_URL_ENV = "DATABASE_URL"
 MINIMUM_PASSWORD_LENGTH = 24
 RUNTIME_PASSWORD_SETTING = "expenseops.bootstrap_runtime_password"
 MIGRATOR_PASSWORD_SETTING = "expenseops.bootstrap_migrator_password"
+BACKUP_PASSWORD_SETTING = "expenseops.bootstrap_backup_password"
 
 # This allowlist is intentionally the complete SQLAlchemy/Alembic application
 # surface rather than every object in ``public``.  An unexpected object is not
@@ -131,11 +139,17 @@ ROLE_STATEMENTS = (
         ) THEN
             CREATE ROLE {MIGRATOR_ROLE};
         END IF;
+        IF NOT EXISTS (
+            SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = '{BACKUP_ROLE}'
+        ) THEN
+            CREATE ROLE {BACKUP_ROLE};
+        END IF;
     END
     $expenseops_roles$
     """,
     f"ALTER ROLE {RUNTIME_ROLE} RESET ALL",
     f"ALTER ROLE {MIGRATOR_ROLE} RESET ALL",
+    f"ALTER ROLE {BACKUP_ROLE} RESET ALL",
     (
         f"ALTER ROLE {RUNTIME_ROLE} WITH LOGIN NOSUPERUSER NOBYPASSRLS "
         "NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION "
@@ -146,6 +160,12 @@ ROLE_STATEMENTS = (
         "NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION "
         "CONNECTION LIMIT -1 VALID UNTIL 'infinity'"
     ),
+    (
+        f"ALTER ROLE {BACKUP_ROLE} WITH LOGIN NOSUPERUSER BYPASSRLS "
+        "NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION "
+        "CONNECTION LIMIT -1 VALID UNTIL 'infinity'"
+    ),
+    f"ALTER ROLE {BACKUP_ROLE} SET default_transaction_read_only = on",
     f"""
     DO $expenseops_memberships$
     DECLARE
@@ -156,8 +176,12 @@ ROLE_STATEMENTS = (
             FROM pg_catalog.pg_auth_members AS auth_members
             JOIN pg_catalog.pg_roles AS granted ON granted.oid = auth_members.roleid
             JOIN pg_catalog.pg_roles AS member ON member.oid = auth_members.member
-            WHERE member.rolname IN ('{RUNTIME_ROLE}', '{MIGRATOR_ROLE}')
-               OR granted.rolname IN ('{RUNTIME_ROLE}', '{MIGRATOR_ROLE}')
+            WHERE member.rolname IN (
+                '{RUNTIME_ROLE}', '{MIGRATOR_ROLE}', '{BACKUP_ROLE}'
+            )
+               OR granted.rolname IN (
+                   '{RUNTIME_ROLE}', '{MIGRATOR_ROLE}', '{BACKUP_ROLE}'
+               )
         LOOP
             EXECUTE format(
                 'REVOKE %I FROM %I',
@@ -167,6 +191,49 @@ ROLE_STATEMENTS = (
         END LOOP;
     END
     $expenseops_memberships$
+    """,
+)
+
+BACKUP_ROLE_STATEMENTS = (
+    f"""
+    DO $expenseops_backup_role$
+    BEGIN
+        IF NOT EXISTS (
+            SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = '{BACKUP_ROLE}'
+        ) THEN
+            CREATE ROLE {BACKUP_ROLE};
+        END IF;
+    END
+    $expenseops_backup_role$
+    """,
+    f"ALTER ROLE {BACKUP_ROLE} RESET ALL",
+    (
+        f"ALTER ROLE {BACKUP_ROLE} WITH LOGIN NOSUPERUSER BYPASSRLS "
+        "NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION "
+        "CONNECTION LIMIT -1 VALID UNTIL 'infinity'"
+    ),
+    f"ALTER ROLE {BACKUP_ROLE} SET default_transaction_read_only = on",
+    f"""
+    DO $expenseops_backup_memberships$
+    DECLARE
+        membership record;
+    BEGIN
+        FOR membership IN
+            SELECT granted.rolname AS granted_role, member.rolname AS member_role
+            FROM pg_catalog.pg_auth_members AS auth_members
+            JOIN pg_catalog.pg_roles AS granted ON granted.oid = auth_members.roleid
+            JOIN pg_catalog.pg_roles AS member ON member.oid = auth_members.member
+            WHERE member.rolname = '{BACKUP_ROLE}'
+               OR granted.rolname = '{BACKUP_ROLE}'
+        LOOP
+            EXECUTE format(
+                'REVOKE %I FROM %I',
+                membership.granted_role,
+                membership.member_role
+            );
+        END LOOP;
+    END
+    $expenseops_backup_memberships$
     """,
 )
 
@@ -182,17 +249,35 @@ DO $expenseops_passwords$
 DECLARE
     runtime_password text := pg_catalog.current_setting('{RUNTIME_PASSWORD_SETTING}', true);
     migrator_password text := pg_catalog.current_setting('{MIGRATOR_PASSWORD_SETTING}', true);
+    backup_password text := pg_catalog.current_setting('{BACKUP_PASSWORD_SETTING}', true);
 BEGIN
     IF coalesce(runtime_password, '') = ''
-       OR coalesce(migrator_password, '') = '' THEN
+       OR coalesce(migrator_password, '') = ''
+       OR coalesce(backup_password, '') = '' THEN
         RAISE EXCEPTION 'ExpenseOps role passwords were not bound to this transaction';
     END IF;
     EXECUTE format('ALTER ROLE {RUNTIME_ROLE} PASSWORD %L', runtime_password);
     EXECUTE format('ALTER ROLE {MIGRATOR_ROLE} PASSWORD %L', migrator_password);
+    EXECUTE format('ALTER ROLE {BACKUP_ROLE} PASSWORD %L', backup_password);
     PERFORM pg_catalog.set_config('{RUNTIME_PASSWORD_SETTING}', '', true);
     PERFORM pg_catalog.set_config('{MIGRATOR_PASSWORD_SETTING}', '', true);
+    PERFORM pg_catalog.set_config('{BACKUP_PASSWORD_SETTING}', '', true);
 END
 $expenseops_passwords$
+"""
+
+BACKUP_PASSWORD_SQL = f"""
+DO $expenseops_backup_password$
+DECLARE
+    backup_password text := pg_catalog.current_setting('{BACKUP_PASSWORD_SETTING}', true);
+BEGIN
+    IF coalesce(backup_password, '') = '' THEN
+        RAISE EXCEPTION 'ExpenseOps backup password was not bound to this transaction';
+    END IF;
+    EXECUTE format('ALTER ROLE {BACKUP_ROLE} PASSWORD %L', backup_password);
+    PERFORM pg_catalog.set_config('{BACKUP_PASSWORD_SETTING}', '', true);
+END
+$expenseops_backup_password$
 """
 
 DATABASE_AND_SCHEMA_SQL = f"""
@@ -211,7 +296,12 @@ BEGIN
         current_database()
     );
     EXECUTE format(
-        'GRANT CONNECT ON DATABASE %I TO {RUNTIME_ROLE}, {MIGRATOR_ROLE}',
+        'REVOKE ALL PRIVILEGES ON DATABASE %I FROM {BACKUP_ROLE}',
+        current_database()
+    );
+    EXECUTE format(
+        'GRANT CONNECT ON DATABASE %I TO '
+        '{RUNTIME_ROLE}, {MIGRATOR_ROLE}, {BACKUP_ROLE}',
         current_database()
     );
     EXECUTE format(
@@ -220,6 +310,10 @@ BEGIN
     );
     EXECUTE format(
         'ALTER ROLE {MIGRATOR_ROLE} IN DATABASE %I RESET ALL',
+        current_database()
+    );
+    EXECUTE format(
+        'ALTER ROLE {BACKUP_ROLE} IN DATABASE %I RESET ALL',
         current_database()
     );
     EXECUTE format(
@@ -232,14 +326,146 @@ BEGIN
         'SET search_path = public, pg_catalog, pg_temp',
         current_database()
     );
+    EXECUTE format(
+        'ALTER ROLE {BACKUP_ROLE} IN DATABASE %I '
+        'SET search_path = public, pg_catalog, pg_temp',
+        current_database()
+    );
 END
 $expenseops_database$;
 
 ALTER SCHEMA public OWNER TO {MIGRATOR_ROLE};
 REVOKE ALL PRIVILEGES ON SCHEMA public FROM PUBLIC;
 REVOKE ALL PRIVILEGES ON SCHEMA public FROM {RUNTIME_ROLE};
+REVOKE ALL PRIVILEGES ON SCHEMA public FROM {BACKUP_ROLE};
 GRANT USAGE ON SCHEMA public TO {RUNTIME_ROLE};
+GRANT USAGE ON SCHEMA public TO {BACKUP_ROLE};
 GRANT USAGE, CREATE ON SCHEMA public TO {MIGRATOR_ROLE};
+"""
+
+BACKUP_DATABASE_AND_SCHEMA_SQL = f"""
+DO $expenseops_backup_database$
+BEGIN
+    -- These PUBLIC revocations are required because a direct role-specific
+    -- REVOKE cannot override privileges inherited through PUBLIC.
+    EXECUTE format(
+        'REVOKE CREATE, TEMPORARY ON DATABASE %I FROM PUBLIC',
+        current_database()
+    );
+    EXECUTE format(
+        'REVOKE ALL PRIVILEGES ON DATABASE %I FROM {BACKUP_ROLE}',
+        current_database()
+    );
+    EXECUTE format(
+        'GRANT CONNECT ON DATABASE %I TO {BACKUP_ROLE}',
+        current_database()
+    );
+    EXECUTE format(
+        'ALTER ROLE {BACKUP_ROLE} IN DATABASE %I RESET ALL',
+        current_database()
+    );
+    EXECUTE format(
+        'ALTER ROLE {BACKUP_ROLE} IN DATABASE %I '
+        'SET search_path = public, pg_catalog, pg_temp',
+        current_database()
+    );
+END
+$expenseops_backup_database$;
+
+REVOKE CREATE ON SCHEMA public FROM PUBLIC;
+REVOKE ALL PRIVILEGES ON SCHEMA public FROM {BACKUP_ROLE};
+GRANT USAGE ON SCHEMA public TO {BACKUP_ROLE};
+"""
+
+BACKUP_GRANTS_SQL = f"""
+DO $expenseops_backup_grants$
+DECLARE
+    object_name text;
+    relation_oid regclass;
+    owned_sequence record;
+    grantable_type record;
+BEGIN
+    FOREACH object_name IN ARRAY {TABLE_ARRAY_SQL}
+    LOOP
+        relation_oid := pg_catalog.to_regclass(format('%I.%I', 'public', object_name));
+        IF relation_oid IS NOT NULL THEN
+            EXECUTE format(
+                'REVOKE ALL PRIVILEGES ON TABLE %s FROM {BACKUP_ROLE}',
+                relation_oid
+            );
+            EXECUTE format(
+                'GRANT SELECT ON TABLE %s TO {BACKUP_ROLE}',
+                relation_oid
+            );
+        END IF;
+    END LOOP;
+
+    FOR owned_sequence IN
+        SELECT DISTINCT sequence_class.oid::regclass AS sequence_oid
+        FROM pg_catalog.pg_class AS sequence_class
+        JOIN pg_catalog.pg_namespace AS sequence_namespace
+          ON sequence_namespace.oid = sequence_class.relnamespace
+        JOIN pg_catalog.pg_depend AS dependency
+          ON dependency.classid = 'pg_class'::regclass
+         AND dependency.objid = sequence_class.oid
+         AND dependency.deptype IN ('a', 'i')
+        JOIN pg_catalog.pg_class AS table_class
+          ON table_class.oid = dependency.refobjid
+        JOIN pg_catalog.pg_namespace AS table_namespace
+          ON table_namespace.oid = table_class.relnamespace
+        WHERE sequence_class.relkind = 'S'
+          AND sequence_namespace.nspname = 'public'
+          AND table_namespace.nspname = 'public'
+          AND table_class.relname = ANY ({TABLE_ARRAY_SQL})
+    LOOP
+        EXECUTE format(
+            'REVOKE ALL PRIVILEGES ON SEQUENCE %s FROM {BACKUP_ROLE}',
+            owned_sequence.sequence_oid
+        );
+        EXECUTE format(
+            'GRANT SELECT ON SEQUENCE %s TO {BACKUP_ROLE}',
+            owned_sequence.sequence_oid
+        );
+    END LOOP;
+
+    -- Application functions are unnecessary for pg_dump and BYPASSRLS makes
+    -- any callable SECURITY DEFINER surface an avoidable privilege.
+    REVOKE EXECUTE ON ALL FUNCTIONS IN SCHEMA public FROM PUBLIC;
+    REVOKE EXECUTE ON ALL FUNCTIONS IN SCHEMA public FROM {BACKUP_ROLE};
+
+    -- A role-specific revoke cannot override the default PUBLIC USAGE grant
+    -- on types.  Remove that inherited surface before verifying that the
+    -- backup login has no type privileges.  PostgreSQL has no bulk
+    -- "ALL TYPES IN SCHEMA" form, so use the same independently grantable
+    -- type filter as the full role reconciliation.
+    FOR grantable_type IN
+        SELECT type_namespace.nspname AS schema_name,
+               type_object.typname AS type_name
+        FROM pg_catalog.pg_type AS type_object
+        JOIN pg_catalog.pg_namespace AS type_namespace
+          ON type_namespace.oid = type_object.typnamespace
+        WHERE type_namespace.nspname = 'public'
+          AND NOT (
+              type_object.typelem <> 0
+              AND type_object.typsubscript =
+                  'pg_catalog.array_subscript_handler'::pg_catalog.regproc
+          )
+          AND type_object.typtype <> 'm'
+        ORDER BY type_object.oid
+    LOOP
+        EXECUTE format(
+            'REVOKE ALL PRIVILEGES ON TYPE %I.%I FROM PUBLIC',
+            grantable_type.schema_name,
+            grantable_type.type_name
+        );
+        EXECUTE format(
+            'REVOKE ALL PRIVILEGES ON TYPE %I.%I FROM {BACKUP_ROLE}',
+            grantable_type.schema_name,
+            grantable_type.type_name
+        );
+    END LOOP;
+END
+$expenseops_backup_grants$
 """
 
 OWNERSHIP_SQL = f"""
@@ -304,7 +530,9 @@ $expenseops_ownership$
 RUNTIME_GRANTS_SQL = f"""
 REVOKE ALL PRIVILEGES ON SCHEMA public FROM PUBLIC;
 REVOKE ALL PRIVILEGES ON SCHEMA public FROM {RUNTIME_ROLE};
+REVOKE ALL PRIVILEGES ON SCHEMA public FROM {BACKUP_ROLE};
 GRANT USAGE ON SCHEMA public TO {RUNTIME_ROLE};
+GRANT USAGE ON SCHEMA public TO {BACKUP_ROLE};
 GRANT USAGE, CREATE ON SCHEMA public TO {MIGRATOR_ROLE};
 
 DO $expenseops_table_grants$
@@ -326,6 +554,14 @@ BEGIN
             );
             EXECUTE format(
                 'REVOKE ALL PRIVILEGES ON TABLE %s FROM {RUNTIME_ROLE}',
+                relation_oid
+            );
+            EXECUTE format(
+                'REVOKE ALL PRIVILEGES ON TABLE %s FROM {BACKUP_ROLE}',
+                relation_oid
+            );
+            EXECUTE format(
+                'GRANT SELECT ON TABLE %s TO {BACKUP_ROLE}',
                 relation_oid
             );
             IF object_name = 'alembic_version' THEN
@@ -369,6 +605,14 @@ BEGIN
             owned_sequence.sequence_oid
         );
         EXECUTE format(
+            'REVOKE ALL PRIVILEGES ON SEQUENCE %s FROM {BACKUP_ROLE}',
+            owned_sequence.sequence_oid
+        );
+        EXECUTE format(
+            'GRANT SELECT ON SEQUENCE %s TO {BACKUP_ROLE}',
+            owned_sequence.sequence_oid
+        );
+        EXECUTE format(
             'GRANT USAGE, SELECT ON SEQUENCE %s TO {RUNTIME_ROLE}',
             owned_sequence.sequence_oid
         );
@@ -378,6 +622,7 @@ BEGIN
     -- inherited through PUBLIC.  Runtime receives only the five exact routes.
     REVOKE EXECUTE ON ALL FUNCTIONS IN SCHEMA public FROM PUBLIC;
     REVOKE EXECUTE ON ALL FUNCTIONS IN SCHEMA public FROM {RUNTIME_ROLE};
+    REVOKE EXECUTE ON ALL FUNCTIONS IN SCHEMA public FROM {BACKUP_ROLE};
     FOREACH function_signature IN ARRAY {ROUTING_FUNCTION_ARRAY_SQL}
     LOOP
         function_oid := pg_catalog.to_regprocedure(function_signature);
@@ -418,6 +663,11 @@ BEGIN
             grantable_type.schema_name,
             grantable_type.type_name
         );
+        EXECUTE format(
+            'REVOKE ALL PRIVILEGES ON TYPE %I.%I FROM {BACKUP_ROLE}',
+            grantable_type.schema_name,
+            grantable_type.type_name
+        );
     END LOOP;
 END
 $expenseops_table_grants$;
@@ -433,6 +683,10 @@ ALTER DEFAULT PRIVILEGES FOR ROLE {MIGRATOR_ROLE}
 ALTER DEFAULT PRIVILEGES FOR ROLE {MIGRATOR_ROLE} IN SCHEMA public
     REVOKE ALL PRIVILEGES ON TABLES FROM {RUNTIME_ROLE};
 ALTER DEFAULT PRIVILEGES FOR ROLE {MIGRATOR_ROLE}
+    REVOKE ALL PRIVILEGES ON TABLES FROM {BACKUP_ROLE};
+ALTER DEFAULT PRIVILEGES FOR ROLE {MIGRATOR_ROLE} IN SCHEMA public
+    REVOKE ALL PRIVILEGES ON TABLES FROM {BACKUP_ROLE};
+ALTER DEFAULT PRIVILEGES FOR ROLE {MIGRATOR_ROLE}
     REVOKE ALL PRIVILEGES ON SEQUENCES FROM PUBLIC;
 ALTER DEFAULT PRIVILEGES FOR ROLE {MIGRATOR_ROLE} IN SCHEMA public
     REVOKE ALL PRIVILEGES ON SEQUENCES FROM PUBLIC;
@@ -440,6 +694,10 @@ ALTER DEFAULT PRIVILEGES FOR ROLE {MIGRATOR_ROLE}
     REVOKE ALL PRIVILEGES ON SEQUENCES FROM {RUNTIME_ROLE};
 ALTER DEFAULT PRIVILEGES FOR ROLE {MIGRATOR_ROLE} IN SCHEMA public
     REVOKE ALL PRIVILEGES ON SEQUENCES FROM {RUNTIME_ROLE};
+ALTER DEFAULT PRIVILEGES FOR ROLE {MIGRATOR_ROLE}
+    REVOKE ALL PRIVILEGES ON SEQUENCES FROM {BACKUP_ROLE};
+ALTER DEFAULT PRIVILEGES FOR ROLE {MIGRATOR_ROLE} IN SCHEMA public
+    REVOKE ALL PRIVILEGES ON SEQUENCES FROM {BACKUP_ROLE};
 ALTER DEFAULT PRIVILEGES FOR ROLE {MIGRATOR_ROLE}
     REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC;
 ALTER DEFAULT PRIVILEGES FOR ROLE {MIGRATOR_ROLE} IN SCHEMA public
@@ -449,6 +707,10 @@ ALTER DEFAULT PRIVILEGES FOR ROLE {MIGRATOR_ROLE}
 ALTER DEFAULT PRIVILEGES FOR ROLE {MIGRATOR_ROLE} IN SCHEMA public
     REVOKE EXECUTE ON FUNCTIONS FROM {RUNTIME_ROLE};
 ALTER DEFAULT PRIVILEGES FOR ROLE {MIGRATOR_ROLE}
+    REVOKE EXECUTE ON FUNCTIONS FROM {BACKUP_ROLE};
+ALTER DEFAULT PRIVILEGES FOR ROLE {MIGRATOR_ROLE} IN SCHEMA public
+    REVOKE EXECUTE ON FUNCTIONS FROM {BACKUP_ROLE};
+ALTER DEFAULT PRIVILEGES FOR ROLE {MIGRATOR_ROLE}
     REVOKE ALL PRIVILEGES ON TYPES FROM PUBLIC;
 ALTER DEFAULT PRIVILEGES FOR ROLE {MIGRATOR_ROLE} IN SCHEMA public
     REVOKE ALL PRIVILEGES ON TYPES FROM PUBLIC;
@@ -456,6 +718,10 @@ ALTER DEFAULT PRIVILEGES FOR ROLE {MIGRATOR_ROLE}
     REVOKE ALL PRIVILEGES ON TYPES FROM {RUNTIME_ROLE};
 ALTER DEFAULT PRIVILEGES FOR ROLE {MIGRATOR_ROLE} IN SCHEMA public
     REVOKE ALL PRIVILEGES ON TYPES FROM {RUNTIME_ROLE};
+ALTER DEFAULT PRIVILEGES FOR ROLE {MIGRATOR_ROLE}
+    REVOKE ALL PRIVILEGES ON TYPES FROM {BACKUP_ROLE};
+ALTER DEFAULT PRIVILEGES FOR ROLE {MIGRATOR_ROLE} IN SCHEMA public
+    REVOKE ALL PRIVILEGES ON TYPES FROM {BACKUP_ROLE};
 """
 
 RECONCILE_REQUIRED_FUNCTIONS_SQL = f"""
@@ -476,6 +742,264 @@ END
 $expenseops_required_routes$
 """
 
+BACKUP_VERIFY_SQL = f"""
+DO $expenseops_backup_verify$
+DECLARE
+    object_name text;
+    relation_oid regclass;
+    sequence_record record;
+    function_record record;
+    backup_record record;
+BEGIN
+    SELECT * INTO backup_record
+    FROM pg_catalog.pg_roles
+    WHERE rolname = '{BACKUP_ROLE}';
+    IF backup_record IS NULL
+       OR NOT backup_record.rolcanlogin
+       OR backup_record.rolsuper
+       OR NOT backup_record.rolbypassrls
+       OR backup_record.rolcreatedb
+       OR backup_record.rolcreaterole
+       OR backup_record.rolreplication
+       OR backup_record.rolinherit
+       OR coalesce(backup_record.rolconfig, ARRAY[]::text[])
+          <> ARRAY['default_transaction_read_only=on']::text[] THEN
+        RAISE EXCEPTION 'expenseops_backup role attributes are unsafe';
+    END IF;
+
+    IF EXISTS (
+        SELECT 1
+        FROM pg_catalog.pg_auth_members AS auth_members
+        JOIN pg_catalog.pg_roles AS member ON member.oid = auth_members.member
+        JOIN pg_catalog.pg_roles AS granted ON granted.oid = auth_members.roleid
+        WHERE member.rolname = '{BACKUP_ROLE}'
+           OR granted.rolname = '{BACKUP_ROLE}'
+    ) THEN
+        RAISE EXCEPTION 'expenseops_backup must not have role memberships';
+    END IF;
+
+    IF NOT pg_catalog.has_database_privilege(
+        '{BACKUP_ROLE}', current_database(), 'CONNECT'
+    ) OR pg_catalog.has_database_privilege(
+        '{BACKUP_ROLE}', current_database(), 'CREATE'
+    ) OR pg_catalog.has_database_privilege(
+        '{BACKUP_ROLE}', current_database(), 'TEMPORARY'
+    ) OR pg_catalog.has_schema_privilege(
+        '{BACKUP_ROLE}', 'public', 'CREATE'
+    ) OR NOT pg_catalog.has_schema_privilege(
+        '{BACKUP_ROLE}', 'public', 'USAGE'
+    ) THEN
+        RAISE EXCEPTION 'expenseops_backup database/schema privileges are unsafe';
+    END IF;
+    IF EXISTS (
+        SELECT 1
+        FROM pg_catalog.pg_namespace AS namespace_object
+        WHERE namespace_object.nspname <> 'public'
+          AND namespace_object.nspname <> 'information_schema'
+          AND pg_catalog.left(namespace_object.nspname, 3) <> 'pg_'
+          AND (
+              pg_catalog.has_schema_privilege(
+                  '{BACKUP_ROLE}', namespace_object.oid, 'USAGE'
+              ) OR pg_catalog.has_schema_privilege(
+                  '{BACKUP_ROLE}', namespace_object.oid, 'CREATE'
+              )
+          )
+    ) THEN
+        RAISE EXCEPTION 'expenseops_backup has privileges on an unexpected schema';
+    END IF;
+
+    IF EXISTS (
+        SELECT 1
+        FROM pg_catalog.pg_database AS database_object
+        JOIN pg_catalog.pg_roles AS database_owner
+          ON database_owner.oid = database_object.datdba
+        WHERE database_owner.rolname = '{BACKUP_ROLE}'
+    ) OR EXISTS (
+        SELECT 1
+        FROM pg_catalog.pg_class AS object_class
+        JOIN pg_catalog.pg_roles AS object_owner
+          ON object_owner.oid = object_class.relowner
+        WHERE object_owner.rolname = '{BACKUP_ROLE}'
+    ) OR EXISTS (
+        SELECT 1
+        FROM pg_catalog.pg_proc AS function_object
+        JOIN pg_catalog.pg_roles AS object_owner
+          ON object_owner.oid = function_object.proowner
+        WHERE object_owner.rolname = '{BACKUP_ROLE}'
+    ) OR EXISTS (
+        SELECT 1
+        FROM pg_catalog.pg_type AS type_object
+        JOIN pg_catalog.pg_roles AS object_owner
+          ON object_owner.oid = type_object.typowner
+        WHERE object_owner.rolname = '{BACKUP_ROLE}'
+    ) OR EXISTS (
+        SELECT 1
+        FROM pg_catalog.pg_namespace AS namespace_object
+        JOIN pg_catalog.pg_roles AS object_owner
+          ON object_owner.oid = namespace_object.nspowner
+        WHERE object_owner.rolname = '{BACKUP_ROLE}'
+    ) THEN
+        RAISE EXCEPTION 'expenseops_backup must not own database objects';
+    END IF;
+
+    FOREACH object_name IN ARRAY {TABLE_ARRAY_SQL}
+    LOOP
+        relation_oid := pg_catalog.to_regclass(format('%I.%I', 'public', object_name));
+        IF relation_oid IS NULL THEN
+            CONTINUE;
+        END IF;
+        IF NOT pg_catalog.has_table_privilege('{BACKUP_ROLE}', relation_oid, 'SELECT')
+           OR pg_catalog.has_table_privilege('{BACKUP_ROLE}', relation_oid, 'INSERT')
+           OR pg_catalog.has_table_privilege('{BACKUP_ROLE}', relation_oid, 'UPDATE')
+           OR pg_catalog.has_table_privilege('{BACKUP_ROLE}', relation_oid, 'DELETE')
+           OR pg_catalog.has_table_privilege('{BACKUP_ROLE}', relation_oid, 'TRUNCATE')
+           OR pg_catalog.has_table_privilege('{BACKUP_ROLE}', relation_oid, 'REFERENCES')
+           OR pg_catalog.has_table_privilege('{BACKUP_ROLE}', relation_oid, 'TRIGGER')
+           OR pg_catalog.has_any_column_privilege(
+               '{BACKUP_ROLE}', relation_oid, 'INSERT,UPDATE,REFERENCES'
+           ) THEN
+            RAISE EXCEPTION 'backup table privileges are unsafe for public.%', object_name;
+        END IF;
+    END LOOP;
+
+    IF EXISTS (
+        SELECT 1
+        FROM pg_catalog.pg_class AS relation
+        JOIN pg_catalog.pg_namespace AS relation_namespace
+          ON relation_namespace.oid = relation.relnamespace
+        WHERE relation_namespace.nspname <> 'information_schema'
+          AND pg_catalog.left(relation_namespace.nspname, 3) <> 'pg_'
+          AND relation.relkind IN ('r', 'p', 'v', 'm', 'f')
+          AND (
+              relation_namespace.nspname <> 'public'
+              OR relation.relname <> ALL ({TABLE_ARRAY_SQL})
+          )
+          AND (
+              pg_catalog.has_table_privilege(
+                  '{BACKUP_ROLE}', relation.oid, 'SELECT'
+              ) OR pg_catalog.has_table_privilege(
+                  '{BACKUP_ROLE}', relation.oid, 'INSERT'
+              ) OR pg_catalog.has_table_privilege(
+                  '{BACKUP_ROLE}', relation.oid, 'UPDATE'
+              ) OR pg_catalog.has_table_privilege(
+                  '{BACKUP_ROLE}', relation.oid, 'DELETE'
+              ) OR pg_catalog.has_table_privilege(
+                  '{BACKUP_ROLE}', relation.oid, 'TRUNCATE'
+              ) OR pg_catalog.has_table_privilege(
+                  '{BACKUP_ROLE}', relation.oid, 'REFERENCES'
+              ) OR pg_catalog.has_table_privilege(
+                  '{BACKUP_ROLE}', relation.oid, 'TRIGGER'
+              ) OR pg_catalog.has_any_column_privilege(
+                  '{BACKUP_ROLE}', relation.oid, 'SELECT,INSERT,UPDATE,REFERENCES'
+              )
+          )
+    ) THEN
+        RAISE EXCEPTION 'backup has privileges on an unexpected relation';
+    END IF;
+
+    FOR sequence_record IN
+        SELECT DISTINCT sequence_class.oid
+        FROM pg_catalog.pg_class AS sequence_class
+        JOIN pg_catalog.pg_namespace AS sequence_namespace
+          ON sequence_namespace.oid = sequence_class.relnamespace
+        JOIN pg_catalog.pg_depend AS dependency
+          ON dependency.classid = 'pg_class'::regclass
+         AND dependency.objid = sequence_class.oid
+         AND dependency.deptype IN ('a', 'i')
+        JOIN pg_catalog.pg_class AS table_class
+          ON table_class.oid = dependency.refobjid
+        JOIN pg_catalog.pg_namespace AS table_namespace
+          ON table_namespace.oid = table_class.relnamespace
+        WHERE sequence_class.relkind = 'S'
+          AND sequence_namespace.nspname = 'public'
+          AND table_namespace.nspname = 'public'
+          AND table_class.relname = ANY ({TABLE_ARRAY_SQL})
+    LOOP
+        IF NOT pg_catalog.has_sequence_privilege(
+            '{BACKUP_ROLE}', sequence_record.oid, 'SELECT'
+        ) OR pg_catalog.has_sequence_privilege(
+            '{BACKUP_ROLE}', sequence_record.oid, 'USAGE'
+        ) OR pg_catalog.has_sequence_privilege(
+            '{BACKUP_ROLE}', sequence_record.oid, 'UPDATE'
+        ) THEN
+            RAISE EXCEPTION 'backup sequence privileges are unsafe for %',
+                sequence_record.oid::regclass;
+        END IF;
+    END LOOP;
+
+    IF EXISTS (
+        SELECT 1
+        FROM pg_catalog.pg_class AS sequence_object
+        JOIN pg_catalog.pg_namespace AS sequence_namespace
+          ON sequence_namespace.oid = sequence_object.relnamespace
+        WHERE sequence_namespace.nspname <> 'information_schema'
+          AND pg_catalog.left(sequence_namespace.nspname, 3) <> 'pg_'
+          AND sequence_object.relkind = 'S'
+          AND NOT EXISTS (
+              SELECT 1
+              FROM pg_catalog.pg_depend AS dependency
+              JOIN pg_catalog.pg_class AS table_class
+                ON table_class.oid = dependency.refobjid
+              JOIN pg_catalog.pg_namespace AS table_namespace
+                ON table_namespace.oid = table_class.relnamespace
+              WHERE dependency.classid = 'pg_class'::regclass
+                AND dependency.objid = sequence_object.oid
+                AND dependency.deptype IN ('a', 'i')
+                AND sequence_namespace.nspname = 'public'
+                AND table_namespace.nspname = 'public'
+                AND table_class.relname = ANY ({TABLE_ARRAY_SQL})
+          )
+          AND (
+              pg_catalog.has_sequence_privilege(
+                  '{BACKUP_ROLE}', sequence_object.oid, 'USAGE'
+              ) OR pg_catalog.has_sequence_privilege(
+                  '{BACKUP_ROLE}', sequence_object.oid, 'SELECT'
+              ) OR pg_catalog.has_sequence_privilege(
+                  '{BACKUP_ROLE}', sequence_object.oid, 'UPDATE'
+              )
+          )
+    ) THEN
+        RAISE EXCEPTION 'backup has privileges on an unexpected sequence';
+    END IF;
+
+    IF EXISTS (
+        SELECT 1
+        FROM pg_catalog.pg_type AS type_object
+        JOIN pg_catalog.pg_namespace AS type_namespace
+          ON type_namespace.oid = type_object.typnamespace
+        WHERE type_namespace.nspname = 'public'
+          AND NOT (
+              type_object.typelem <> 0
+              AND type_object.typsubscript =
+                  'pg_catalog.array_subscript_handler'::pg_catalog.regproc
+          )
+          AND type_object.typtype <> 'm'
+          AND pg_catalog.has_type_privilege(
+              '{BACKUP_ROLE}', type_object.oid, 'USAGE'
+          )
+    ) THEN
+        RAISE EXCEPTION 'backup has privileges on a public type';
+    END IF;
+
+    FOR function_record IN
+        SELECT function_object.oid,
+               function_object.oid::regprocedure AS signature
+        FROM pg_catalog.pg_proc AS function_object
+        JOIN pg_catalog.pg_namespace AS function_namespace
+          ON function_namespace.oid = function_object.pronamespace
+        WHERE function_namespace.nspname = 'public'
+    LOOP
+        IF pg_catalog.has_function_privilege(
+            '{BACKUP_ROLE}', function_record.oid, 'EXECUTE'
+        ) THEN
+            RAISE EXCEPTION 'backup function privilege is unsafe for %',
+                function_record.signature;
+        END IF;
+    END LOOP;
+END
+$expenseops_backup_verify$
+"""
+
 VERIFY_SQL = f"""
 DO $expenseops_verify$
 DECLARE
@@ -487,6 +1011,7 @@ DECLARE
     application_function_oids oid[];
     runtime_record record;
     migrator_record record;
+    backup_record record;
 BEGIN
     SELECT * INTO runtime_record
     FROM pg_catalog.pg_roles
@@ -516,13 +1041,33 @@ BEGIN
         RAISE EXCEPTION 'expenseops_migrator role attributes are unsafe';
     END IF;
 
+    SELECT * INTO backup_record
+    FROM pg_catalog.pg_roles
+    WHERE rolname = '{BACKUP_ROLE}';
+    IF backup_record IS NULL
+       OR NOT backup_record.rolcanlogin
+       OR backup_record.rolsuper
+       OR NOT backup_record.rolbypassrls
+       OR backup_record.rolcreatedb
+       OR backup_record.rolcreaterole
+       OR backup_record.rolreplication
+       OR backup_record.rolinherit
+       OR coalesce(backup_record.rolconfig, ARRAY[]::text[])
+          <> ARRAY['default_transaction_read_only=on']::text[] THEN
+        RAISE EXCEPTION 'expenseops_backup role attributes are unsafe';
+    END IF;
+
     IF EXISTS (
         SELECT 1
         FROM pg_catalog.pg_auth_members AS auth_members
         JOIN pg_catalog.pg_roles AS member ON member.oid = auth_members.member
         JOIN pg_catalog.pg_roles AS granted ON granted.oid = auth_members.roleid
-        WHERE member.rolname IN ('{RUNTIME_ROLE}', '{MIGRATOR_ROLE}')
-           OR granted.rolname IN ('{RUNTIME_ROLE}', '{MIGRATOR_ROLE}')
+        WHERE member.rolname IN (
+            '{RUNTIME_ROLE}', '{MIGRATOR_ROLE}', '{BACKUP_ROLE}'
+        )
+           OR granted.rolname IN (
+               '{RUNTIME_ROLE}', '{MIGRATOR_ROLE}', '{BACKUP_ROLE}'
+           )
     ) THEN
         RAISE EXCEPTION 'ExpenseOps database roles must not have role memberships';
     END IF;
@@ -568,12 +1113,34 @@ BEGIN
     ) THEN
         RAISE EXCEPTION 'expenseops_migrator database/schema privileges are unsafe';
     END IF;
+    IF NOT pg_catalog.has_database_privilege(
+        '{BACKUP_ROLE}', current_database(), 'CONNECT'
+    ) OR pg_catalog.has_database_privilege(
+        '{BACKUP_ROLE}', current_database(), 'CREATE'
+    ) OR pg_catalog.has_database_privilege(
+        '{BACKUP_ROLE}', current_database(), 'TEMPORARY'
+    ) OR pg_catalog.has_schema_privilege(
+        '{BACKUP_ROLE}', 'public', 'CREATE'
+    ) OR NOT pg_catalog.has_schema_privilege(
+        '{BACKUP_ROLE}', 'public', 'USAGE'
+    ) THEN
+        RAISE EXCEPTION 'expenseops_backup database/schema privileges are unsafe';
+    END IF;
     IF (SELECT database_owner.rolname
         FROM pg_catalog.pg_database AS database_object
         JOIN pg_catalog.pg_roles AS database_owner
           ON database_owner.oid = database_object.datdba
         WHERE database_object.datname = current_database()) = '{MIGRATOR_ROLE}' THEN
         RAISE EXCEPTION 'expenseops_migrator must not own the database';
+    END IF;
+    IF EXISTS (
+        SELECT 1
+        FROM pg_catalog.pg_database AS database_object
+        JOIN pg_catalog.pg_roles AS database_owner
+          ON database_owner.oid = database_object.datdba
+        WHERE database_owner.rolname = '{BACKUP_ROLE}'
+    ) THEN
+        RAISE EXCEPTION 'expenseops_backup must not own a database';
     END IF;
     IF EXISTS (
         SELECT 1
@@ -619,6 +1186,34 @@ BEGIN
           AND object_owner.rolname = '{RUNTIME_ROLE}'
     ) THEN
         RAISE EXCEPTION 'expenseops_runtime must not own schema objects';
+    END IF;
+
+    IF EXISTS (
+        SELECT 1
+        FROM pg_catalog.pg_class AS object_class
+        JOIN pg_catalog.pg_roles AS object_owner
+          ON object_owner.oid = object_class.relowner
+        WHERE object_owner.rolname = '{BACKUP_ROLE}'
+    ) OR EXISTS (
+        SELECT 1
+        FROM pg_catalog.pg_proc AS function_object
+        JOIN pg_catalog.pg_roles AS object_owner
+          ON object_owner.oid = function_object.proowner
+        WHERE object_owner.rolname = '{BACKUP_ROLE}'
+    ) OR EXISTS (
+        SELECT 1
+        FROM pg_catalog.pg_type AS type_object
+        JOIN pg_catalog.pg_roles AS object_owner
+          ON object_owner.oid = type_object.typowner
+        WHERE object_owner.rolname = '{BACKUP_ROLE}'
+    ) OR EXISTS (
+        SELECT 1
+        FROM pg_catalog.pg_namespace AS namespace_object
+        JOIN pg_catalog.pg_roles AS object_owner
+          ON object_owner.oid = namespace_object.nspowner
+        WHERE object_owner.rolname = '{BACKUP_ROLE}'
+    ) THEN
+        RAISE EXCEPTION 'expenseops_backup must not own database objects';
     END IF;
 
     IF EXISTS (
@@ -694,6 +1289,18 @@ BEGIN
            OR pg_catalog.has_table_privilege('{RUNTIME_ROLE}', relation_oid, 'TRIGGER') THEN
             RAISE EXCEPTION 'runtime table privileges are unsafe for public.%', object_name;
         END IF;
+        IF NOT pg_catalog.has_table_privilege('{BACKUP_ROLE}', relation_oid, 'SELECT')
+           OR pg_catalog.has_table_privilege('{BACKUP_ROLE}', relation_oid, 'INSERT')
+           OR pg_catalog.has_table_privilege('{BACKUP_ROLE}', relation_oid, 'UPDATE')
+           OR pg_catalog.has_table_privilege('{BACKUP_ROLE}', relation_oid, 'DELETE')
+           OR pg_catalog.has_table_privilege('{BACKUP_ROLE}', relation_oid, 'TRUNCATE')
+           OR pg_catalog.has_table_privilege('{BACKUP_ROLE}', relation_oid, 'REFERENCES')
+           OR pg_catalog.has_table_privilege('{BACKUP_ROLE}', relation_oid, 'TRIGGER')
+           OR pg_catalog.has_any_column_privilege(
+               '{BACKUP_ROLE}', relation_oid, 'INSERT,UPDATE,REFERENCES'
+           ) THEN
+            RAISE EXCEPTION 'backup table privileges are unsafe for public.%', object_name;
+        END IF;
     END LOOP;
 
     IF EXISTS (
@@ -723,6 +1330,37 @@ BEGIN
           )
     ) THEN
         RAISE EXCEPTION 'runtime has privileges on an unexpected public relation';
+    END IF;
+
+    IF EXISTS (
+        SELECT 1
+        FROM pg_catalog.pg_class AS relation
+        JOIN pg_catalog.pg_namespace AS relation_namespace
+          ON relation_namespace.oid = relation.relnamespace
+        WHERE relation_namespace.nspname = 'public'
+          AND relation.relkind IN ('r', 'p', 'v', 'm', 'f')
+          AND relation.relname <> ALL ({TABLE_ARRAY_SQL})
+          AND (
+              pg_catalog.has_table_privilege(
+                  '{BACKUP_ROLE}', relation.oid, 'SELECT'
+              ) OR pg_catalog.has_table_privilege(
+                  '{BACKUP_ROLE}', relation.oid, 'INSERT'
+              ) OR pg_catalog.has_table_privilege(
+                  '{BACKUP_ROLE}', relation.oid, 'UPDATE'
+              ) OR pg_catalog.has_table_privilege(
+                  '{BACKUP_ROLE}', relation.oid, 'DELETE'
+              ) OR pg_catalog.has_table_privilege(
+                  '{BACKUP_ROLE}', relation.oid, 'TRUNCATE'
+              ) OR pg_catalog.has_table_privilege(
+                  '{BACKUP_ROLE}', relation.oid, 'REFERENCES'
+              ) OR pg_catalog.has_table_privilege(
+                  '{BACKUP_ROLE}', relation.oid, 'TRIGGER'
+              ) OR pg_catalog.has_any_column_privilege(
+                  '{BACKUP_ROLE}', relation.oid, 'SELECT,INSERT,UPDATE,REFERENCES'
+              )
+          )
+    ) THEN
+        RAISE EXCEPTION 'backup has privileges on an unexpected public relation';
     END IF;
 
     IF EXISTS (
@@ -760,6 +1398,39 @@ BEGIN
 
     IF EXISTS (
         SELECT 1
+        FROM pg_catalog.pg_class AS sequence_object
+        JOIN pg_catalog.pg_namespace AS sequence_namespace
+          ON sequence_namespace.oid = sequence_object.relnamespace
+        WHERE sequence_namespace.nspname = 'public'
+          AND sequence_object.relkind = 'S'
+          AND NOT EXISTS (
+              SELECT 1
+              FROM pg_catalog.pg_depend AS dependency
+              JOIN pg_catalog.pg_class AS table_class
+                ON table_class.oid = dependency.refobjid
+              JOIN pg_catalog.pg_namespace AS table_namespace
+                ON table_namespace.oid = table_class.relnamespace
+              WHERE dependency.classid = 'pg_class'::regclass
+                AND dependency.objid = sequence_object.oid
+                AND dependency.deptype IN ('a', 'i')
+                AND table_namespace.nspname = 'public'
+                AND table_class.relname = ANY ({TABLE_ARRAY_SQL})
+          )
+          AND (
+              pg_catalog.has_sequence_privilege(
+                  '{BACKUP_ROLE}', sequence_object.oid, 'USAGE'
+              ) OR pg_catalog.has_sequence_privilege(
+                  '{BACKUP_ROLE}', sequence_object.oid, 'SELECT'
+              ) OR pg_catalog.has_sequence_privilege(
+                  '{BACKUP_ROLE}', sequence_object.oid, 'UPDATE'
+              )
+          )
+    ) THEN
+        RAISE EXCEPTION 'backup has privileges on an unexpected public sequence';
+    END IF;
+
+    IF EXISTS (
+        SELECT 1
         FROM pg_catalog.pg_type AS type_object
         JOIN pg_catalog.pg_namespace AS type_namespace
           ON type_namespace.oid = type_object.typnamespace
@@ -775,6 +1446,25 @@ BEGIN
           )
     ) THEN
         RAISE EXCEPTION 'runtime has privileges on an unexpected public type';
+    END IF;
+
+    IF EXISTS (
+        SELECT 1
+        FROM pg_catalog.pg_type AS type_object
+        JOIN pg_catalog.pg_namespace AS type_namespace
+          ON type_namespace.oid = type_object.typnamespace
+        WHERE type_namespace.nspname = 'public'
+          AND NOT (
+              type_object.typelem <> 0
+              AND type_object.typsubscript =
+                  'pg_catalog.array_subscript_handler'::pg_catalog.regproc
+          )
+          AND type_object.typtype <> 'm'
+          AND pg_catalog.has_type_privilege(
+              '{BACKUP_ROLE}', type_object.oid, 'USAGE'
+          )
+    ) THEN
+        RAISE EXCEPTION 'backup has privileges on a public type';
     END IF;
 
     FOR sequence_record IN
@@ -807,6 +1497,16 @@ BEGIN
             '{RUNTIME_ROLE}', sequence_record.oid, 'UPDATE'
         ) THEN
             RAISE EXCEPTION 'runtime sequence privileges are unsafe for %',
+                sequence_record.oid::regclass;
+        END IF;
+        IF NOT pg_catalog.has_sequence_privilege(
+            '{BACKUP_ROLE}', sequence_record.oid, 'SELECT'
+        ) OR pg_catalog.has_sequence_privilege(
+            '{BACKUP_ROLE}', sequence_record.oid, 'USAGE'
+        ) OR pg_catalog.has_sequence_privilege(
+            '{BACKUP_ROLE}', sequence_record.oid, 'UPDATE'
+        ) THEN
+            RAISE EXCEPTION 'backup sequence privileges are unsafe for %',
                 sequence_record.oid::regclass;
         END IF;
     END LOOP;
@@ -843,6 +1543,12 @@ BEGIN
             RAISE EXCEPTION 'runtime function privilege is unsafe for %',
                 function_record.signature;
         END IF;
+        IF pg_catalog.has_function_privilege(
+            '{BACKUP_ROLE}', function_record.oid, 'EXECUTE'
+        ) THEN
+            RAISE EXCEPTION 'backup function privilege is unsafe for %',
+                function_record.signature;
+        END IF;
         IF function_record.oid = ANY (application_function_oids)
            AND function_record.owner_name <> '{MIGRATOR_ROLE}' THEN
             RAISE EXCEPTION 'migration role does not own function %',
@@ -854,6 +1560,29 @@ BEGIN
                 function_record.signature;
         END IF;
     END LOOP;
+
+    IF EXISTS (
+        SELECT 1
+        FROM pg_catalog.pg_default_acl AS default_acl_object
+        JOIN pg_catalog.pg_roles AS default_acl_owner
+          ON default_acl_owner.oid = default_acl_object.defaclrole
+        LEFT JOIN pg_catalog.pg_namespace AS default_acl_namespace
+          ON default_acl_namespace.oid = default_acl_object.defaclnamespace
+        CROSS JOIN LATERAL pg_catalog.aclexplode(
+            default_acl_object.defaclacl
+        ) AS default_acl
+        WHERE default_acl.grantee = backup_record.oid
+           OR (
+               default_acl_owner.rolname = '{MIGRATOR_ROLE}'
+               AND (
+                   default_acl_namespace.oid IS NULL
+                   OR default_acl_namespace.nspname = 'public'
+               )
+               AND default_acl.grantee = 0
+           )
+    ) THEN
+        RAISE EXCEPTION 'backup/default privileges are unsafe for future objects';
+    END IF;
 END
 $expenseops_verify$
 """
@@ -870,7 +1599,7 @@ PRIVILEGE_STATEMENTS = (
 def render_plan() -> str:
     statements = [
         "-- ExpenseOps database role bootstrap (dry run; nothing executed)",
-        f"-- {ADMIN_URL_ENV} is read only in --apply mode and is never printed.",
+        f"-- {ADMIN_URL_ENV} is read only in guarded mutation modes and is never printed.",
         *(_normalized(statement) + ";" for statement in SESSION_STATEMENTS),
         *(_normalized(statement) + ";" for statement in ROLE_STATEMENTS),
         (
@@ -880,6 +1609,10 @@ def render_plan() -> str:
         (
             "SELECT pg_catalog.set_config("
             f"'{MIGRATOR_PASSWORD_SETTING}', %({MIGRATOR_PASSWORD_ENV})s, true);"
+        ),
+        (
+            "SELECT pg_catalog.set_config("
+            f"'{BACKUP_PASSWORD_SETTING}', %({BACKUP_PASSWORD_ENV})s, true);"
         ),
         _normalized(PASSWORD_SQL) + ";",
         *(_normalized(statement) + ";" for statement in PRIVILEGE_STATEMENTS),
@@ -912,14 +1645,17 @@ def apply_bootstrap(
     admin_url: str,
     runtime_password: str,
     migrator_password: str,
+    backup_password: str,
 ) -> None:
     dsn = _postgres_dsn(admin_url, source_name=ADMIN_URL_ENV)
-    if runtime_password == migrator_password:
-        raise ValueError("Runtime and migrator passwords must be different")
+    if len({runtime_password, migrator_password, backup_password}) != 3:
+        raise ValueError("Runtime, migrator, and backup passwords must be different")
     if len(runtime_password) < MINIMUM_PASSWORD_LENGTH:
         raise ValueError("Runtime password is too short")
     if len(migrator_password) < MINIMUM_PASSWORD_LENGTH:
         raise ValueError("Migrator password is too short")
+    if len(backup_password) < MINIMUM_PASSWORD_LENGTH:
+        raise ValueError("Backup password is too short")
 
     with psycopg.connect(dsn) as connection, connection.cursor() as cursor:
         for statement in SESSION_STATEMENTS:
@@ -945,8 +1681,48 @@ def apply_bootstrap(
             f"SELECT pg_catalog.set_config('{MIGRATOR_PASSWORD_SETTING}', %s, true)",
             (migrator_password,),
         )
+        cursor.execute(
+            f"SELECT pg_catalog.set_config('{BACKUP_PASSWORD_SETTING}', %s, true)",
+            (backup_password,),
+        )
         cursor.execute(PASSWORD_SQL)
         for statement in PRIVILEGE_STATEMENTS:
+            cursor.execute(statement)
+
+
+def bootstrap_backup_role(*, admin_url: str, backup_password: str) -> None:
+    """Provision only the read-only backup role before the full role cutover."""
+
+    dsn = _postgres_dsn(admin_url, source_name=ADMIN_URL_ENV)
+    if len(backup_password) < MINIMUM_PASSWORD_LENGTH:
+        raise ValueError("Backup password is too short")
+
+    with psycopg.connect(dsn) as connection, connection.cursor() as cursor:
+        for statement in SESSION_STATEMENTS:
+            cursor.execute(statement)
+        cursor.execute(
+            """
+            SELECT rolsuper
+            FROM pg_catalog.pg_roles
+            WHERE rolname = current_user
+            """
+        )
+        admin_row = cursor.fetchone()
+        if admin_row is None or not admin_row[0]:
+            raise RuntimeError("Backup-role bootstrap requires a PostgreSQL superuser connection")
+
+        for statement in BACKUP_ROLE_STATEMENTS:
+            cursor.execute(statement)
+        cursor.execute(
+            f"SELECT pg_catalog.set_config('{BACKUP_PASSWORD_SETTING}', %s, true)",
+            (backup_password,),
+        )
+        for statement in (
+            BACKUP_PASSWORD_SQL,
+            BACKUP_DATABASE_AND_SCHEMA_SQL,
+            BACKUP_GRANTS_SQL,
+            BACKUP_VERIFY_SQL,
+        ):
             cursor.execute(statement)
 
 
@@ -1016,6 +1792,14 @@ def _parser() -> argparse.ArgumentParser:
         help="Apply atomically using credentials supplied only through environment variables.",
     )
     mode.add_argument(
+        "--bootstrap-backup-role",
+        action="store_true",
+        help=(
+            "Before the full cutover, provision only expenseops_backup using the admin URL "
+            "and backup password from environment variables."
+        ),
+    )
+    mode.add_argument(
         "--reconcile-runtime-grants",
         action="store_true",
         help=(
@@ -1027,6 +1811,31 @@ def _parser() -> argparse.ArgumentParser:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
+    if args.bootstrap_backup_role:
+        forbidden_role_passwords = [
+            name for name in (RUNTIME_PASSWORD_ENV, MIGRATOR_PASSWORD_ENV) if os.environ.get(name)
+        ]
+        if forbidden_role_passwords:
+            raise SystemExit(
+                "Runtime/migrator passwords must not be present during --bootstrap-backup-role"
+            )
+        environment = dict(os.environ)
+        admin_url = environment.get(ADMIN_URL_ENV, "")
+        if not admin_url:
+            raise SystemExit(f"{ADMIN_URL_ENV} is required with --bootstrap-backup-role")
+        try:
+            backup_password = _required_secret(environment, BACKUP_PASSWORD_ENV)
+            bootstrap_backup_role(
+                admin_url=admin_url,
+                backup_password=backup_password,
+            )
+        except ValueError as exc:
+            raise SystemExit(str(exc)) from None
+        print(
+            "ExpenseOps backup database role and read-only privileges verified. "
+            "No connection URL or role password was printed."
+        )
+        return 0
     if args.reconcile_runtime_grants:
         forbidden_bootstrap_inputs = [
             name
@@ -1034,6 +1843,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 ADMIN_URL_ENV,
                 RUNTIME_PASSWORD_ENV,
                 MIGRATOR_PASSWORD_ENV,
+                BACKUP_PASSWORD_ENV,
             )
             if os.environ.get(name)
         ]
@@ -1064,10 +1874,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         runtime_password = _required_secret(environment, RUNTIME_PASSWORD_ENV)
         migrator_password = _required_secret(environment, MIGRATOR_PASSWORD_ENV)
+        backup_password = _required_secret(environment, BACKUP_PASSWORD_ENV)
         apply_bootstrap(
             admin_url=admin_url,
             runtime_password=runtime_password,
             migrator_password=migrator_password,
+            backup_password=backup_password,
         )
     except ValueError as exc:
         raise SystemExit(str(exc)) from None

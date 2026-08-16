@@ -251,7 +251,9 @@ def test_readiness_routing_contracts_match_the_migration_bodies_exactly():
 def test_release_gate_uses_separate_roles_and_real_postgres_rls_evidence():
     workflow = (ROOT / ".github/workflows/release-gate.yml").read_text(encoding="utf-8")
 
+    assert "bootstrap_database_roles.py --bootstrap-backup-role" in workflow
     assert "bootstrap_database_roles.py --apply" in workflow
+    assert workflow.count("EXPENSEOPS_BACKUP_PASSWORD=") == 2
     assert workflow.count("bootstrap_database_roles.py --reconcile-runtime-grants") == 2
     assert "alembic upgrade 20260813_0023" in workflow
     assert "CREATE DATABASE expenseops_fresh OWNER postgres" in workflow

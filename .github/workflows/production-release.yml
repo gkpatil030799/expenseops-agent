@@ -21,10 +21,6 @@ on:
         description: Previously deployed compatibility SHA (required for hardened cutover)
         required: false
         type: string
-      recovery_backup_id:
-        description: Fresh locked pre-release Railway backup ID approved for this deployment
-        required: true
-        type: string
 
 permissions:
   contents: read
@@ -38,9 +34,22 @@ jobs:
     name: Migrate, deploy runtimes, then web
     runs-on: ubuntu-24.04
     environment: production
-    timeout-minutes: 60
+    timeout-minutes: 120
+    services:
+      postgres-restore:
+        image: postgres:18.1-bookworm@sha256:cc9f4143a8d2fa8cf3749d0cb4d26ecf2d53a77a2ac807e9ebd67ae22426221a
+        env:
+          POSTGRES_DB: expenseops_restore
+          POSTGRES_PASSWORD: expenseops-ephemeral-restore
+          POSTGRES_USER: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready --username postgres --dbname expenseops_restore"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
     env:
-      RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
       RAILWAY_PROJECT_ID: ${{ vars.RAILWAY_PROJECT_ID }}
       RAILWAY_PRODUCTION_ENVIRONMENT_ID: ${{ vars.RAILWAY_PRODUCTION_ENVIRONMENT_ID }}
       RAILWAY_MIGRATION_SERVICE_ID: ${{ vars.RAILWAY_MIGRATION_SERVICE_ID }}
@@ -54,15 +63,57 @@ jobs:
       RAILWAY_AGENT_SESSION: github-production-release
     steps:
       - name: Check out the exact release commit
-        uses: actions/checkout@v4
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           ref: ${{ inputs.release_sha }}
           fetch-depth: 0
 
       - name: Set up Python for fail-closed release validation
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: "3.11.13"
+
+      - name: Install the pinned PostgreSQL snapshot client
+        run: |
+          set -Eeuo pipefail
+          requirements_file="${RUNNER_TEMP}/expenseops-recovery-requirements.txt"
+          printf '%s\n' \
+            'psycopg==3.3.4 --hash=sha256:b6bbc25ccf05c8fad3b061d9db2ef0909a555171b84b07f29458a447253d679a' \
+            'psycopg-binary==3.3.4 --hash=sha256:ab8cca8ef8fb1ccf5b048ae5bd78ba55b9e4b5d472e3ce5ca39ff4d2a9c249e4' \
+            'typing-extensions==4.15.0 --hash=sha256:f0fa19c6845758ab08074a0cfa8b7aecb71c999ca73d62883bc25cc018c4e548' \
+            >"${requirements_file}"
+          python -m pip install \
+            --disable-pip-version-check \
+            --force-reinstall \
+            --no-deps \
+            --only-binary=:all: \
+            --require-hashes \
+            --requirement "${requirements_file}"
+
+      - name: Install pinned OpenSSL for authenticated CMS encryption
+        run: |
+          set -Eeuo pipefail
+          openssl_version=3.5.7
+          source_archive="${RUNNER_TEMP}/openssl-${openssl_version}.tar.gz"
+          source_directory="${RUNNER_TEMP}/openssl-${openssl_version}"
+          install_directory="${RUNNER_TEMP}/openssl-${openssl_version}-installed"
+          curl --fail --silent --show-error --location \
+            --proto '=https' --tlsv1.2 \
+            --output "${source_archive}" \
+            "https://github.com/openssl/openssl/releases/download/openssl-${openssl_version}/openssl-${openssl_version}.tar.gz"
+          echo "a8c0d28a529ca480f9f36cf5792e2cd21984552a3c8e4aa11a24aa31aeac98e8  ${source_archive}" \
+            | sha256sum --check --strict
+          tar --extract --gzip --file "${source_archive}" --directory "${RUNNER_TEMP}"
+          cd "${source_directory}"
+          ./Configure \
+            --prefix="${install_directory}" \
+            --openssldir="${install_directory}/ssl" \
+            no-docs no-shared no-tests
+          make --jobs 2
+          make install_sw
+          "${install_directory}/bin/openssl" version \
+            | grep --quiet '^OpenSSL 3\.5\.7 '
+          echo "EXPENSEOPS_OPENSSL_BIN=${install_directory}/bin/openssl" >>"${GITHUB_ENV}"
 
       - name: Verify release commit and required configuration
         env:
@@ -80,7 +131,6 @@ jobs:
           git merge-base --is-ancestor "${actual_sha}" origin/main
           test -z "$(git status --porcelain)"
           for name in \
-            RAILWAY_TOKEN \
             RAILWAY_PROJECT_ID \
             RAILWAY_PRODUCTION_ENVIRONMENT_ID \
             RAILWAY_MIGRATION_SERVICE_ID \
@@ -207,7 +257,7 @@ jobs:
           echo "RELEASE_SHA=${actual_sha}" >> "${GITHUB_ENV}"
 
       - name: Set up Node.js for the pinned Railway CLI
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@1e60f620b9541d0c243d1e353a113f0012eb2ea2 # v4.0.3
         with:
           node-version: "20.19.4"
 
@@ -215,6 +265,8 @@ jobs:
         run: npm install --global @railway/cli@5.41.2
 
       - name: Verify Railway service topology before any upload
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
         run: |
           set -Eeuo pipefail
           railway link \
@@ -270,60 +322,1056 @@ jobs:
           done
           unset environment_config
 
-      - name: Verify production recovery evidence
+      - name: Verify Railway PITR defense in depth
         env:
-          RECOVERY_BACKUP_ID: ${{ inputs.recovery_backup_id }}
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
         run: |
           set -Eeuo pipefail
-          test -n "${RECOVERY_BACKUP_ID}" || {
-            echo "recovery_backup_id is required for every production deployment." >&2
-            exit 1
-          }
           pitr_status="$(railway postgres pitr status \
             --project "${RAILWAY_PROJECT_ID}" \
             --environment "${RAILWAY_PRODUCTION_ENVIRONMENT_ID}" \
             --service "${RAILWAY_POSTGRES_SERVICE_ID}" \
             --json)"
+          unset RAILWAY_TOKEN
           jq --exit-status '
             .enabled == true
             and .bucketWired == true
             and ((.blockers // []) | length == 0)
             and .live.available == true
-            and (.live.backupCoverageError == null)
-            and (.live.backupSetCount > 0)
-            and ((.live.latestBackupAt // "") | length > 0)
-            and ((.live.walMin // "") | length > 0)
-            and ((.live.walMax // "") | length > 0)
             and (.live.archiverError == null)
             and .live.archiverHealthy == true
             and ((.live.archiverLastArchivedAt // "") | length > 0)
             and ((.live.maxRestoreTime // "") | length > 0)
-          ' \
-            <<<"${pitr_status}" >/dev/null
-          backups="$(railway postgres pitr backup list \
+          ' <<<"${pitr_status}" >/dev/null
+
+          jq --exit-status '
+            .live.backupCoverageError == null
+            or (
+              (.live.backupCoverageError | type) == "string"
+              and (
+                .live.backupCoverageError
+                | sub("[[:space:]]+$"; "")
+              ) == "SSH command failed (exit exit status: 31):"
+            )
+          ' <<<"${pitr_status}" >/dev/null || {
+            echo "Railway PITR coverage failed for an unrecognized reason." >&2
+            exit 1
+          }
+          if [[ -n "$(jq -r '.live.backupCoverageError // ""' <<<"${pitr_status}")" ]]
+          then
+            echo "Railway PITR WAL archiving is live, but the CLI root-probe bug leaves base-backup coverage unproven; the exact logical restore below is the primary release recovery gate."
+          fi
+          PITR_ARCHIVED_AT="$(jq -r '.live.archiverLastArchivedAt' <<<"${pitr_status}")" \
+          PITR_RESTORE_AT="$(jq -r '.live.maxRestoreTime' <<<"${pitr_status}")" \
+          python - <<'PY'
+          import os
+          from datetime import UTC, datetime, timedelta
+
+          now = datetime.now(UTC)
+          for name in ("PITR_ARCHIVED_AT", "PITR_RESTORE_AT"):
+              raw = os.environ[name].strip().replace("Z", "+00:00")
+              try:
+                  value = datetime.fromisoformat(raw)
+              except ValueError:
+                  raise SystemExit(f"{name} is not a valid timestamp") from None
+              if value.tzinfo is None:
+                  raise SystemExit(f"{name} must include a timezone")
+              age = now - value.astimezone(UTC)
+              if age < -timedelta(minutes=5) or age > timedelta(minutes=15):
+                  raise SystemExit(f"{name} is outside the strict 15-minute recovery window")
+          PY
+          unset pitr_status PITR_ARCHIVED_AT PITR_RESTORE_AT
+
+      - name: Create and restore-verify a fresh logical backup
+        env:
+          EXPENSEOPS_BACKUP_DATABASE_URL: ${{ secrets.EXPENSEOPS_BACKUP_DATABASE_URL }}
+          EXPENSEOPS_BACKUP_RECIPIENT_CERT_B64: ${{ vars.EXPENSEOPS_BACKUP_RECIPIENT_CERT_B64 }}
+          EXPENSEOPS_BACKUP_RECIPIENT_CERT_SHA256: ${{ vars.EXPENSEOPS_BACKUP_RECIPIENT_CERT_SHA256 }}
+          POSTGRES_CLIENT_IMAGE: postgres:18.1-bookworm@sha256:cc9f4143a8d2fa8cf3749d0cb4d26ecf2d53a77a2ac807e9ebd67ae22426221a
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+          RESTORE_DATABASE_URL: postgresql://postgres:expenseops-ephemeral-restore@127.0.0.1:5432/expenseops_restore
+        run: |
+          set -Eeuo pipefail
+          set +x
+          test -n "${EXPENSEOPS_BACKUP_DATABASE_URL:-}" || {
+            echo "EXPENSEOPS_BACKUP_DATABASE_URL is required." >&2
+            exit 1
+          }
+          test -n "${EXPENSEOPS_BACKUP_RECIPIENT_CERT_B64:-}" || {
+            echo "EXPENSEOPS_BACKUP_RECIPIENT_CERT_B64 is required." >&2
+            exit 1
+          }
+          if [[ ! "${EXPENSEOPS_BACKUP_RECIPIENT_CERT_SHA256:-}" =~ ^([0-9A-F]{2}:){31}[0-9A-F]{2}$ ]]; then
+            echo "EXPENSEOPS_BACKUP_RECIPIENT_CERT_SHA256 must be a colon-delimited uppercase SHA-256 fingerprint." >&2
+            exit 1
+          fi
+          postgres_variables="$(railway variable list \
             --project "${RAILWAY_PROJECT_ID}" \
             --environment "${RAILWAY_PRODUCTION_ENVIRONMENT_ID}" \
             --service "${RAILWAY_POSTGRES_SERVICE_ID}" \
             --json)"
-          jq --exit-status --arg backup_id "${RECOVERY_BACKUP_ID}" \
-            'any(.[];
-              .id == $backup_id
-              and ((.externalId // "") | length > 0)
-              and .expiresAt == null
-              and .scheduleId == null
-              and ((now - (.createdAt | sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601)) >= 0)
-              and ((now - (.createdAt | sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601)) <= 86400)
-            )' \
-            <<<"${backups}" >/dev/null
-          schedules="$(railway postgres pitr schedule list \
-            --project "${RAILWAY_PROJECT_ID}" \
-            --environment "${RAILWAY_PRODUCTION_ENVIRONMENT_ID}" \
-            --service "${RAILWAY_POSTGRES_SERVICE_ID}" \
-            --json)"
-          jq --exit-status \
-            '([.[].kind] | sort) == ["DAILY", "MONTHLY", "WEEKLY"]' \
-            <<<"${schedules}" >/dev/null
-          unset pitr_status backups schedules
+          selected_public_url="$(jq -er \
+            '.DATABASE_PUBLIC_URL | select(type == "string" and length > 0)' \
+            <<<"${postgres_variables}")"
+          unset postgres_variables RAILWAY_TOKEN
+
+          recovery_dir="${RUNNER_TEMP}/expenseops-recovery"
+          install -d -m 0700 "${recovery_dir}"
+          export EXPENSEOPS_SELECTED_POSTGRES_PUBLIC_URL="${selected_public_url}"
+          export EXPENSEOPS_RECOVERY_DIR="${recovery_dir}"
+          unset selected_public_url
+          python - <<'PY'
+          from __future__ import annotations
+
+          import hashlib
+          import json
+          import os
+          import subprocess
+          import sys
+          from datetime import UTC, datetime
+          from pathlib import Path
+          from urllib.parse import parse_qsl, unquote, urlsplit
+
+          import psycopg
+          from psycopg import sql
+
+
+          class RecoveryGateError(RuntimeError):
+              pass
+
+
+          SequenceConfiguration = tuple[
+              int,
+              int,
+              int,
+              int,
+              int,
+              bool,
+              str,
+              str | None,
+              str | None,
+              str | None,
+          ]
+
+          APPLICATION_TABLES = frozenset(
+              {
+                  "agent_action_proposals",
+                  "agent_conversations",
+                  "agent_messages",
+                  "agent_runs",
+                  "agent_tool_calls",
+                  "ai_interpretation_memories",
+                  "alembic_version",
+                  "audit_events",
+                  "auth_identities",
+                  "auth_sessions",
+                  "data_consents",
+                  "errand_household_items",
+                  "errand_plan_stop_errands",
+                  "errand_plan_stop_household_items",
+                  "errand_plan_stops",
+                  "errand_plans",
+                  "errands",
+                  "expense_transactions",
+                  "financial_operations",
+                  "gmail_accounts",
+                  "gmail_sync_checkpoints",
+                  "household_item_acquisitions",
+                  "household_item_aliases",
+                  "household_items",
+                  "oauth_states",
+                  "outbox_events",
+                  "plaid_items",
+                  "plaid_webhook_events",
+                  "preferred_places",
+                  "promotion_digest_runs",
+                  "promotion_feedback",
+                  "promotion_messages",
+                  "promotion_offers",
+                  "promotion_settings",
+                  "purchase_receipt_items",
+                  "purchase_receipts",
+                  "rate_limit_events",
+                  "replenishment_feedback",
+                  "replenishment_job_runs",
+                  "replenishment_model_versions",
+                  "replenishment_predictions",
+                  "saved_locations",
+                  "scheduled_job_leases",
+                  "splitwise_integrations",
+                  "telegram_identities",
+                  "telegram_link_codes",
+                  "telegram_sessions",
+                  "telegram_webhook_updates",
+                  "users",
+                  "workspace_invitations",
+                  "workspace_memberships",
+                  "workspaces",
+              }
+          )
+          AGENT_TABLES = frozenset(
+              {
+                  "agent_action_proposals",
+                  "agent_conversations",
+                  "agent_messages",
+                  "agent_runs",
+                  "agent_tool_calls",
+              }
+          )
+          PRE_AGENT_REVISIONS = frozenset(
+              {
+                  "20260813_0023",
+                  "20260814_0024",
+                  "20260814_0025",
+              }
+          )
+          AGENT_REVISIONS = frozenset(
+              {
+                  "20260815_0026",
+                  "20260815_0027",
+                  "20260815_0028",
+                  "20260815_0029",
+              }
+          )
+
+
+          def sha256_file(path: Path) -> str:
+              digest = hashlib.sha256()
+              with path.open("rb") as stream:
+                  for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                      digest.update(chunk)
+              return digest.hexdigest()
+
+
+          def alembic_revision(connection: psycopg.Connection) -> str:
+              rows = connection.execute(
+                  "SELECT version_num FROM public.alembic_version"
+              ).fetchall()
+              if len(rows) != 1 or not isinstance(rows[0][0], str):
+                  raise RecoveryGateError(
+                      "The backup must contain exactly one Alembic revision."
+                  )
+              return rows[0][0]
+
+
+          def expected_relations(revision: str) -> list[tuple[str, str]]:
+              if revision in PRE_AGENT_REVISIONS:
+                  tables = APPLICATION_TABLES - AGENT_TABLES
+              elif revision in AGENT_REVISIONS:
+                  tables = APPLICATION_TABLES
+              else:
+                  raise RecoveryGateError(
+                      "The source revision has no reviewed recovery table inventory."
+                  )
+              return [("public", table) for table in sorted(tables)]
+
+
+          def database_target(raw: str, *, backup: bool) -> tuple[str, int, str]:
+              try:
+                  parsed = urlsplit(raw)
+                  host = (parsed.hostname or "").casefold()
+                  port = parsed.port or 5432
+                  database = unquote(parsed.path.removeprefix("/"))
+                  username = unquote(parsed.username or "")
+                  password = parsed.password or ""
+              except ValueError as exc:
+                  raise RecoveryGateError("A database URL is malformed.") from exc
+              if parsed.scheme not in {"postgres", "postgresql"}:
+                  raise RecoveryGateError("Backup URLs must use PostgreSQL libpq syntax.")
+              if not host or not database or "/" in database or parsed.fragment:
+                  raise RecoveryGateError("A database URL does not identify one database.")
+              if backup:
+                  if username != "expenseops_backup" or not password:
+                      raise RecoveryGateError(
+                          "The backup secret must authenticate exactly as expenseops_backup."
+                      )
+                  parameters = parse_qsl(parsed.query, keep_blank_values=True)
+                  if len(parameters) != 1 or parameters[0][0].casefold() != "sslmode":
+                      raise RecoveryGateError(
+                          "The public backup URL must set exactly one sslmode parameter."
+                      )
+                  if parameters[0][1].casefold() not in {
+                      "require",
+                      "verify-ca",
+                      "verify-full",
+                  }:
+                      raise RecoveryGateError(
+                          "The public backup connection must require PostgreSQL TLS."
+                      )
+              return host, port, database
+
+
+          def user_relations(connection: psycopg.Connection) -> list[tuple[str, str]]:
+              rows = connection.execute(
+                  """
+                  SELECT namespace.nspname, relation.relname
+                  FROM pg_catalog.pg_class AS relation
+                  JOIN pg_catalog.pg_namespace AS namespace
+                    ON namespace.oid = relation.relnamespace
+                  WHERE relation.relkind IN ('r', 'p')
+                    AND relation.relpersistence <> 't'
+                    AND namespace.nspname NOT IN ('pg_catalog', 'information_schema')
+                    AND namespace.nspname !~ '^pg_toast'
+                    AND namespace.nspname !~ '^pg_temp_'
+                  ORDER BY namespace.nspname, relation.relname
+                  """
+              ).fetchall()
+              return [(str(schema), str(name)) for schema, name in rows]
+
+
+          def row_manifest(
+              connection: psycopg.Connection,
+              relations: list[tuple[str, str]],
+          ) -> dict[tuple[str, str], int]:
+              manifest: dict[tuple[str, str], int] = {}
+              for schema, name in relations:
+                  count = connection.execute(
+                      sql.SQL("SELECT count(*) FROM {}.{}").format(
+                          sql.Identifier(schema), sql.Identifier(name)
+                      )
+                  ).fetchone()[0]
+                  manifest[(schema, name)] = int(count)
+              return manifest
+
+
+          def sequence_manifest(
+              connection: psycopg.Connection,
+          ) -> dict[tuple[str, str], SequenceConfiguration]:
+              rows = connection.execute(
+                  """
+                  SELECT sequence_namespace.nspname, sequence.relname,
+                         metadata.seqstart, metadata.seqincrement,
+                         metadata.seqmin, metadata.seqmax,
+                         metadata.seqcache, metadata.seqcycle,
+                         pg_catalog.format_type(metadata.seqtypid, NULL),
+                         table_namespace.nspname, table_relation.relname,
+                         attribute.attname
+                  FROM pg_catalog.pg_class AS sequence
+                  JOIN pg_catalog.pg_namespace AS sequence_namespace
+                    ON sequence_namespace.oid = sequence.relnamespace
+                  JOIN pg_catalog.pg_sequence AS metadata
+                    ON metadata.seqrelid = sequence.oid
+                  LEFT JOIN pg_catalog.pg_depend AS dependency
+                    ON dependency.classid = 'pg_class'::regclass
+                   AND dependency.objid = sequence.oid
+                   AND dependency.refclassid = 'pg_class'::regclass
+                   AND dependency.refobjsubid > 0
+                   AND dependency.deptype IN ('a', 'i')
+                  LEFT JOIN pg_catalog.pg_class AS table_relation
+                    ON table_relation.oid = dependency.refobjid
+                  LEFT JOIN pg_catalog.pg_namespace AS table_namespace
+                    ON table_namespace.oid = table_relation.relnamespace
+                  LEFT JOIN pg_catalog.pg_attribute AS attribute
+                    ON attribute.attrelid = table_relation.oid
+                   AND attribute.attnum = dependency.refobjsubid
+                  WHERE sequence.relkind = 'S'
+                    AND sequence_namespace.nspname NOT IN ('pg_catalog', 'information_schema')
+                    AND sequence_namespace.nspname !~ '^pg_toast'
+                    AND sequence_namespace.nspname !~ '^pg_temp_'
+                  ORDER BY sequence_namespace.nspname, sequence.relname
+                  """
+              ).fetchall()
+              manifest = {
+                  (str(schema), str(name)): (
+                      int(start),
+                      int(increment),
+                      int(minimum),
+                      int(maximum),
+                      int(cache),
+                      bool(cycles),
+                      str(data_type),
+                      str(table_schema) if table_schema is not None else None,
+                      str(table_name) if table_name is not None else None,
+                      str(column_name) if column_name is not None else None,
+                  )
+                  for (
+                      schema,
+                      name,
+                      start,
+                      increment,
+                      minimum,
+                      maximum,
+                      cache,
+                      cycles,
+                      data_type,
+                      table_schema,
+                      table_name,
+                      column_name,
+                  ) in rows
+              }
+              if len(manifest) != len(rows):
+                  raise RecoveryGateError(
+                      "A sequence has ambiguous ownership metadata."
+                  )
+              return manifest
+
+
+          def write_manifest(
+              path: Path,
+              rows: dict[tuple[str, str], int],
+              sequences: dict[tuple[str, str], SequenceConfiguration],
+          ) -> None:
+              payload = {
+                  "sequences": [
+                      {
+                          "schema": schema,
+                          "sequence": name,
+                          "start": configuration[0],
+                          "increment": configuration[1],
+                          "minimum": configuration[2],
+                          "maximum": configuration[3],
+                          "cache": configuration[4],
+                          "cycles": configuration[5],
+                          "data_type": configuration[6],
+                          "owned_by": (
+                              {
+                                  "schema": configuration[7],
+                                  "table": configuration[8],
+                                  "column": configuration[9],
+                              }
+                              if configuration[7] is not None
+                              else None
+                          ),
+                      }
+                      for (schema, name), configuration in sorted(sequences.items())
+                  ],
+                  "tables": [
+                      {"schema": schema, "table": name, "rows": count}
+                      for (schema, name), count in sorted(rows.items())
+                  ],
+              }
+              path.write_text(
+                  json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n",
+                  encoding="utf-8",
+              )
+              path.chmod(0o600)
+
+
+          def run_postgres_client(
+              database_url: str,
+              arguments: list[str],
+              recovery_dir: Path,
+          ) -> None:
+              environment = os.environ.copy()
+              environment["PGDATABASE"] = database_url
+              environment["PGCONNECT_TIMEOUT"] = "15"
+              command = [
+                  "docker",
+                  "run",
+                  "--rm",
+                  "--network",
+                  "host",
+                  "--env",
+                  "PGDATABASE",
+                  "--env",
+                  "PGCONNECT_TIMEOUT",
+                  "--volume",
+                  f"{recovery_dir}:/recovery",
+                  os.environ["POSTGRES_CLIENT_IMAGE"],
+                  *arguments,
+              ]
+              result = subprocess.run(
+                  command,
+                  env=environment,
+                  stdout=subprocess.PIPE,
+                  stderr=subprocess.PIPE,
+                  check=False,
+              )
+              if result.returncode != 0:
+                  raise RecoveryGateError(
+                      f"PostgreSQL client {arguments[0]} failed; connection output withheld."
+                  )
+
+
+          def verify_backup_role(connection: psycopg.Connection) -> None:
+              contract = connection.execute(
+                  """
+                  WITH backup_role AS (
+                      SELECT oid, rolname, rolsuper, rolcreaterole, rolcreatedb,
+                             rolreplication, rolbypassrls, rolcanlogin,
+                             rolinherit, rolconfig
+                      FROM pg_catalog.pg_roles
+                      WHERE rolname = current_user
+                  ), user_tables AS (
+                      SELECT relation.oid
+                      FROM pg_catalog.pg_class AS relation
+                      JOIN pg_catalog.pg_namespace AS namespace
+                        ON namespace.oid = relation.relnamespace
+                      WHERE relation.relkind IN ('r', 'p')
+                        AND namespace.nspname NOT IN ('pg_catalog', 'information_schema')
+                        AND namespace.nspname !~ '^pg_toast'
+                        AND namespace.nspname !~ '^pg_temp_'
+                  ), user_non_tables AS (
+                      SELECT relation.oid
+                      FROM pg_catalog.pg_class AS relation
+                      JOIN pg_catalog.pg_namespace AS namespace
+                        ON namespace.oid = relation.relnamespace
+                      WHERE relation.relkind IN ('v', 'm', 'f')
+                        AND namespace.nspname NOT IN ('pg_catalog', 'information_schema')
+                        AND namespace.nspname !~ '^pg_toast'
+                        AND namespace.nspname !~ '^pg_temp_'
+                  ), user_sequences AS (
+                      SELECT relation.oid
+                      FROM pg_catalog.pg_class AS relation
+                      JOIN pg_catalog.pg_namespace AS namespace
+                        ON namespace.oid = relation.relnamespace
+                      WHERE relation.relkind = 'S'
+                        AND namespace.nspname NOT IN ('pg_catalog', 'information_schema')
+                        AND namespace.nspname !~ '^pg_toast'
+                        AND namespace.nspname !~ '^pg_temp_'
+                  ), user_functions AS (
+                      SELECT function_object.oid
+                      FROM pg_catalog.pg_proc AS function_object
+                      JOIN pg_catalog.pg_namespace AS namespace
+                        ON namespace.oid = function_object.pronamespace
+                      WHERE namespace.nspname NOT IN ('pg_catalog', 'information_schema')
+                        AND namespace.nspname !~ '^pg_toast'
+                        AND namespace.nspname !~ '^pg_temp_'
+                  ), user_types AS (
+                      SELECT type_object.oid
+                      FROM pg_catalog.pg_type AS type_object
+                      JOIN pg_catalog.pg_namespace AS namespace
+                        ON namespace.oid = type_object.typnamespace
+                      WHERE namespace.nspname NOT IN ('pg_catalog', 'information_schema')
+                        AND namespace.nspname !~ '^pg_toast'
+                        AND namespace.nspname !~ '^pg_temp_'
+                        AND NOT (
+                            type_object.typelem <> 0
+                            AND type_object.typsubscript =
+                                'pg_catalog.array_subscript_handler'::regproc
+                        )
+                        AND type_object.typtype <> 'm'
+                  )
+                  SELECT jsonb_build_object(
+                      'role_name', role.rolname,
+                      'attributes_safe',
+                          role.rolcanlogin
+                          AND NOT role.rolsuper
+                          AND role.rolbypassrls
+                          AND NOT role.rolcreatedb
+                          AND NOT role.rolcreaterole
+                          AND NOT role.rolreplication
+                          AND NOT role.rolinherit
+                          AND coalesce(role.rolconfig, ARRAY[]::text[])
+                              = ARRAY['default_transaction_read_only=on']::text[],
+                      'session_read_only',
+                          current_setting('default_transaction_read_only') = 'on'
+                          AND current_setting('transaction_read_only') = 'on',
+                      'database_safe',
+                          has_database_privilege(
+                              current_user, current_database(), 'CONNECT'
+                          )
+                          AND NOT has_database_privilege(
+                              current_user, current_database(), 'CREATE'
+                          )
+                          AND NOT has_database_privilege(
+                              current_user, current_database(), 'TEMPORARY'
+                          ),
+                      'public_schema_safe',
+                          has_schema_privilege(current_user, 'public', 'USAGE')
+                          AND NOT has_schema_privilege(
+                              current_user, 'public', 'CREATE'
+                          ),
+                      'membership_count', (
+                          SELECT count(*)
+                          FROM pg_catalog.pg_auth_members AS membership
+                          WHERE membership.member = role.oid
+                             OR membership.roleid = role.oid
+                      ),
+                      'unexpected_schema_privilege_count', (
+                          SELECT count(*)
+                          FROM pg_catalog.pg_namespace AS namespace
+                          WHERE namespace.nspname <> 'public'
+                            AND namespace.nspname <> 'information_schema'
+                            AND namespace.nspname !~ '^pg_'
+                            AND (
+                                has_schema_privilege(
+                                    current_user, namespace.oid, 'USAGE'
+                                )
+                                OR has_schema_privilege(
+                                    current_user, namespace.oid, 'CREATE'
+                                )
+                            )
+                      ),
+                      'unreadable_table_count', (
+                          SELECT count(*) FROM user_tables
+                          WHERE NOT has_table_privilege(oid, 'SELECT')
+                      ),
+                      'writable_table_count', (
+                          SELECT count(*) FROM user_tables
+                          WHERE has_table_privilege(
+                                    oid,
+                                    'INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER'
+                                )
+                             OR has_any_column_privilege(
+                                    oid, 'INSERT,UPDATE,REFERENCES'
+                                )
+                      ),
+                      'unexpected_relation_privilege_count', (
+                          SELECT count(*) FROM user_non_tables
+                          WHERE has_table_privilege(
+                                    oid,
+                                    'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER'
+                                )
+                             OR has_any_column_privilege(
+                                    oid, 'SELECT,INSERT,UPDATE,REFERENCES'
+                                )
+                      ),
+                      'unreadable_sequence_count', (
+                          SELECT count(*) FROM user_sequences
+                          WHERE NOT has_sequence_privilege(oid, 'SELECT')
+                      ),
+                      'writable_sequence_count', (
+                          SELECT count(*) FROM user_sequences
+                          WHERE has_sequence_privilege(oid, 'USAGE,UPDATE')
+                      ),
+                      'executable_function_count', (
+                          SELECT count(*) FROM user_functions
+                          WHERE has_function_privilege(oid, 'EXECUTE')
+                      ),
+                      'usable_type_count', (
+                          SELECT count(*) FROM user_types
+                          WHERE has_type_privilege(oid, 'USAGE')
+                      ),
+                      'owned_object_count', (
+                          SELECT count(*) FROM (
+                              SELECT database_object.oid
+                              FROM pg_catalog.pg_database AS database_object
+                              WHERE database_object.datdba = role.oid
+                              UNION ALL
+                              SELECT relation.oid
+                              FROM pg_catalog.pg_class AS relation
+                              WHERE relation.relowner = role.oid
+                              UNION ALL
+                              SELECT function_object.oid
+                              FROM pg_catalog.pg_proc AS function_object
+                              WHERE function_object.proowner = role.oid
+                              UNION ALL
+                              SELECT type_object.oid
+                              FROM pg_catalog.pg_type AS type_object
+                              WHERE type_object.typowner = role.oid
+                              UNION ALL
+                              SELECT namespace.oid
+                              FROM pg_catalog.pg_namespace AS namespace
+                              WHERE namespace.nspowner = role.oid
+                          ) AS owned
+                      )
+                  )
+                  FROM backup_role AS role
+                  """
+              ).fetchone()
+              expected = {
+                  "role_name": "expenseops_backup",
+                  "attributes_safe": True,
+                  "session_read_only": True,
+                  "database_safe": True,
+                  "public_schema_safe": True,
+                  "membership_count": 0,
+                  "unexpected_schema_privilege_count": 0,
+                  "unreadable_table_count": 0,
+                  "writable_table_count": 0,
+                  "unexpected_relation_privilege_count": 0,
+                  "unreadable_sequence_count": 0,
+                  "writable_sequence_count": 0,
+                  "executable_function_count": 0,
+                  "usable_type_count": 0,
+                  "owned_object_count": 0,
+              }
+              if contract is None or contract[0] != expected:
+                  raise RecoveryGateError(
+                      "expenseops_backup does not match the isolated live backup contract."
+                  )
+
+
+          def verify_owned_sequence_safety(connection: psycopg.Connection) -> None:
+              owned_sequences = connection.execute(
+                  """
+                  SELECT sequence_namespace.nspname, sequence.relname,
+                         table_namespace.nspname, table_relation.relname,
+                         attribute.attname, metadata.seqincrement,
+                         metadata.seqmin, metadata.seqmax, metadata.seqcycle
+                  FROM pg_catalog.pg_class AS sequence
+                  JOIN pg_catalog.pg_namespace AS sequence_namespace
+                    ON sequence_namespace.oid = sequence.relnamespace
+                  JOIN pg_catalog.pg_sequence AS metadata
+                    ON metadata.seqrelid = sequence.oid
+                  JOIN pg_catalog.pg_depend AS dependency
+                    ON dependency.classid = 'pg_class'::regclass
+                   AND dependency.objid = sequence.oid
+                   AND dependency.refclassid = 'pg_class'::regclass
+                   AND dependency.refobjsubid > 0
+                   AND dependency.deptype IN ('a', 'i')
+                  JOIN pg_catalog.pg_class AS table_relation
+                    ON table_relation.oid = dependency.refobjid
+                  JOIN pg_catalog.pg_namespace AS table_namespace
+                    ON table_namespace.oid = table_relation.relnamespace
+                  JOIN pg_catalog.pg_attribute AS attribute
+                    ON attribute.attrelid = table_relation.oid
+                   AND attribute.attnum = dependency.refobjsubid
+                  WHERE sequence.relkind = 'S'
+                    AND sequence_namespace.nspname NOT IN ('pg_catalog', 'information_schema')
+                  ORDER BY sequence_namespace.nspname, sequence.relname
+                  """
+              ).fetchall()
+              for (
+                  sequence_schema,
+                  sequence_name,
+                  table_schema,
+                  table_name,
+                  column_name,
+                  increment,
+                  minimum,
+                  maximum,
+                  cycles,
+              ) in owned_sequences:
+                  last_value, is_called = connection.execute(
+                      sql.SQL("SELECT last_value, is_called FROM {}.{}").format(
+                          sql.Identifier(sequence_schema),
+                          sql.Identifier(sequence_name),
+                      )
+                  ).fetchone()
+                  aggregate = sql.SQL("max") if increment > 0 else sql.SQL("min")
+                  extreme = connection.execute(
+                      sql.SQL("SELECT {}({}) FROM {}.{}").format(
+                          aggregate,
+                          sql.Identifier(column_name),
+                          sql.Identifier(table_schema),
+                          sql.Identifier(table_name),
+                      )
+                  ).fetchone()[0]
+                  candidate = last_value + increment if is_called else last_value
+                  if increment > 0 and candidate > maximum:
+                      if not cycles:
+                          raise RecoveryGateError("A restored owned sequence is exhausted.")
+                      candidate = minimum
+                  elif increment < 0 and candidate < minimum:
+                      if not cycles:
+                          raise RecoveryGateError("A restored owned sequence is exhausted.")
+                      candidate = maximum
+                  if extreme is not None and (
+                      (increment > 0 and candidate <= extreme)
+                      or (increment < 0 and candidate >= extreme)
+                  ):
+                      raise RecoveryGateError(
+                          "A restored owned sequence could collide with restored rows."
+                      )
+
+
+          def main() -> None:
+              source_url = os.environ["EXPENSEOPS_BACKUP_DATABASE_URL"]
+              selected_url = os.environ["EXPENSEOPS_SELECTED_POSTGRES_PUBLIC_URL"]
+              restore_url = os.environ["RESTORE_DATABASE_URL"]
+              recovery_dir = Path(os.environ["EXPENSEOPS_RECOVERY_DIR"])
+              dump_path = recovery_dir / "expenseops-production.dump"
+              source_manifest_path = recovery_dir / "source-manifest.json"
+              restored_manifest_path = recovery_dir / "restored-manifest.json"
+              metadata_path = recovery_dir / "recovery-metadata.json"
+              backup_started_at = datetime.now(UTC)
+
+              source_target = database_target(source_url, backup=True)
+              selected_target = database_target(selected_url, backup=False)
+              if source_target != selected_target:
+                  raise RecoveryGateError(
+                      "The backup secret does not target the selected Postgres public endpoint."
+                  )
+              restore_target = database_target(restore_url, backup=False)
+              if restore_target != ("127.0.0.1", 5432, "expenseops_restore"):
+                  raise RecoveryGateError("The restore target is not the isolated local database.")
+
+              with psycopg.connect(source_url, autocommit=True) as source:
+                  source.execute(
+                      "BEGIN TRANSACTION ISOLATION LEVEL SERIALIZABLE READ ONLY DEFERRABLE"
+                  )
+                  try:
+                      snapshot = str(source.execute("SELECT pg_export_snapshot()").fetchone()[0])
+                      verify_backup_role(source)
+                      source_revision = alembic_revision(source)
+                      relations = user_relations(source)
+                      reviewed_relations = expected_relations(source_revision)
+                      if relations != reviewed_relations:
+                          missing = sorted(set(reviewed_relations) - set(relations))
+                          unexpected = sorted(set(relations) - set(reviewed_relations))
+                          details = "; ".join(
+                              (
+                                  "missing="
+                                  + ",".join(
+                                      f"{schema}.{table}" for schema, table in missing
+                                  ),
+                                  "unexpected="
+                                  + ",".join(
+                                      f"{schema}.{table}" for schema, table in unexpected
+                                  ),
+                              )
+                          )
+                          raise RecoveryGateError(
+                              "The source table inventory differs from the reviewed "
+                              f"application inventory: {details}"
+                          )
+                      source_rows = row_manifest(source, relations)
+                      if ("public", "alembic_version") not in source_rows:
+                          raise RecoveryGateError(
+                              "The exact table manifest omits public.alembic_version."
+                          )
+                      source_server_version = source.info.server_version
+                      source_sequences = sequence_manifest(source)
+                      run_postgres_client(
+                          source_url,
+                          [
+                              "pg_dump",
+                              "--format=custom",
+                              "--compress=zstd:9",
+                              "--lock-wait-timeout=30s",
+                              "--no-owner",
+                              "--no-privileges",
+                              "--no-password",
+                              f"--snapshot={snapshot}",
+                              "--file=/recovery/expenseops-production.dump",
+                          ],
+                          recovery_dir,
+                      )
+                      write_manifest(
+                          source_manifest_path,
+                          source_rows,
+                          source_sequences,
+                      )
+                  finally:
+                      source.execute("ROLLBACK")
+
+              run_postgres_client(
+                  restore_url,
+                  ["pg_restore", "--list", "/recovery/expenseops-production.dump"],
+                  recovery_dir,
+              )
+              run_postgres_client(
+                  restore_url,
+                  [
+                      "pg_restore",
+                      "--clean",
+                      "--if-exists",
+                      "--exit-on-error",
+                      "--single-transaction",
+                      "--no-owner",
+                      "--no-privileges",
+                      f"--dbname={restore_url}",
+                      "/recovery/expenseops-production.dump",
+                  ],
+                  recovery_dir,
+              )
+              with psycopg.connect(restore_url) as restored:
+                  if not 180000 <= restored.info.server_version < 190000:
+                      raise RecoveryGateError("The isolated restore did not use PostgreSQL 18.")
+                  restored_relations = user_relations(restored)
+                  restored_rows = row_manifest(restored, restored_relations)
+                  restored_sequences = sequence_manifest(restored)
+                  restored_revision = alembic_revision(restored)
+                  write_manifest(
+                      restored_manifest_path,
+                      restored_rows,
+                      restored_sequences,
+                  )
+                  if restored_rows != source_rows:
+                      changed = sorted(set(restored_rows) ^ set(source_rows))
+                      changed.extend(
+                          table
+                          for table in sorted(set(restored_rows) & set(source_rows))
+                          if restored_rows[table] != source_rows[table]
+                      )
+                      names = ", ".join(f"{schema}.{table}" for schema, table in changed)
+                      raise RecoveryGateError(
+                          f"Restored per-table row counts differ for: {names}"
+                      )
+                  if restored_sequences != source_sequences:
+                      raise RecoveryGateError(
+                          "Restored sequence inventory, ownership, or configuration differs."
+                      )
+                  if restored_revision != source_revision:
+                      raise RecoveryGateError(
+                          "The restored Alembic revision differs from the source snapshot."
+                      )
+                  verify_owned_sequence_safety(restored)
+                  restored_server_version = restored.info.server_version
+              source_target_fingerprint = hashlib.sha256(
+                  "|".join((source_target[0], str(source_target[1]), source_target[2])).encode()
+              ).hexdigest()
+              metadata = {
+                  "format_version": 1,
+                  "backup_started_at": backup_started_at.isoformat(),
+                  "backup_verified_at": datetime.now(UTC).isoformat(),
+                  "release_sha": os.environ["RELEASE_SHA"],
+                  "github_run_id": os.environ["GITHUB_RUN_ID"],
+                  "github_run_attempt": os.environ["GITHUB_RUN_ATTEMPT"],
+                  "railway_project_id": os.environ["RAILWAY_PROJECT_ID"],
+                  "railway_environment_id": os.environ[
+                      "RAILWAY_PRODUCTION_ENVIRONMENT_ID"
+                  ],
+                  "railway_postgres_service_id": os.environ[
+                      "RAILWAY_POSTGRES_SERVICE_ID"
+                  ],
+                  "source_target_sha256": source_target_fingerprint,
+                  "source_snapshot_id": snapshot,
+                  "source_postgresql_version_num": source_server_version,
+                  "restored_postgresql_version_num": restored_server_version,
+                  "source_alembic_revision": source_revision,
+                  "restored_alembic_revision": restored_revision,
+                  "dump_format": "PostgreSQL custom",
+                  "postgres_client_image": os.environ["POSTGRES_CLIENT_IMAGE"],
+                  "table_count": len(source_rows),
+                  "sequence_count": len(source_sequences),
+                  "dump_sha256": sha256_file(dump_path),
+                  "source_manifest_sha256": sha256_file(source_manifest_path),
+                  "restored_manifest_sha256": sha256_file(restored_manifest_path),
+                  "recipient_certificate_sha256": os.environ[
+                      "EXPENSEOPS_BACKUP_RECIPIENT_CERT_SHA256"
+                  ],
+                  "encryption": "CMS AuthEnvelopedData AES-256-GCM; RSA-OAEP SHA-256/MGF1-SHA-256",
+                  "logical_backup_trigger": "approved production release",
+                  "logical_backup_between_release_rpo": "unbounded",
+                  "artifact_retention_days": 90,
+                  "restore_verification": (
+                      "plaintext restored before encryption; exact tables, rows, "
+                      "Alembic revision, and sequence safety verified"
+                  ),
+                  "bundle_members": [
+                      dump_path.name,
+                      source_manifest_path.name,
+                      restored_manifest_path.name,
+                      metadata_path.name,
+                  ],
+              }
+              metadata_path.write_text(
+                  json.dumps(metadata, sort_keys=True, separators=(",", ":")) + "\n",
+                  encoding="utf-8",
+              )
+              metadata_path.chmod(0o600)
+              print(
+                  "Fresh custom-format backup restored with exact row counts across "
+                  f"{len(source_rows)} tables and {len(source_sequences)} sequences."
+              )
+
+
+          try:
+              main()
+          except RecoveryGateError as exc:
+              print(str(exc), file=sys.stderr)
+              raise SystemExit(1) from None
+          except Exception as exc:
+              print(
+                  f"Production recovery verification failed ({type(exc).__name__}); "
+                  "connection details withheld.",
+                  file=sys.stderr,
+              )
+              raise SystemExit(1) from None
+          PY
+          unset EXPENSEOPS_SELECTED_POSTGRES_PUBLIC_URL
+
+          recipient_cert="${recovery_dir}/backup-recipient.pem"
+          plaintext_bundle="${recovery_dir}/expenseops-production-${RELEASE_SHA}.tar"
+          encrypted_bundle="${plaintext_bundle}.cms"
+          tar --create --format=posix --file "${plaintext_bundle}" \
+            --directory "${recovery_dir}" \
+            expenseops-production.dump \
+            source-manifest.json \
+            restored-manifest.json \
+            recovery-metadata.json
+          test "$(tar --list --file "${plaintext_bundle}" | wc -l)" = "4"
+          printf '%s' "${EXPENSEOPS_BACKUP_RECIPIENT_CERT_B64}" \
+            | base64 --decode >"${recipient_cert}"
+          test "$(grep -c -- '-----BEGIN CERTIFICATE-----' "${recipient_cert}")" = "1"
+          if grep --quiet -- 'PRIVATE KEY' "${recipient_cert}"; then
+            echo "The backup recipient value must never contain a private key." >&2
+            exit 1
+          fi
+          "${EXPENSEOPS_OPENSSL_BIN}" version \
+            | grep --quiet '^OpenSSL 3\.5\.7 '
+          actual_fingerprint="$("${EXPENSEOPS_OPENSSL_BIN}" x509 \
+            -in "${recipient_cert}" -noout -fingerprint -sha256)"
+          actual_fingerprint="${actual_fingerprint#*=}"
+          test "${actual_fingerprint}" = "${EXPENSEOPS_BACKUP_RECIPIENT_CERT_SHA256}" || {
+            echo "The backup recipient certificate fingerprint is not approved." >&2
+            exit 1
+          }
+          "${EXPENSEOPS_OPENSSL_BIN}" x509 \
+            -in "${recipient_cert}" -noout -checkend 7776000
+          "${EXPENSEOPS_OPENSSL_BIN}" x509 \
+            -in "${recipient_cert}" -noout -purpose \
+            | grep --quiet '^S/MIME encryption : Yes$'
+          "${EXPENSEOPS_OPENSSL_BIN}" x509 \
+            -in "${recipient_cert}" -noout -text \
+            | grep --quiet 'Public Key Algorithm: rsaEncryption'
+          rsa_bits="$("${EXPENSEOPS_OPENSSL_BIN}" x509 \
+            -in "${recipient_cert}" -pubkey -noout \
+            | "${EXPENSEOPS_OPENSSL_BIN}" pkey -pubin -text -noout \
+            | sed -n 's/^Public-Key: (\([0-9][0-9]*\) bit)$/\1/p')"
+          test -n "${rsa_bits}" && test "${rsa_bits}" -ge 3072 || {
+            echo "The backup recipient certificate must contain an RSA key of at least 3072 bits." >&2
+            exit 1
+          }
+          "${EXPENSEOPS_OPENSSL_BIN}" cms \
+            -encrypt -binary -outform DER -aes-256-gcm \
+            -in "${plaintext_bundle}" \
+            -out "${encrypted_bundle}" \
+            -recip "${recipient_cert}" \
+            -keyopt rsa_padding_mode:oaep \
+            -keyopt rsa_oaep_md:sha256 \
+            -keyopt rsa_mgf1_md:sha256
+          test -s "${encrypted_bundle}"
+          "${EXPENSEOPS_OPENSSL_BIN}" cms \
+            -cmsout -inform DER -in "${encrypted_bundle}" -out /dev/null
+          cms_structure="$("${EXPENSEOPS_OPENSSL_BIN}" asn1parse \
+            -inform DER -in "${encrypted_bundle}" -i -dump -dlimit 1)"
+          grep --quiet 'id-smime-ct-authEnvelopedData' <<<"${cms_structure}"
+          grep --quiet 'aes-256-gcm' <<<"${cms_structure}"
+          grep --quiet 'rsaesOaep' <<<"${cms_structure}"
+          test "$(grep -c 'sha256' <<<"${cms_structure}")" -ge 2
+          backup_cms_sha256="$(sha256sum "${encrypted_bundle}" | cut -d ' ' -f 1)"
+          [[ "${backup_cms_sha256}" =~ ^[0-9a-f]{64}$ ]]
+          echo "BACKUP_CMS_SHA256=${backup_cms_sha256}" >>"${GITHUB_ENV}"
+          unset cms_structure EXPENSEOPS_BACKUP_DATABASE_URL
+          unset EXPENSEOPS_BACKUP_RECIPIENT_CERT_B64
+          unset EXPENSEOPS_BACKUP_RECIPIENT_CERT_SHA256 actual_fingerprint rsa_bits
+          rm -f -- \
+            "${recovery_dir}/expenseops-production.dump" \
+            "${recovery_dir}/source-manifest.json" \
+            "${recovery_dir}/restored-manifest.json" \
+            "${recovery_dir}/recovery-metadata.json" \
+            "${plaintext_bundle}" \
+            "${recipient_cert}"
+          test "$(find "${recovery_dir}" -maxdepth 1 -type f | wc -l)" = "1"
+          test -f "${encrypted_bundle}"
+
+      - name: Upload only the authenticated encrypted backup
+        id: encrypted-backup-artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: expenseops-production-backup-${{ inputs.release_sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/expenseops-recovery/expenseops-production-${{ inputs.release_sha }}.tar.cms
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 90
+
+      - name: Record the immutable recovery artifact identity
+        env:
+          BACKUP_ARTIFACT_DIGEST: ${{ steps.encrypted-backup-artifact.outputs.artifact-digest }}
+          BACKUP_ARTIFACT_ID: ${{ steps.encrypted-backup-artifact.outputs.artifact-id }}
+          BACKUP_ARTIFACT_URL: ${{ steps.encrypted-backup-artifact.outputs.artifact-url }}
+        run: |
+          set -Eeuo pipefail
+          [[ "${BACKUP_ARTIFACT_ID}" =~ ^[0-9]+$ ]]
+          [[ "${BACKUP_ARTIFACT_DIGEST}" =~ ^[0-9a-f]{64}$ ]]
+          [[ "${BACKUP_CMS_SHA256}" =~ ^[0-9a-f]{64}$ ]]
+          [[ "${BACKUP_ARTIFACT_URL}" == \
+            "https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/artifacts/${BACKUP_ARTIFACT_ID}" ]]
+          expected_expiry="$(date --utc --date='+90 days' '+%Y-%m-%dT%H:%M:%SZ')"
+          {
+            echo "### Production recovery artifact"
+            echo
+            echo "- Artifact ID: ${BACKUP_ARTIFACT_ID}"
+            echo "- GitHub artifact archive SHA-256: ${BACKUP_ARTIFACT_DIGEST}"
+            echo "- Raw CMS ciphertext SHA-256: ${BACKUP_CMS_SHA256}"
+            echo "- Retention: 90 days"
+            echo "- Expected expiry (subject to GitHub retention policy): ${expected_expiry}"
+            echo "- Logical-backup trigger: this approved production release"
+          } >>"${GITHUB_STEP_SUMMARY}"
 
       - name: Verify a normal release starts from hardened production
         if: ${{ inputs.release_phase == 'normal' }}
@@ -334,6 +1382,8 @@ jobs:
 
       - name: Verify app-only rollback targets the hardened RLS boundary
         if: ${{ inputs.release_phase == 'rollback' }}
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
         run: |
           set -Eeuo pipefail
           railway ssh \
@@ -347,6 +1397,7 @@ jobs:
         if: ${{ inputs.release_phase == 'hardened' }}
         env:
           COMPATIBILITY_SHA: ${{ inputs.compatibility_sha }}
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
         run: |
           set -Eeuo pipefail
           deployments="$(railway deployment list \
@@ -371,6 +1422,8 @@ jobs:
           unset deployments latest_success_message expected_message readiness_code
 
       - name: Verify the Agent remains read only
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
         run: |
           set -Eeuo pipefail
           for service_id in \
@@ -399,6 +1452,8 @@ jobs:
           unset variables
 
       - name: Verify database credentials are isolated by service
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
         run: |
           set -Eeuo pipefail
           database_target_fingerprints=()
@@ -446,6 +1501,8 @@ jobs:
             fi
             for forbidden_name in \
               EXPENSEOPS_ADMIN_DATABASE_URL \
+              EXPENSEOPS_BACKUP_DATABASE_URL \
+              EXPENSEOPS_BACKUP_PASSWORD \
               EXPENSEOPS_RUNTIME_PASSWORD \
               EXPENSEOPS_MIGRATOR_PASSWORD \
               ADMIN_DATABASE_URL \
@@ -529,6 +1586,8 @@ jobs:
 
       - name: Deploy migration job and wait for terminal success
         if: ${{ inputs.release_phase != 'rollback' }}
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
         run: |
           bash scripts/railway_deploy_and_wait.sh \
             "${RAILWAY_MIGRATION_SERVICE_ID}" \
@@ -537,6 +1596,8 @@ jobs:
             migrations
 
       - name: Deploy outbox worker after migrations succeed
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
         run: |
           bash scripts/railway_deploy_and_wait.sh \
             "${RAILWAY_OUTBOX_SERVICE_ID}" \
@@ -545,6 +1606,8 @@ jobs:
             outbox
 
       - name: Deploy Gmail receipts cron after outbox succeeds
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
         run: |
           bash scripts/railway_deploy_and_wait.sh \
             "${RAILWAY_GMAIL_RECEIPTS_SERVICE_ID}" \
@@ -553,6 +1616,8 @@ jobs:
             gmail-receipts
 
       - name: Deploy Gmail promotions cron after receipts succeeds
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
         run: |
           bash scripts/railway_deploy_and_wait.sh \
             "${RAILWAY_GMAIL_PROMOTIONS_SERVICE_ID}" \
@@ -561,6 +1626,8 @@ jobs:
             gmail-promotions
 
       - name: Deploy web only after every runtime succeeds
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
         run: |
           bash scripts/railway_deploy_and_wait.sh \
             "${RAILWAY_WEB_SERVICE_ID}" \

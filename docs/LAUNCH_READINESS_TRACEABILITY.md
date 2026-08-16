@@ -217,12 +217,14 @@ Phase 7.
 | Reproducibility | Exact Python runtime requirements, an npm lock, pinned runtime image versions, a non-root container, and a GitHub release gate cover lint, tests, PostgreSQL migration parity, dependency audits, frontend build, and container build |
 | Dependency security | Python and npm advisory scans found zero known vulnerabilities after replacing the unmaintained JWT dependency and upgrading affected cryptography, framework, settings, and multipart packages |
 | Privacy browser matrix | Privacy, legal, support, retention, consent, and guarded-deletion UX passed desktop Chromium, mobile Chromium, Firefox, and WebKit |
-| Operations runbook | RPO 5 minutes with healthy PITR, fallback RPO 24 hours, RTO 4 hours, release/rollback, quarterly restore drill, key rotation, retention, alert thresholds, and incident basics are documented |
+| Operations runbook | Railway Hobby PITR is documented as unproven defense in depth; every production deployment is gated by a fresh, encrypted logical backup and exact PostgreSQL 18 restore proof retained for 90 days. Logical-backup RPO is truthfully unbounded between releases; release/rollback, key rotation, retention, alert thresholds, and incident basics are documented. |
 | Regression gate | Backend 582 passed; Ruff and diff checks passed; frontend unit 21 passed; lint had zero errors (20 pre-existing warnings); production build passed; Python and npm dependency audits reported zero known vulnerabilities; focused privacy browser matrix 4 passed |
 
-Phase 7 is complete only at the code gate. GA remains blocked until Railway backups and PITR are
-enabled, a timed restore drill proves the declared RPO/RTO, alert delivery is tested, and the
+Phase 7 is complete only at the code gate. GA remains blocked until the release-time logical backup
+and isolated PostgreSQL 18 restore gate is observed successfully, alert delivery is tested, and the
 dedicated migration job, outbox worker, and retention cron are observed successfully in production.
+Railway PITR remains additional archive protection until a plan/capacity change permits a timed
+isolated Railway restore drill; it is not counted as proven recovery on Hobby.
 
 ## V1 validation evidence
 

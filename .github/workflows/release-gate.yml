@@ -137,8 +137,12 @@ jobs:
           for admin_url in \
             "$ADMIN_FRESH_DATABASE_URL" "$ADMIN_INCREMENTAL_DATABASE_URL"; do
             EXPENSEOPS_ADMIN_DATABASE_URL="$admin_url" \
+            EXPENSEOPS_BACKUP_PASSWORD="ci-expenseops-backup-password-2026" \
+              python scripts/bootstrap_database_roles.py --bootstrap-backup-role
+            EXPENSEOPS_ADMIN_DATABASE_URL="$admin_url" \
             EXPENSEOPS_RUNTIME_PASSWORD="ci-expenseops-runtime-password-2026" \
             EXPENSEOPS_MIGRATOR_PASSWORD="ci-expenseops-migrator-password-2026" \
+            EXPENSEOPS_BACKUP_PASSWORD="ci-expenseops-backup-password-2026" \
               python scripts/bootstrap_database_roles.py --apply
           done
       - name: Verify fresh migration to head and schema drift
