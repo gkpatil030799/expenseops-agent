@@ -170,13 +170,44 @@ class AgentReplenishmentItem(StrictAgentModel):
     name: str = Field(min_length=1, max_length=255)
     predicted_due_on: date | None = None
     confidence: float | None = Field(default=None, ge=0, le=1)
+    confidence_level: Literal["insufficient", "low", "medium", "high"] = "insufficient"
+    evidence_basis: Literal[
+        "configured_cadence",
+        "purchase_pattern",
+        "validated_model",
+        "insufficient_history",
+    ] = "insufficient_history"
+    due_state: Literal["likely_due", "probably_due", "not_due", "learning"] = "learning"
     reason: str | None = Field(default=None, min_length=1, max_length=500)
+    quantity: str | None = Field(default=None, min_length=1, max_length=64)
+    unit: str | None = Field(default=None, min_length=1, max_length=64)
+    last_acquired_on: date | None = None
+    confirmed_acquisition_count: int = Field(default=0, ge=0)
+
+
+class AgentAcquisitionSummary(StrictAgentModel):
+    acquired_on: date
+    merchant: str | None = Field(default=None, min_length=1, max_length=255)
+    quantity: float | None = Field(default=None, ge=0)
+    unit: str | None = Field(default=None, min_length=1, max_length=64)
+    evidence_type: Literal["manual", "receipt", "transaction", "imported", "correction"]
 
 
 class AgentReplenishmentSummaryBlock(AgentResponseBlockBase):
     type: Literal["replenishment_summary"] = "replenishment_summary"
     title: str = Field(min_length=1, max_length=160)
+    # Keep the original v1.0 acceptance bound for persisted historical messages;
+    # current read tools still emit at most 20 rows.
     items: list[AgentReplenishmentItem] = Field(default_factory=list, max_length=50)
+    acquisition_history: list[AgentAcquisitionSummary] = Field(default_factory=list, max_length=20)
+    acquisition_history_truncated: bool = False
+    total_count: int = Field(default=0, ge=0)
+    items_truncated: bool = False
+
+    @model_validator(mode="after")
+    def preserve_legacy_item_count(self) -> AgentReplenishmentSummaryBlock:
+        self.total_count = max(self.total_count, len(self.items))
+        return self
 
 
 class AgentDealSummary(StrictAgentModel):
@@ -185,6 +216,22 @@ class AgentDealSummary(StrictAgentModel):
     headline: str = Field(min_length=1, max_length=500)
     expires_at: datetime | None = None
     score: float | None = Field(default=None, ge=0, le=100)
+    category: str | None = Field(default=None, min_length=1, max_length=64)
+    offer_type: str | None = Field(default=None, min_length=1, max_length=32)
+    percent_off: float | None = Field(default=None, ge=0, le=100)
+    amount_off_cents: int | None = Field(default=None, ge=0)
+    currency_code: str | None = Field(
+        default=None,
+        min_length=3,
+        max_length=8,
+        pattern=r"^[A-Za-z]{3,8}$",
+    )
+    minimum_spend_cents: int | None = Field(default=None, ge=0)
+    promo_code: str | None = Field(default=None, min_length=1, max_length=128)
+    trust_status: Literal["trusted", "review"] = "review"
+    saved: bool = False
+    relevant_to_need: bool = False
+    relevance_reasons: list[str] = Field(default_factory=list, max_length=5)
 
 
 class AgentDealListBlock(AgentResponseBlockBase):
@@ -195,9 +242,13 @@ class AgentDealListBlock(AgentResponseBlockBase):
 
 
 class AgentReceiptLineSummary(StrictAgentModel):
-    name: str = Field(min_length=1, max_length=255)
+    name: str = Field(min_length=1, max_length=500)
     quantity: float | None = Field(default=None, ge=0)
+    unit: str | None = Field(default=None, min_length=1, max_length=64)
     line_total_cents: int | None = None
+    match_status: Literal["matched", "possible", "unmatched", "ignored"] = "unmatched"
+    household_item_name: str | None = Field(default=None, min_length=1, max_length=255)
+    confirmed_acquisition: bool = False
 
 
 class AgentReceiptSummaryBlock(AgentResponseBlockBase):
@@ -205,6 +256,7 @@ class AgentReceiptSummaryBlock(AgentResponseBlockBase):
     public_id: str = Field(min_length=1, max_length=128)
     merchant: str | None = Field(default=None, min_length=1, max_length=255)
     purchased_at: datetime | None = None
+    ingested_at: datetime | None = None
     total_cents: int | None = None
     currency_code: str = Field(
         default="USD",
@@ -213,27 +265,92 @@ class AgentReceiptSummaryBlock(AgentResponseBlockBase):
         pattern=r"^[A-Za-z]{3,8}$",
     )
     status: str = Field(min_length=1, max_length=64)
+    transaction_linked: bool = False
+    matched_line_count: int = Field(default=0, ge=0)
+    ignored_line_count: int = Field(default=0, ge=0)
+    unmatched_line_count: int = Field(default=0, ge=0)
+    total_line_count: int = Field(default=0, ge=0)
+    # v1.0 previously allowed 100 lines. New tool output remains capped at 25.
     items: list[AgentReceiptLineSummary] = Field(default_factory=list, max_length=100)
+    items_truncated: bool = False
+
+    @model_validator(mode="after")
+    def preserve_legacy_line_count(self) -> AgentReceiptSummaryBlock:
+        self.total_line_count = max(self.total_line_count, len(self.items))
+        return self
 
 
 class AgentErrandItem(StrictAgentModel):
     public_id: str = Field(min_length=1, max_length=128)
     title: str = Field(min_length=1, max_length=255)
     status: str = Field(min_length=1, max_length=64)
+    priority: str = Field(default="normal", min_length=1, max_length=32)
+    errand_type: str = Field(default="other", min_length=1, max_length=32)
     due_on: date | None = None
     place_name: str | None = Field(default=None, min_length=1, max_length=255)
+    place_resolution_status: str = Field(default="unresolved", min_length=1, max_length=32)
+    included_in_next_plan: bool = False
+    household_items: list[str] = Field(default_factory=list, max_length=20)
+
+
+class AgentErrandPlanStop(StrictAgentModel):
+    order: int = Field(ge=1)
+    place_name: str = Field(min_length=1, max_length=255)
+    errands: list[str] = Field(default_factory=list, max_length=20)
+    errands_truncated: bool = False
+    household_items: list[str] = Field(default_factory=list, max_length=20)
+    household_items_truncated: bool = False
+
+
+class AgentErrandPlanSummary(StrictAgentModel):
+    public_id: str = Field(min_length=1, max_length=128)
+    status: str = Field(min_length=1, max_length=32)
+    planned_for: datetime | None = None
+    is_stale: bool
+    stale_reason: str | None = Field(default=None, min_length=1, max_length=255)
+    estimated_stop_minutes: int = Field(default=0, ge=0)
+    travel_duration_minutes: int | None = Field(default=None, ge=0)
+    distance_meters: int | None = Field(default=None, ge=0)
+    stops: list[AgentErrandPlanStop] = Field(default_factory=list, max_length=12)
+    total_stop_count: int = Field(default=0, ge=0)
+    stops_truncated: bool = False
+
+    @model_validator(mode="after")
+    def preserve_stop_count(self) -> AgentErrandPlanSummary:
+        self.total_stop_count = max(self.total_stop_count, len(self.stops))
+        return self
 
 
 class AgentErrandSummaryBlock(AgentResponseBlockBase):
     type: Literal["errand_summary"] = "errand_summary"
     title: str = Field(min_length=1, max_length=160)
+    # Preserve the original v1.0 persisted-payload bound; new output is capped at 25.
     errands: list[AgentErrandItem] = Field(default_factory=list, max_length=50)
+    total_count: int = Field(default=0, ge=0)
+    errands_truncated: bool = False
+    plan: AgentErrandPlanSummary | None = None
+
+    @model_validator(mode="after")
+    def preserve_legacy_errand_count(self) -> AgentErrandSummaryBlock:
+        self.total_count = max(self.total_count, len(self.errands))
+        return self
 
 
 class AgentIntegrationStatusItem(StrictAgentModel):
+    # Provider was an arbitrary bounded string in v1.0. The live status tool has a
+    # closed enum, while this response contract remains able to hydrate old rows.
     provider: str = Field(min_length=1, max_length=64)
-    status: Literal["connected", "attention_required", "disconnected", "unavailable"]
+    scope: Literal["personal", "workspace", "application"] | None = None
+    status: Literal[
+        "connected",
+        "ready",
+        "attention_required",
+        "disconnected",
+        "disabled",
+        "unavailable",
+    ]
     message: str | None = Field(default=None, min_length=1, max_length=500)
+    last_successful_sync_at: datetime | None = None
 
 
 class AgentIntegrationStatusBlock(AgentResponseBlockBase):
@@ -365,6 +482,103 @@ class AgentTurnOut(StrictAgentModel):
     run: AgentRunOut
     user_message: AgentMessageOut
     assistant_message: AgentMessageOut
+
+
+class AgentStreamEventBase(StrictAgentModel):
+    """Platform-owned stream envelope shared by web and future native clients."""
+
+    schema_version: Literal["1.0"] = AGENT_CONTRACT_VERSION
+    sequence: int = Field(ge=0)
+    run_public_id: str | None = Field(default=None, min_length=1, max_length=128)
+
+
+class AgentRunStartedEvent(AgentStreamEventBase):
+    type: Literal["run_started"] = "run_started"
+    resumed: bool = False
+
+
+class AgentAssistantDeltaEvent(AgentStreamEventBase):
+    # Stream fragments are the one contract where boundary whitespace is data:
+    # stripping it would corrupt the canonical persisted answer when chunks are
+    # joined by web or native clients.
+    model_config = ConfigDict(
+        extra="forbid",
+        str_strip_whitespace=False,
+        allow_inf_nan=False,
+    )
+
+    type: Literal["assistant_delta"] = "assistant_delta"
+    delta: str = Field(min_length=1, max_length=1_000)
+
+    @model_validator(mode="after")
+    def validate_visible_delta(self) -> AgentAssistantDeltaEvent:
+        if not self.delta.strip():
+            raise ValueError("delta must include visible text")
+        return self
+
+
+class AgentToolStartedEvent(AgentStreamEventBase):
+    type: Literal["tool_started"] = "tool_started"
+    activity: Literal[
+        "spending",
+        "transactions",
+        "replenishment",
+        "receipts",
+        "deals",
+        "errands",
+        "integrations",
+    ]
+    message: str = Field(min_length=1, max_length=160)
+
+
+class AgentToolCompletedEvent(AgentStreamEventBase):
+    type: Literal["tool_completed"] = "tool_completed"
+    activity: Literal[
+        "spending",
+        "transactions",
+        "replenishment",
+        "receipts",
+        "deals",
+        "errands",
+        "integrations",
+    ]
+    message: str = Field(min_length=1, max_length=160)
+
+
+class AgentStructuredResponseEvent(AgentStreamEventBase):
+    type: Literal["structured_response"] = "structured_response"
+    response: AgentStructuredResponse
+
+
+class AgentAssistantCompletedEvent(AgentStreamEventBase):
+    type: Literal["assistant_completed"] = "assistant_completed"
+    message: AgentMessageOut
+
+
+class AgentRunCompletedEvent(AgentStreamEventBase):
+    type: Literal["run_completed"] = "run_completed"
+    run: AgentRunOut
+
+
+class AgentRunFailedEvent(AgentStreamEventBase):
+    type: Literal["run_failed"] = "run_failed"
+    run: AgentRunOut | None = None
+    code: str = Field(min_length=1, max_length=100, pattern=r"^[a-z][a-z0-9_]*$")
+    message: str = Field(min_length=1, max_length=1_000)
+    retryable: bool = False
+
+
+AgentStreamEvent = Annotated[
+    AgentRunStartedEvent
+    | AgentAssistantDeltaEvent
+    | AgentToolStartedEvent
+    | AgentToolCompletedEvent
+    | AgentStructuredResponseEvent
+    | AgentAssistantCompletedEvent
+    | AgentRunCompletedEvent
+    | AgentRunFailedEvent,
+    Field(discriminator="type"),
+]
 
 
 class AgentConversationDetail(StrictAgentModel):

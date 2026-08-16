@@ -96,16 +96,25 @@ def test_consent_and_account_deletion_revoke_identity_and_credentials(tmp_path):
             granted=True,
         )
         assert consent.granted is True
-        assert service.consent_status(
-            workspace_id=context.workspace_id,
-            user_id=context.user_id,
-        )["gmail_receipts"] is True
+        assert (
+            service.consent_status(
+                workspace_id=context.workspace_id,
+                user_id=context.user_id,
+            )["gmail_receipts"]
+            is True
+        )
 
         service.delete_account(user)
         deleted = db.get(User, context.user_id)
         assert deleted.status == "deleted"
         assert deleted.deleted_at is not None
         assert deleted.email == f"deleted-{context.user_id}@expenseops.invalid"
+        assert (
+            db.scalar(
+                select(WorkspaceMembership.id).where(WorkspaceMembership.user_id == context.user_id)
+            )
+            is None
+        )
 
 
 def test_account_deletion_removes_user_owned_agent_history(tmp_path):
@@ -447,9 +456,7 @@ def test_retention_job_purges_only_expired_ephemeral_rows(tmp_path):
             db.scalar(select(OutboxEvent).where(OutboxEvent.dedupe_key == "retention-current"))
             is not None
         )
-        discarded = db.scalar(
-            select(OutboxEvent).where(OutboxEvent.dedupe_key == "retention-dead")
-        )
+        discarded = db.scalar(select(OutboxEvent).where(OutboxEvent.dedupe_key == "retention-dead"))
         assert discarded is not None
         assert discarded.state == "discarded"
         assert discarded.payload_json == {}
@@ -468,8 +475,7 @@ def test_retention_job_purges_only_expired_ephemeral_rows(tmp_path):
         assert recoverable.state == "pending"
         assert db.get(TelegramWebhookUpdate, replayable_telegram_update_id) is not None
         assert (
-            db.scalar(select(TelegramSession).where(TelegramSession.chat_id == "old-chat"))
-            is None
+            db.scalar(select(TelegramSession).where(TelegramSession.chat_id == "old-chat")) is None
         )
         assert (
             db.scalar(select(TelegramSession).where(TelegramSession.chat_id == "current-chat"))

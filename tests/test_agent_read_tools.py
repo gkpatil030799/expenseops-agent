@@ -530,6 +530,11 @@ def test_prompt_injection_merchant_is_inert_data_and_provider_fields_are_omitted
         )
 
     assert {metadata.name for metadata in registry.metadata()} == {
+        "get_errands_and_plan",
+        "get_household_replenishment",
+        "get_integration_status",
+        "get_receipts",
+        "get_relevant_deals",
         "get_spending_insights",
         "search_transactions",
     }

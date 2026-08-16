@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException, Query, status
-from fastapi.responses import Response
+from fastapi.responses import Response, StreamingResponse
+from pydantic import BaseModel
 
 from app.agent.contracts import (
     AgentCapabilities,
@@ -193,6 +194,54 @@ async def run_read_only_turn(
         ) from exc
 
 
+@router.post("/conversations/{conversation_public_id}/turns/stream")
+async def stream_read_only_turn(
+    conversation_public_id: str,
+    payload: AgentTurnCreate,
+    db: DbSession,
+    user: CurrentUser,
+    workspace: CurrentWorkspace,
+) -> StreamingResponse:
+    """Stream one read-only turn using ExpenseOps-owned semantic events."""
+
+    settings = get_settings()
+    if not settings.agent_enabled or not settings.agent_read_tools_enabled:
+        raise HTTPException(status_code=404, detail="Agent resource not found")
+    rate_limiter.check(
+        f"agent-turn:{workspace.id}:{user.id}",
+        limit=10,
+        window_seconds=60,
+    )
+    orchestrator = _build_read_only_orchestrator(db)
+    try:
+        orchestrator.preflight_turn(
+            conversation_public_id,
+            owner_user_id=user.id,
+            page_context=payload.page_context,
+        )
+    except AgentFoundationError as exc:
+        _raise_agent_error(exc)
+
+    async def events():
+        async for event in orchestrator.stream_turn(
+            conversation_public_id,
+            owner_user_id=user.id,
+            text=payload.text,
+            client_message_id=payload.client_message_id,
+            page_context=payload.page_context,
+        ):
+            yield _semantic_sse(event)
+
+    return StreamingResponse(
+        events(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-store, no-transform",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
 @router.delete(
     "/conversations/{conversation_public_id}",
     status_code=status.HTTP_204_NO_CONTENT,
@@ -244,6 +293,12 @@ def _build_read_only_orchestrator(db: DbSession) -> ReadOnlyAgentOrchestrator:
     """Small construction seam for deterministic route and integration tests."""
 
     return ReadOnlyAgentOrchestrator(db, settings=get_settings())
+
+
+def _semantic_sse(event: BaseModel) -> str:
+    event_type = getattr(event, "type", "message")
+    sequence = getattr(event, "sequence", 0)
+    return f"id: {sequence}\nevent: {event_type}\ndata: {event.model_dump_json()}\n\n"
 
 
 def _raise_agent_error(exc: AgentFoundationError) -> None:

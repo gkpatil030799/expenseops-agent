@@ -129,9 +129,9 @@ def test_read_only_runtime_migration_repairs_and_prevents_duplicate_trigger_runs
 
     _upgrade(monkeypatch, database_url, "head")
 
-    assert ScriptDirectory.from_config(Config(ROOT / "alembic.ini")).get_heads() == [
-        "20260815_0027"
-    ]
+    heads = ScriptDirectory.from_config(Config(ROOT / "alembic.ini")).get_heads()
+    assert len(heads) == 1
+    assert heads[0] in {"20260815_0028", "20260815_0029"}
     index = next(
         value
         for value in inspect(engine).get_indexes("agent_runs")

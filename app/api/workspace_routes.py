@@ -21,6 +21,7 @@ from app.rate_limit import rate_limiter
 from app.services.data_lifecycle_service import DataLifecycleService
 from app.services.managed_auth_service import record_audit
 from app.tenancy import hash_api_token, set_trusted_workspace
+from app.tenant_routing import route_workspace_invitation
 
 router = APIRouter(prefix="/api/workspaces", tags=["workspaces"])
 
@@ -216,17 +217,37 @@ def accept_invitation(
     current: CurrentWorkspace,
 ) -> dict:
     rate_limiter.check(f"invite-accept:{user.id}", limit=20, window_seconds=3600)
-    invitation = db.scalar(
-        select(WorkspaceInvitation)
-        .execution_options(skip_tenant_scope=True)
-        .where(WorkspaceInvitation.token_hash == hash_api_token(payload.token))
+    original_workspace = current.id
+    invitation_route = route_workspace_invitation(db, hash_api_token(payload.token))
+    invitation = (
+        db.scalar(
+            select(WorkspaceInvitation)
+            .where(WorkspaceInvitation.id == invitation_route.workspace_invitation_id)
+            .with_for_update()
+        )
+        if invitation_route is not None
+        else None
     )
     if invitation is None:
+        raise HTTPException(status_code=400, detail="Invitation is invalid")
+    if (
+        db.scalar(
+            select(WorkspaceMembership.id)
+            .join(User, User.id == WorkspaceMembership.user_id)
+            .where(
+                WorkspaceMembership.workspace_id == invitation.workspace_id,
+                WorkspaceMembership.user_id == invitation.invited_by_user_id,
+                User.status == "active",
+            )
+        )
+        is None
+    ):
         raise HTTPException(status_code=400, detail="Invitation is invalid")
     if invitation.status != "pending" or _aware(invitation.expires_at) <= utc_now():
         raise HTTPException(status_code=400, detail="Invitation is expired or already used")
     if invitation.email.casefold() != user.email.casefold():
         raise HTTPException(status_code=403, detail="Invitation email does not match")
+    accepted_workspace_id = invitation.workspace_id
     if (
         db.scalar(
             select(WorkspaceMembership.id).where(
@@ -253,8 +274,6 @@ def accept_invitation(
         auth_session = db.get(AuthSession, session_id)
         if auth_session is not None and auth_session.user_id == user.id:
             auth_session.selected_workspace_id = invitation.workspace_id
-    original_workspace = current.id
-    set_trusted_workspace(db, invitation.workspace_id)
     invitation.status = "accepted"
     invitation.accepted_at = utc_now()
     record_audit(
@@ -268,7 +287,7 @@ def accept_invitation(
     )
     db.commit()
     set_trusted_workspace(db, original_workspace)
-    return {"ok": True, "workspace_id": invitation.workspace_id}
+    return {"ok": True, "workspace_id": accepted_workspace_id}
 
 
 @router.delete("/{workspace_id}/members/{member_user_id}", status_code=204)
@@ -303,9 +322,9 @@ def remove_member(
         resource_id=str(target.id),
         metadata={"removed_user_id": member_user_id},
     )
-    DataLifecycleService(db).delete_user_agent_data(
+    DataLifecycleService(db).deprovision_workspace_access(
         user_id=member_user_id,
-        workspace_ids=[workspace_id],
+        workspace_id=workspace_id,
     )
     db.delete(target)
     db.commit()
@@ -401,9 +420,9 @@ def leave_workspace(
         resource_type="workspace_membership",
         resource_id=str(membership.id),
     )
-    DataLifecycleService(db).delete_user_agent_data(
+    DataLifecycleService(db).deprovision_workspace_access(
         user_id=user.id,
-        workspace_ids=[workspace_id],
+        workspace_id=workspace_id,
     )
     db.delete(membership)
     db.commit()

@@ -18,10 +18,11 @@ COPY --chown=expenseops:expenseops app ./app
 COPY --chown=expenseops:expenseops sandbox ./sandbox
 COPY --chown=expenseops:expenseops alembic ./alembic
 COPY --chown=expenseops:expenseops alembic.ini ./
+COPY --chown=expenseops:expenseops scripts/bootstrap_database_roles.py ./scripts/bootstrap_database_roles.py
 COPY --chown=expenseops:expenseops --from=frontend-build /frontend/dist ./app/static
 RUN pip install --no-cache-dir --no-deps .
 
 USER expenseops
 
 EXPOSE 8000
-CMD ["sh", "-c", "if [ \"${EXPENSEOPS_PROCESS:-web}\" = \"outbox\" ]; then exec python -m app.jobs.outbox; else exec uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000}; fi"]
+CMD ["sh", "-c", "case \"${EXPENSEOPS_PROCESS:-}\" in web) exec uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000} ;; outbox) exec python -m app.jobs.outbox ;; '') if [ \"${APP_ENV:-${ENVIRONMENT:-local}}\" = production ]; then echo 'EXPENSEOPS_PROCESS must be explicit in production' >&2; exit 64; fi; exec uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000} ;; *) echo 'Unsupported EXPENSEOPS_PROCESS' >&2; exit 64 ;; esac"]

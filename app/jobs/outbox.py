@@ -27,12 +27,12 @@ from app.services.outbox_service import (
     replay_dead_outbox_events,
 )
 from app.tenancy import (
-    clear_session_tenant,
     reset_active_user,
     reset_active_workspace,
     set_active_user,
     set_active_workspace,
     set_trusted_workspace,
+    workspace_ids,
 )
 
 logger = logging.getLogger(__name__)
@@ -49,23 +49,19 @@ class ClaimedEvent:
 def run_once(max_events: int = 25) -> dict[str, int]:
     get_settings().validate_worker_runtime()
     with SessionLocal() as db:
-        clear_session_tenant(db)
-        claimed = [
-            ClaimedEvent(event.id, event.workspace_id, event.event_type, str(event.lease_token))
-            for event in claim_outbox_batch(db, limit=max_events)
-        ]
+        claimed = _claim_across_workspaces(db, max_events)
     result = {"claimed": len(claimed), "succeeded": 0, "retried": 0, "dead": 0}
     for claimed_event in claimed:
         with SessionLocal() as db:
-            clear_session_tenant(db)
+            set_trusted_workspace(db, claimed_event.workspace_id)
             try:
                 _handle_event(db, claimed_event)
-                clear_session_tenant(db)
+                set_trusted_workspace(db, claimed_event.workspace_id)
                 if complete_outbox_event(db, claimed_event.id, claimed_event.lease_token):
                     result["succeeded"] += 1
             except Exception as exc:
                 db.rollback()
-                clear_session_tenant(db)
+                set_trusted_workspace(db, claimed_event.workspace_id)
                 state = fail_outbox_event(
                     db,
                     claimed_event.id,
@@ -90,6 +86,39 @@ def run_once(max_events: int = 25) -> dict[str, int]:
     return result
 
 
+def _claim_across_workspaces(db, max_events: int) -> list[ClaimedEvent]:
+    values = workspace_ids(db)
+    if not values or max_events <= 0:
+        return []
+    # Rotate the first workspace so a permanently busy tenant cannot starve a
+    # later tenant when the process claims a bounded batch.
+    offset = int(utc_now().timestamp()) % len(values)
+    ordered = values[offset:] + values[:offset]
+    claimed: list[ClaimedEvent] = []
+    while len(claimed) < max_events:
+        claimed_this_round = 0
+        for workspace_id in ordered:
+            if len(claimed) >= max_events:
+                break
+            set_trusted_workspace(db, workspace_id)
+            events = claim_outbox_batch(db, limit=1)
+            if not events:
+                continue
+            event = events[0]
+            claimed.append(
+                ClaimedEvent(
+                    event.id,
+                    event.workspace_id,
+                    event.event_type,
+                    str(event.lease_token),
+                )
+            )
+            claimed_this_round += 1
+        if claimed_this_round == 0:
+            break
+    return claimed
+
+
 def run_forever(*, max_events: int = 25, poll_seconds: float = 2.0) -> None:
     while True:
         outcome = run_once(max_events)
@@ -106,7 +135,6 @@ def _handle_event(db, claimed: ClaimedEvent) -> None:
         event = db.get(
             OutboxEvent,
             claimed.id,
-            execution_options={"skip_tenant_scope": True},
         )
         if event is None:
             raise RuntimeError("outbox_event_missing")
@@ -241,9 +269,7 @@ def _handle_splitwise_operation(db, event: OutboxEvent) -> None:
                 tx,
                 operation=operation,
                 action=operation.action,
-                result_status=str(
-                    request.get("result_status") or TransactionStatus.ASK_USER.value
-                ),
+                result_status=str(request.get("result_status") or TransactionStatus.ASK_USER.value),
             )
             return
         raise RuntimeError(f"unsupported_financial_operation:{operation.action}")
@@ -301,13 +327,17 @@ if __name__ == "__main__":
     if args.once:
         if args.replay_dead:
             with SessionLocal() as db:
-                clear_session_tenant(db)
-                replayed = replay_dead_outbox_events(
-                    db,
-                    event_type=args.event_type,
-                    limit=args.max_events,
-                )
-                print({"replayed": replayed})
+                replayed = 0
+                for workspace_id in workspace_ids(db):
+                    if replayed >= args.max_events:
+                        break
+                    set_trusted_workspace(db, workspace_id)
+                    replayed += replay_dead_outbox_events(
+                        db,
+                        event_type=args.event_type,
+                        limit=args.max_events - replayed,
+                    )
+            print({"replayed": replayed})
         outcome = run_once(args.max_events)
         print(outcome)
         if outcome["dead"]:

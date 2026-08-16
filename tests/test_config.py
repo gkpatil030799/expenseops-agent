@@ -50,6 +50,19 @@ def test_unified_agent_capabilities_default_safely_off():
     assert settings.agent_purchasing_enabled is False
 
 
+@pytest.mark.parametrize(
+    "unsafe_flag",
+    (
+        "agent_write_actions_enabled",
+        "agent_proactive_enabled",
+        "agent_purchasing_enabled",
+    ),
+)
+def test_production_rejects_non_read_only_agent_rollout(unsafe_flag):
+    with pytest.raises(ValidationError, match="production read-only rollout"):
+        _safe_production_settings(**{unsafe_flag: True})
+
+
 def test_settings_repr_redacts_credentials_and_private_identifiers():
     sentinel = "UNIT_TEST_CREDENTIAL_MUST_NOT_BE_RENDERED"
     settings = Settings(
@@ -234,3 +247,30 @@ def test_production_worker_does_not_require_any_web_only_settings():
     )
 
     settings.validate_worker_runtime()
+
+
+def test_production_migration_settings_do_not_require_application_secret(monkeypatch):
+    monkeypatch.setenv("APP_ENV", "production")
+
+    settings = Settings(
+        database_url="postgresql://expenseops_migrator:test@db/expenseops",
+        app_secret_key="",
+        app_secret_key_version="",
+    )
+
+    assert settings.is_production_mode
+
+
+@pytest.mark.parametrize("runtime_validator", ["validate_web_runtime", "validate_worker_runtime"])
+def test_production_runtimes_require_application_secret(monkeypatch, runtime_validator):
+    monkeypatch.setenv("APP_ENV", "production")
+    settings = Settings(
+        database_url="postgresql://expenseops_runtime:test@db/expenseops",
+        app_secret_key="",
+        app_secret_key_version="",
+        enable_postgres_rls=True,
+        rate_limit_backend="postgres",
+    )
+
+    with pytest.raises(ValueError, match="APP_SECRET_KEY"):
+        getattr(settings, runtime_validator)()

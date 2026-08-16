@@ -425,12 +425,14 @@ Sandbox runtime state and JSONL logs are ignored by Git.
 ## Deploy on Railway
 
 The included [Dockerfile](Dockerfile) builds the React app and packages it with
-FastAPI. [railway.json](railway.json) currently declares only the Railway schema;
-it does not encode migrations, service topology, or health checks. Configure a
-dedicated one-shot migration job and use `/readiness` as the deployment health
-gate, following
-[the production operations runbook](docs/PRODUCTION_OPERATIONS_RUNBOOK.md).
-Keep `/health` for lightweight process liveness.
+FastAPI. The shared [railway.json](railway.json) stays neutral. Assign each
+production service its explicit config: [railway.web.json](railway.web.json),
+[railway.outbox.json](railway.outbox.json),
+[railway.gmail-receipts.json](railway.gmail-receipts.json), or
+[railway.gmail-promotions.json](railway.gmail-promotions.json). The final web
+config starts only Uvicorn and uses `/readiness`; `/health` remains lightweight
+process liveness. The one-time RLS cutover first deploys a reviewed compatibility
+commit on `/health`, then its hardened descendant on `/readiness`.
 
 At minimum, production should have:
 
@@ -448,26 +450,92 @@ ENABLE_POSTGRES_RLS=true
 RATE_LIMIT_BACKEND="postgres"
 ENABLE_EXPENSEOPS_SANDBOX_LAB=false
 ALLOW_UNVERIFIED_PLAID_WEBHOOKS_FOR_LOCAL_TEST=false
+AGENT_WRITE_ACTIONS_ENABLED=false
+AGENT_PROACTIVE_ENABLED=false
+AGENT_PURCHASING_ENABLED=false
 ```
 
-Add integration variables in the Railway dashboard, then deploy:
+Keep Railway GitHub auto-deploy disabled for production. After review, run the
+protected **Production release** workflow for the compatibility SHA and then its
+hardening descendant. Preserve both commits when merging this cutover; a squash
+merge removes the compatibility rollback/release boundary and is not allowed.
+The protected GitHub production job uses the non-superuser
+`expenseops_migrator` credential for one migration stage: it upgrades Alembic,
+verifies the head, reconciles runtime grants, and verifies the head again before
+any Railway application upload. A failure stops the release while the old web
+revision remains active. No sixth Railway migration service, container, or
+long-running process is required. Only after migration success does the
+workflow deploy outbox and both Gmail crons with `expenseops_runtime`; web
+deploys last. Any migration, grant, worker, or cron failure prevents web
+activation.
 
-```bash
-railway up --detach
-```
+The current Railway Hobby setup does not provide the managed volume-backup
+schedules or safe sibling Postgres restore needed to claim a daily snapshot or
+a completed PITR restore drill. PITR remains enabled as a health- and
+freshness-gated secondary layer. The proven release path is a fresh consistent
+logical dump through the dedicated `expenseops_backup` login, restored into an
+ephemeral PostgreSQL 18 service and checked for exact table-row counts,
+sequence inventory/static configuration, Alembic revision, and collision-safe
+effective next values before any Railway upload. Sequence counters are not
+MVCC snapshot data, so exact live `last_value` equality is not claimed while
+writers run. The validated dump, manifests, and recovery metadata are then
+bundled and encrypted to an approved public certificate whose private key is
+held offline, using authenticated CMS AES-256-GCM. Only ciphertext is retained
+as a 90-day GitHub Actions artifact. Its Actions archive digest and raw CMS
+SHA-256 are separate evidence.
+Logical-backup RPO is therefore the latest successful release artifact and is
+unbounded between approved releases, not a fictitious 24-hour schedule.
 
-Run migrations once through the dedicated migration job before rolling out the
-web and worker services:
+Before the first controlled release, assign the web, outbox, Gmail receipts,
+and Gmail promotions services their corresponding custom config paths.
+The Gmail config files deliberately leave cron schedules in Railway service
+settings; record and preserve the existing schedules when changing paths.
+Configure the protected GitHub `production` environment and database credential
+separation exactly as documented in
+[the production operations runbook](docs/PRODUCTION_OPERATIONS_RUNBOOK.md) and
+[the database-role contract](docs/PRODUCTION_DATABASE_ROLES.md). The runtime
+role has only database connect, schema usage, reviewed table DML, sequence use,
+and the five routing-function grants. The migrator owns the reviewed schema
+objects but is neither a database owner nor a superuser. Keep the Railway
+`postgres` owner credential and all bootstrap password inputs out of every
+deployed service.
 
-```bash
-alembic upgrade head
-```
+The initial role cutover order is fixed: verify healthy/fresh PITR and an
+encrypted operator backup with recorded manual decrypt/restore evidence; run
+the guarded `--bootstrap-backup-role` mode; create and PostgreSQL-18-restore a
+fresh dump as `expenseops_backup`; only then run the full runtime/migrator
+ownership cutover. The backup login is `NOSUPERUSER` and read-only. Its sole
+exceptional `BYPASSRLS` attribute lets a
+complete disaster-recovery dump include every tenant while `FORCE ROW LEVEL
+SECURITY` remains active; it has no DML, create, temporary, ownership,
+membership, function, or deployed-service access.
 
-The container itself starts Uvicorn by default. Set
-`EXPENSEOPS_PROCESS="outbox"` on the separate outbox service to run
-`python -m app.jobs.outbox`. Railway service commands and schedules are
-currently external configuration and must be checked against the runbook before
-each release.
+The protected GitHub `production` environment stores `RAILWAY_TOKEN`,
+`EXPENSEOPS_BACKUP_DATABASE_URL`, and `EXPENSEOPS_MIGRATION_DATABASE_URL` as
+secrets. The two database URLs use TLS, authenticate exactly as
+`expenseops_backup` and `expenseops_migrator`, respectively, and target the
+selected production Postgres host/database. The migration URL exists only in
+the protected one-shot job; neither database credential belongs on a Railway
+service. The environment stores the base64 public certificate and its approved
+uppercase, colon-delimited SHA-256 fingerprint in
+`EXPENSEOPS_BACKUP_RECIPIENT_CERT_B64` and
+`EXPENSEOPS_BACKUP_RECIPIENT_CERT_SHA256`; the Railway project, environment,
+service IDs, and `PRODUCTION_BASE_URL` remain environment variables. Keep the
+recipient private key and its password offline and outside GitHub and Railway.
+Separately escrow `APP_SECRET_KEY` and every still-required previous
+application-encryption key outside those systems; the CMS key alone cannot
+decrypt provider credentials stored in the database. Offline recovery must
+authenticate CMS to a protected temporary file before consuming plaintext—it
+must never stream decryption directly into `tar` or `pg_restore`. Follow the
+runbook's full path and evidence checks.
+
+The compatibility and hardening phases have different rollback boundaries.
+Before migration `0029`, repair or forward-fix the compatibility phase; after
+`0029`, the controlled app-only rollback can deploy only the reviewed
+compatibility SHA while retaining `0029`. The rollback gate uses the protected
+migrator secret only to query `alembic_version` directly and never runs
+Alembic. Never run an old migration graph against a database already at `0029`;
+use the exact procedures in the runbook.
 
 Use Railway Variables for secrets and managed PostgreSQL for data. Do not
 deploy `.env`, SQLite databases, receipt files, Sandbox logs, or Sandbox

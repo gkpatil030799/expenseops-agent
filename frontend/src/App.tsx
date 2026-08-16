@@ -1,4 +1,15 @@
-import { useEffect, useMemo, useRef, useState, type ComponentType } from "react";
+import {
+  lazy,
+  Suspense,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ComponentType,
+  type RefObject,
+  type ReactNode,
+} from "react";
+import * as Dialog from "@radix-ui/react-dialog";
 import {
   Activity,
   AlertCircle,
@@ -64,6 +75,10 @@ import type {
   SplitwiseUser,
   Transaction,
 } from "@/types";
+import type { AgentNavigationRequest } from "@/agent/AgentResponseRenderer";
+import type { AgentPageContext } from "@/agent/contracts";
+
+const AgentExperience = lazy(() => import("@/agent/AgentExperience"));
 
 type PlaidWindow = Window & {
   Plaid?: {
@@ -85,8 +100,9 @@ type TransactionActionResponse = { message: string };
 type AccountContext = {
   user: { id: number; email: string; display_name: string; avatar_url?: string | null };
   workspace: { id: number; name: string; workspace_type: string };
+  features?: { agent?: { enabled: boolean; read_only: boolean } };
 };
-type WorkspaceView = "expenses" | "household" | "promotions" | "settings";
+type WorkspaceView = "expenses" | "household" | "promotions" | "settings" | "agent";
 type ActionNotice = { tone: "success" | "error"; text: string; correlationId?: string };
 
 function splitResponseQueued(response: SplitResponse): boolean {
@@ -156,10 +172,16 @@ function DashboardApp() {
   const [onboardingNotice, setOnboardingNotice] = useState<{ tone: "success" | "error"; text: string; action?: "switch-account" } | null>(null);
   const [accountContext, setAccountContext] = useState<AccountContext | null>(null);
   const [authResolved, setAuthResolved] = useState(false);
-  const [activeWorkspace, setActiveWorkspace] = useState<"expenses" | "household" | "promotions" | "settings">(() => {
+  const [activeWorkspace, setActiveWorkspace] = useState<WorkspaceView>(() => {
     const value = new URLSearchParams(window.location.search).get("workspace");
-    return value === "household" || value === "promotions" || value === "settings" ? value : "expenses";
+    return value === "household" || value === "promotions" || value === "settings" || value === "agent" ? value : "expenses";
   });
+  const [agentPanelOpen, setAgentPanelOpen] = useState(false);
+  const [wideAgentPanel, setWideAgentPanel] = useState(() =>
+    window.matchMedia("(min-width: 1024px)").matches,
+  );
+  const agentLauncherRef = useRef<HTMLButtonElement | null>(null);
+  const lastAgentContext = useRef<AgentPageContext>({ schema_version: "1.0", surface: "expense_review", filters: {} });
 
   const pendingTotal = useMemo(
     () => transactions.reduce((total, tx) => total + Math.abs(tx.amount_cents), 0) / 100,
@@ -178,6 +200,30 @@ function DashboardApp() {
     [allTransactions, analyticsDays],
   );
   const memory = useMemo(() => memoryForTransactions(allTransactions), [allTransactions]);
+  const agentEnabled = Boolean(accountContext?.features?.agent?.enabled);
+  if (activeWorkspace !== "agent") {
+    lastAgentContext.current = buildAgentPageContext(activeWorkspace, expenseTab, filters);
+  }
+
+  useEffect(() => {
+    if (!authResolved || !accountContext || agentEnabled) return;
+    setAgentPanelOpen(false);
+    if (activeWorkspace === "agent") {
+      const params = new URLSearchParams(window.location.search);
+      params.set("workspace", "expenses");
+      params.delete("tab");
+      window.history.replaceState({}, "", `/?${params}`);
+      setActiveWorkspace("expenses");
+    }
+  }, [accountContext, activeWorkspace, agentEnabled, authResolved]);
+
+  useEffect(() => {
+    const media = window.matchMedia("(min-width: 1024px)");
+    const update = () => setWideAgentPanel(media.matches);
+    update();
+    media.addEventListener("change", update);
+    return () => media.removeEventListener("change", update);
+  }, []);
 
   useEffect(() => {
     void api<AccountContext>("/api/context")
@@ -216,13 +262,20 @@ function DashboardApp() {
     const onPopState = () => {
       const params = new URLSearchParams(window.location.search);
       const workspace = params.get("workspace");
-      setActiveWorkspace(workspace === "household" || workspace === "promotions" || workspace === "settings" ? workspace : "expenses");
+      setActiveWorkspace(
+        workspace === "household" ||
+          workspace === "promotions" ||
+          workspace === "settings" ||
+          (workspace === "agent" && agentEnabled)
+          ? workspace
+          : "expenses",
+      );
       const tab = params.get("tab");
       setExpenseTab(tab === "insights" || tab === "activity" ? tab : "review");
     };
     window.addEventListener("popstate", onPopState);
     return () => window.removeEventListener("popstate", onPopState);
-  }, []);
+  }, [agentEnabled]);
 
   useEffect(() => {
     if (!accountContext) return;
@@ -471,10 +524,38 @@ function DashboardApp() {
     window.history.pushState({}, "", `/?${params}`); setExpenseTab(tab);
   }
 
-  function changeWorkspace(workspace: "expenses" | "household" | "promotions" | "settings") {
+  function changeWorkspace(workspace: WorkspaceView) {
+    if (workspace === "agent" && !agentEnabled) return;
     const params = new URLSearchParams(window.location.search); params.set("workspace", workspace);
     if (workspace !== "expenses") params.delete("tab");
     window.history.pushState({}, "", `/?${params}`); setActiveWorkspace(workspace);
+  }
+
+  function openAgentPanel() {
+    if (!agentEnabled) return;
+    setAgentPanelOpen(true);
+  }
+
+  function closeAgentPanel() {
+    setAgentPanelOpen(false);
+    window.requestAnimationFrame(() => agentLauncherRef.current?.focus());
+  }
+
+  function navigateFromAgent(request: AgentNavigationRequest) {
+    const expenseTabs = {
+      expense_review: "review",
+      expense_insights: "insights",
+      expense_activity: "activity",
+    } as const;
+    if (request.target_surface in expenseTabs) {
+      const tab = expenseTabs[request.target_surface as keyof typeof expenseTabs];
+      changeWorkspace("expenses");
+      changeExpenseTab(tab);
+      return;
+    }
+    if (request.target_surface === "deals") changeWorkspace("promotions");
+    else if (request.target_surface.startsWith("household_")) changeWorkspace("household");
+    else if (request.target_surface === "settings" || request.target_surface === "integrations") changeWorkspace("settings");
   }
 
   async function markPersonal(id: number) {
@@ -710,13 +791,38 @@ function DashboardApp() {
           onChange={changeWorkspace}
           accountContext={accountContext}
           onLogout={logout}
+          agentEnabled={agentEnabled}
+          agentOpen={agentPanelOpen}
+          agentLauncherRef={agentLauncherRef}
+          onOpenAgent={openAgentPanel}
         />
       }
       mobileNavigation={
-        <MobileNavigation active={activeWorkspace} onChange={changeWorkspace} />
+        <MobileNavigation
+          active={activeWorkspace}
+          onChange={changeWorkspace}
+          agentEnabled={agentEnabled}
+        />
       }
     >
-
+      {activeWorkspace === "agent" && agentEnabled ? (
+        <Suspense fallback={<AgentLoadingState />}>
+          <AgentExperience
+            mode="page"
+            pageContext={lastAgentContext.current}
+            contextLabel={agentContextLabel(lastAgentContext.current)}
+            onNavigate={navigateFromAgent}
+          />
+        </Suspense>
+      ) : (
+        <div
+          className={
+            agentPanelOpen
+              ? "min-w-0 lg:grid lg:grid-cols-[minmax(0,1fr)_minmax(22rem,25rem)] lg:items-start lg:gap-5"
+              : "min-w-0"
+          }
+        >
+          <div className="min-w-0 space-y-5">
         {onboardingNotice ? (
           <div role={onboardingNotice.tone === "error" ? "alert" : "status"} className={`flex items-start justify-between gap-3 rounded-xl border px-4 py-3 text-sm ${onboardingNotice.tone === "error" ? "border-rose-200 bg-rose-50 text-rose-800" : "border-emerald-200 bg-emerald-50 text-emerald-800"}`}>
             <span>{onboardingNotice.text}</span>
@@ -852,6 +958,39 @@ function DashboardApp() {
         </div> : expenseTab === "insights" ? <InsightsDashboard/> : <ActivityTimeline page={financialActivity} loading={financialActivityLoading} error={financialActivityError} onRetry={() => setFinancialActivityReload((value) => value + 1)}/>}
           </>
         )}
+          </div>
+          {agentPanelOpen && agentEnabled && wideAgentPanel ? (
+            <aside
+              id="expenseops-agent-panel"
+              aria-label="ExpenseOps Agent"
+              className="fixed inset-0 z-50 min-w-0 bg-slate-50 lg:static lg:z-auto lg:bg-transparent"
+            >
+              <Suspense fallback={<AgentLoadingState />}>
+                <AgentExperience
+                  mode="panel"
+                  pageContext={lastAgentContext.current}
+                  contextLabel={agentContextLabel(lastAgentContext.current)}
+                  onClose={closeAgentPanel}
+                  onNavigate={navigateFromAgent}
+                />
+              </Suspense>
+            </aside>
+          ) : null}
+          {agentPanelOpen && agentEnabled && !wideAgentPanel ? (
+            <AgentFullscreenDialog onClose={closeAgentPanel}>
+              <Suspense fallback={<AgentLoadingState />}>
+                <AgentExperience
+                  mode="panel"
+                  pageContext={lastAgentContext.current}
+                  contextLabel={agentContextLabel(lastAgentContext.current)}
+                  onClose={closeAgentPanel}
+                  onNavigate={navigateFromAgent}
+                />
+              </Suspense>
+            </AgentFullscreenDialog>
+          ) : null}
+        </div>
+      )}
     </AppShell>
   );
 }
@@ -861,11 +1000,19 @@ function WorkspaceNavigation({
   onChange,
   accountContext,
   onLogout,
+  agentEnabled,
+  agentOpen,
+  agentLauncherRef,
+  onOpenAgent,
 }: {
   active: WorkspaceView;
   onChange: (value: WorkspaceView) => void;
   accountContext: AccountContext;
   onLogout: () => void;
+  agentEnabled: boolean;
+  agentOpen: boolean;
+  agentLauncherRef: RefObject<HTMLButtonElement>;
+  onOpenAgent: () => void;
 }) {
   return (
     <>
@@ -886,6 +1033,18 @@ function WorkspaceNavigation({
             <DesktopNavItem active={active === "expenses"} label="Expenses" icon={WalletCards} onClick={() => onChange("expenses")} />
             <DesktopNavItem active={active === "household"} label="Household" icon={House} onClick={() => onChange("household")} />
             <DesktopNavItem active={active === "promotions"} label="Deals" icon={Tags} onClick={() => onChange("promotions")} />
+            {agentEnabled ? (
+              <button
+                ref={agentLauncherRef}
+                type="button"
+                onClick={onOpenAgent}
+                aria-expanded={agentOpen}
+                aria-controls="expenseops-agent-panel"
+                className={`touch-target inline-flex items-center gap-2 rounded-control px-3 text-sm font-medium transition-colors duration-hover ${agentOpen ? "bg-ui-primary-tint text-ui-primary" : "text-ui-text hover:bg-slate-50 hover:text-ink"}`}
+              >
+                <Bot className="h-4 w-4" aria-hidden="true" /> Agent
+              </button>
+            ) : null}
           </nav>
         </div>
         <AccountMenu
@@ -931,13 +1090,117 @@ function DesktopNavItem({ active, label, icon: Icon, onClick }: { active: boolea
   return <button type="button" onClick={onClick} aria-current={active ? "page" : undefined} className={`touch-target inline-flex items-center gap-2 rounded-control px-3 text-sm font-medium transition-colors duration-hover ${active ? "bg-ui-primary-tint text-ui-primary" : "text-ui-text hover:bg-slate-50 hover:text-ink"}`}><Icon className="h-4 w-4" aria-hidden="true" />{label}</button>;
 }
 
-function MobileNavigation({ active, onChange }: { active: WorkspaceView; onChange: (value: WorkspaceView) => void }) {
+function MobileNavigation({
+  active,
+  onChange,
+  agentEnabled,
+}: {
+  active: WorkspaceView;
+  onChange: (value: WorkspaceView) => void;
+  agentEnabled: boolean;
+}) {
   const items = [
     { value: "expenses" as const, label: "Expenses", icon: WalletCards },
     { value: "household" as const, label: "Household", icon: House },
     { value: "promotions" as const, label: "Deals", icon: Tags },
+    ...(agentEnabled ? [{ value: "agent" as const, label: "Agent", icon: Bot }] : []),
   ];
-  return <nav className="fixed inset-x-3 bottom-3 z-40 grid grid-cols-3 rounded-card border border-ui-border bg-white/95 p-1.5 shadow-primary backdrop-blur md:hidden" aria-label="Primary mobile navigation">{items.map(({ value, label, icon: Icon }) => <button key={value} type="button" onClick={() => onChange(value)} aria-current={active === value ? "page" : undefined} className={`flex min-h-14 flex-col items-center justify-center gap-1 rounded-control text-xs font-semibold transition-colors duration-hover ${active === value ? "bg-ui-primary text-white" : "text-ui-text hover:bg-slate-50 hover:text-ink"}`}><Icon className="h-5 w-5" aria-hidden="true" />{label}</button>)}</nav>;
+  return <nav className={`fixed inset-x-3 bottom-3 z-40 grid ${agentEnabled ? "grid-cols-4" : "grid-cols-3"} rounded-card border border-ui-border bg-white/95 p-1.5 shadow-primary backdrop-blur md:hidden`} aria-label="Primary mobile navigation">{items.map(({ value, label, icon: Icon }) => <button key={value} type="button" onClick={() => onChange(value)} aria-current={active === value ? "page" : undefined} className={`flex min-h-14 flex-col items-center justify-center gap-1 rounded-control text-xs font-semibold transition-colors duration-hover ${active === value ? "bg-ui-primary text-white" : "text-ui-text hover:bg-slate-50 hover:text-ink"}`}><Icon className="h-5 w-5" aria-hidden="true" />{label}</button>)}</nav>;
+}
+
+function AgentLoadingState() {
+  return (
+    <div
+      className="grid min-h-[32rem] place-items-center rounded-card border border-ui-border bg-white"
+      role="status"
+      aria-label="Loading ExpenseOps Agent"
+    >
+      <div className="space-y-3 text-center">
+        <div className="ui-skeleton mx-auto size-12 rounded-2xl" />
+        <div className="ui-skeleton h-4 w-40" />
+      </div>
+    </div>
+  );
+}
+
+function AgentFullscreenDialog({
+  children,
+  onClose,
+}: {
+  children: ReactNode;
+  onClose: () => void;
+}) {
+  return (
+    <Dialog.Root open onOpenChange={(open) => { if (!open) onClose(); }}>
+      <Dialog.Portal>
+        <Dialog.Overlay className="fixed inset-0 z-[44] bg-slate-950/45" />
+        <Dialog.Content className="fixed inset-0 z-[45] overflow-hidden bg-slate-50 focus:outline-none">
+          <Dialog.Title className="sr-only">ExpenseOps Agent</Dialog.Title>
+          <Dialog.Description className="sr-only">
+            A read-only assistant for grounded spending insights and transaction search.
+          </Dialog.Description>
+          {children}
+        </Dialog.Content>
+      </Dialog.Portal>
+    </Dialog.Root>
+  );
+}
+
+function buildAgentPageContext(
+  workspace: WorkspaceView,
+  expenseTab: "review" | "insights" | "activity",
+  filters: DashboardFilters,
+): AgentPageContext {
+  if (workspace === "expenses") {
+    const surface = {
+      review: "expense_review",
+      insights: "expense_insights",
+      activity: "expense_activity",
+    } as const;
+    return {
+      schema_version: "1.0",
+      surface: surface[expenseTab],
+      filters:
+        expenseTab === "review"
+          ? {
+              merchant: filters.merchant || null,
+              start_date: filters.dateFrom || null,
+              end_date: filters.dateTo || null,
+              status: filters.status || null,
+            }
+          : {},
+    };
+  }
+  return {
+    schema_version: "1.0",
+    surface:
+      workspace === "household"
+        ? "household_today"
+        : workspace === "promotions"
+          ? "deals"
+          : workspace === "settings"
+            ? "settings"
+            : "home",
+    filters: {},
+  };
+}
+
+function agentContextLabel(context: AgentPageContext): string {
+  const labels: Record<AgentPageContext["surface"], string> = {
+    home: "ExpenseOps",
+    expense_review: "Expense Review",
+    expense_insights: "Expense Insights",
+    expense_activity: "Expense Activity",
+    household_today: "Household Today",
+    household_errands: "Household Errands",
+    household_receipts: "Household Receipts",
+    household_staples: "Household Staples",
+    household_history: "Household History",
+    deals: "Deals",
+    settings: "Settings",
+    integrations: "Integrations",
+  };
+  return labels[context.surface];
 }
 
 function AuthLoading() {

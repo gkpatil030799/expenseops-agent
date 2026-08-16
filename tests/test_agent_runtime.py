@@ -574,6 +574,12 @@ def test_adversarial_merchant_text_remains_inert_tool_data(agent_runtime_db):
         "Split this purchase with Rahul in Splitwise",
         "Delete this transaction",
         "Buy groceries for me",
+        "Mark detergent as bought",
+        "Create paper towels as a staple",
+        "Map this receipt line to milk",
+        "Save this Target deal",
+        "Complete my Aldi errand",
+        "Re-plan the route",
     ],
 )
 def test_consequential_requests_do_not_call_provider_or_mutate_domain_data(
@@ -1019,6 +1025,108 @@ def test_synchronous_tool_work_uses_worker_owned_session_and_enforces_timeout(
         assert (call.status, call.error_code) == ("failed", "run_failed")
 
 
+def test_model_turn_releases_request_connection_for_single_slot_tool_pool(tmp_path):
+    database_path = tmp_path / "agent-single-slot.db"
+    engine = create_engine(
+        f"sqlite+pysqlite:///{database_path}",
+        connect_args={"check_same_thread": False},
+        pool_size=1,
+        max_overflow=0,
+        pool_timeout=0.2,
+    )
+    Base.metadata.create_all(engine)
+    factory = sessionmaker(bind=engine)
+
+    try:
+        with factory() as setup_db:
+            owner = User(
+                email="single-slot-owner@example.test",
+                display_name="Single slot owner",
+            )
+            setup_db.add(owner)
+            setup_db.flush()
+            workspace = Workspace(
+                name="Single slot workspace",
+                created_by_user_id=owner.id,
+            )
+            setup_db.add(workspace)
+            setup_db.flush()
+            context = TenantContext(user_id=owner.id, workspace_id=workspace.id)
+            setup_db.add(
+                WorkspaceMembership(
+                    workspace_id=workspace.id,
+                    user_id=owner.id,
+                    role="owner",
+                    is_default=True,
+                )
+            )
+            item = PlaidItem(
+                workspace_id=workspace.id,
+                item_id="single-slot-item",
+                owner_user_id=owner.id,
+                institution_name="Single slot bank",
+            )
+            setup_db.add(item)
+            setup_db.flush()
+            setup_db.add(
+                _transaction(
+                    workspace_id=workspace.id,
+                    item_id=item.id,
+                    provider_id="single-slot-transaction",
+                    merchant="Pool Safe Market",
+                    amount_cents=4_200,
+                    occurred_on=date(2026, 8, 14),
+                    category="Groceries",
+                )
+            )
+            setup_db.commit()
+
+        with factory() as db:
+            set_session_tenant(db, context)
+            conversation = _conversation(db, context)
+            conversation_public_id = conversation.public_id
+            observed: dict[str, Any] = {}
+
+            async def search(
+                _request: RuntimeRequest,
+                executor: ReadToolExecutor,
+            ) -> RuntimeResult:
+                observed["request_transaction_open"] = db.in_transaction()
+                observed["checked_out_before_tool"] = engine.pool.checkedout()
+                output = await executor.invoke(
+                    "search_transactions",
+                    {"merchant": "Pool Safe Market", "limit": 5},
+                )
+                observed["tool_total_count"] = output["total_count"]
+                return _draft()
+
+            turn = asyncio.run(
+                ReadOnlyAgentOrchestrator(
+                    db,
+                    settings=_settings(),
+                    runtime=FakeRuntime(search),
+                    now=lambda: datetime(2026, 8, 14, 12, tzinfo=UTC),
+                ).run_turn(
+                    conversation_public_id,
+                    owner_user_id=context.user_id,
+                    text="Find Pool Safe Market transactions",
+                    client_message_id="single-slot-turn-1",
+                )
+            )
+
+            assert observed == {
+                "request_transaction_open": False,
+                "checked_out_before_tool": 0,
+                "tool_total_count": 1,
+            }
+            assert turn.run.status == "completed"
+            call = db.scalar(select(AgentToolCall))
+            assert call is not None
+            assert (call.tool_name, call.status) == ("search_transactions", "completed")
+    finally:
+        engine.dispose()
+
+
 def test_run_wall_clock_budget_returns_a_safe_terminal_failure(
     agent_runtime_db,
     monkeypatch,
@@ -1122,3 +1230,72 @@ def test_runtime_error_class_preserves_only_stable_error_contract() -> None:
         "Safe message",
         True,
     )
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Show me the plan for my next trip.",
+        "What is the match status for this receipt?",
+        "Which receipt lines matched household items?",
+    ],
+)
+def test_day4_read_intents_are_not_misclassified_as_writes(text: str) -> None:
+    assert runtime_module._is_consequential_request(text) is False
+
+
+def test_errand_grounding_preserves_every_bounded_row_and_plan_truncation() -> None:
+    rows = [
+        {
+            "public_id": str(index),
+            "title": f"Errand {index}",
+            "errand_type": "other",
+            "status": "open",
+            "priority": "normal",
+            "due_on": None,
+            "included_in_next_plan": True,
+            "place_resolution_status": "resolved",
+            "resolved_place_name": f"Stop {index}",
+            "household_items": [],
+        }
+        for index in range(1, 26)
+    ]
+    response = runtime_module._errand_response(
+        {
+            "errands": rows,
+            "total_count": 25,
+            "truncated": False,
+            "plan": {
+                "public_id": "7",
+                "status": "planned",
+                "planned_for": None,
+                "is_stale": False,
+                "stale_reason": None,
+                "estimated_stop_minutes": 30,
+                "travel_duration_minutes": 12,
+                "distance_meters": 1_500,
+                "stops": [
+                    {
+                        "order": index,
+                        "place_name": f"Stop {index}",
+                        "errands": [f"Errand {index}"],
+                        "errands_truncated": index == 1,
+                        "household_items": [],
+                        "household_items_truncated": index == 1,
+                    }
+                    for index in range(1, 13)
+                ],
+                "total_stop_count": 13,
+                "stops_truncated": True,
+            },
+        }
+    )
+
+    block = next(item for item in response.blocks if item.type == "errand_summary")
+    assert len(block.errands) == 25
+    assert block.errands_truncated is False
+    assert block.plan is not None
+    assert (len(block.plan.stops), block.plan.total_stop_count) == (12, 13)
+    assert block.plan.stops_truncated is True
+    assert block.plan.stops[0].errands_truncated is True
+    assert block.plan.stops[0].household_items_truncated is True

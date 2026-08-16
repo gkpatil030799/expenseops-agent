@@ -140,23 +140,57 @@ export type AgentSpendingSummaryBlock = AgentResponseBlockBase & {
 export type AgentReplenishmentItem = {
   public_id: string;
   name: string;
-  predicted_due_on: string | null;
-  confidence: number | null;
-  reason: string | null;
+  predicted_due_on?: string | null;
+  confidence?: number | null;
+  confidence_level: "insufficient" | "low" | "medium" | "high";
+  evidence_basis:
+    | "configured_cadence"
+    | "purchase_pattern"
+    | "validated_model"
+    | "insufficient_history";
+  due_state: "likely_due" | "probably_due" | "not_due" | "learning";
+  reason?: string | null;
+  quantity?: string | null;
+  unit?: string | null;
+  last_acquired_on?: string | null;
+  confirmed_acquisition_count: number;
+};
+
+export type AgentAcquisitionSummary = {
+  acquired_on: string;
+  merchant?: string | null;
+  quantity?: number | null;
+  unit?: string | null;
+  evidence_type: "manual" | "receipt" | "transaction" | "imported" | "correction";
 };
 
 export type AgentReplenishmentSummaryBlock = AgentResponseBlockBase & {
   type: "replenishment_summary";
   title: string;
   items: AgentReplenishmentItem[];
+  acquisition_history: AgentAcquisitionSummary[];
+  acquisition_history_truncated: boolean;
+  total_count: number;
+  items_truncated: boolean;
 };
 
 export type AgentDealSummary = {
   public_id: string;
   merchant: string;
   headline: string;
-  expires_at: string | null;
-  score: number | null;
+  expires_at?: string | null;
+  score?: number | null;
+  category?: string | null;
+  offer_type?: string | null;
+  percent_off?: number | null;
+  amount_off_cents?: number | null;
+  currency_code?: string | null;
+  minimum_spend_cents?: number | null;
+  promo_code?: string | null;
+  trust_status: "trusted" | "review";
+  saved: boolean;
+  relevant_to_need: boolean;
+  relevance_reasons: string[];
 };
 
 export type AgentDealListBlock = AgentResponseBlockBase & {
@@ -168,45 +202,91 @@ export type AgentDealListBlock = AgentResponseBlockBase & {
 
 export type AgentReceiptLineSummary = {
   name: string;
-  quantity: number | null;
-  line_total_cents: number | null;
+  quantity?: number | null;
+  unit?: string | null;
+  line_total_cents?: number | null;
+  match_status: "matched" | "possible" | "unmatched" | "ignored";
+  household_item_name?: string | null;
+  confirmed_acquisition: boolean;
 };
 
 export type AgentReceiptSummaryBlock = AgentResponseBlockBase & {
   type: "receipt_summary";
   public_id: string;
-  merchant: string | null;
-  purchased_at: string | null;
-  total_cents: number | null;
+  merchant?: string | null;
+  purchased_at?: string | null;
+  ingested_at?: string | null;
+  total_cents?: number | null;
   currency_code: string;
   status: string;
+  transaction_linked: boolean;
+  matched_line_count: number;
+  ignored_line_count: number;
+  unmatched_line_count: number;
+  total_line_count: number;
   items: AgentReceiptLineSummary[];
+  items_truncated: boolean;
 };
 
 export type AgentErrandItem = {
   public_id: string;
   title: string;
   status: string;
-  due_on: string | null;
-  place_name: string | null;
+  priority: string;
+  errand_type: string;
+  due_on?: string | null;
+  place_name?: string | null;
+  place_resolution_status: string;
+  included_in_next_plan: boolean;
+  household_items: string[];
+};
+
+export type AgentErrandPlanStop = {
+  order: number;
+  place_name: string;
+  errands: string[];
+  errands_truncated: boolean;
+  household_items: string[];
+  household_items_truncated: boolean;
+};
+
+export type AgentErrandPlanSummary = {
+  public_id: string;
+  status: string;
+  planned_for?: string | null;
+  is_stale: boolean;
+  stale_reason?: string | null;
+  estimated_stop_minutes: number;
+  travel_duration_minutes?: number | null;
+  distance_meters?: number | null;
+  stops: AgentErrandPlanStop[];
+  total_stop_count: number;
+  stops_truncated: boolean;
 };
 
 export type AgentErrandSummaryBlock = AgentResponseBlockBase & {
   type: "errand_summary";
   title: string;
   errands: AgentErrandItem[];
+  total_count: number;
+  errands_truncated: boolean;
+  plan?: AgentErrandPlanSummary | null;
 };
 
 export type AgentIntegrationState =
   | "connected"
+  | "ready"
   | "attention_required"
   | "disconnected"
+  | "disabled"
   | "unavailable";
 
 export type AgentIntegrationStatusItem = {
   provider: string;
+  scope?: "personal" | "workspace" | "application" | null;
   status: AgentIntegrationState;
-  message: string | null;
+  message?: string | null;
+  last_successful_sync_at?: string | null;
 };
 
 export type AgentIntegrationStatusBlock = AgentResponseBlockBase & {
@@ -333,6 +413,76 @@ export type AgentTurnOut = {
   user_message: AgentMessageOut;
   assistant_message: AgentMessageOut;
 };
+
+export type AgentStreamEventBase = {
+  schema_version: AgentSchemaVersion;
+  sequence: number;
+  run_public_id: string | null;
+};
+
+export type AgentRunStartedEvent = AgentStreamEventBase & {
+  type: "run_started";
+  resumed: boolean;
+};
+
+export type AgentAssistantDeltaEvent = AgentStreamEventBase & {
+  type: "assistant_delta";
+  delta: string;
+};
+
+export type AgentToolActivity =
+  | "spending"
+  | "transactions"
+  | "replenishment"
+  | "receipts"
+  | "deals"
+  | "errands"
+  | "integrations";
+
+export type AgentToolStartedEvent = AgentStreamEventBase & {
+  type: "tool_started";
+  activity: AgentToolActivity;
+  message: string;
+};
+
+export type AgentToolCompletedEvent = AgentStreamEventBase & {
+  type: "tool_completed";
+  activity: AgentToolActivity;
+  message: string;
+};
+
+export type AgentStructuredResponseEvent = AgentStreamEventBase & {
+  type: "structured_response";
+  response: AgentStructuredResponse;
+};
+
+export type AgentAssistantCompletedEvent = AgentStreamEventBase & {
+  type: "assistant_completed";
+  message: AgentMessageOut;
+};
+
+export type AgentRunCompletedEvent = AgentStreamEventBase & {
+  type: "run_completed";
+  run: AgentRunOut;
+};
+
+export type AgentRunFailedEvent = AgentStreamEventBase & {
+  type: "run_failed";
+  run: AgentRunOut | null;
+  code: string;
+  message: string;
+  retryable: boolean;
+};
+
+export type AgentStreamEvent =
+  | AgentRunStartedEvent
+  | AgentAssistantDeltaEvent
+  | AgentToolStartedEvent
+  | AgentToolCompletedEvent
+  | AgentStructuredResponseEvent
+  | AgentAssistantCompletedEvent
+  | AgentRunCompletedEvent
+  | AgentRunFailedEvent;
 
 export type AgentConversationDetail = {
   conversation: AgentConversation;

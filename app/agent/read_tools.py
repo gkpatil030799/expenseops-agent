@@ -6,6 +6,9 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from sqlalchemy import func, or_, select
 
+from app.agent.deals_errands_tools import register_deals_errands_tools
+from app.agent.household_receipt_tools import register_household_receipt_tools
+from app.agent.integration_read_tool import register_integration_read_tool
 from app.agent.tooling import AgentTool, AgentToolContext, AgentToolRegistry, ToolEffect
 from app.config import Settings
 from app.models import ExpenseTransaction, TransactionStatus
@@ -188,6 +191,9 @@ def build_read_tool_registry(settings: Settings) -> AgentToolRegistry:
             handler=_search_transactions,
         )
     )
+    register_household_receipt_tools(registry)
+    register_deals_errands_tools(registry, settings)
+    register_integration_read_tool(registry, settings)
     return registry
 
 
