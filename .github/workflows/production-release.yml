@@ -217,10 +217,6 @@ jobs:
       - name: Verify Railway service topology before any upload
         run: |
           set -Eeuo pipefail
-          railway link \
-            --project "${RAILWAY_PROJECT_ID}" \
-            --environment "${RAILWAY_PRODUCTION_ENVIRONMENT_ID}" \
-            --json >/dev/null
           environment_config="$(railway environment config \
             --environment "${RAILWAY_PRODUCTION_ENVIRONMENT_ID}" --json)"
           jq --exit-status '.privateNetworkDisabled != true' \

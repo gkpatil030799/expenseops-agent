@@ -188,6 +188,7 @@ def test_production_release_preflights_topology_recovery_and_credentials():
     first_upload = workflow.index("Deploy migration job and wait for terminal success")
     assert preflight < first_upload
     assert "railway environment config" in workflow
+    assert "railway link" not in workflow
     assert ".services[$id].configFile == $path" in workflow
     assert ".services[$id].source.repo == null" in workflow
     assert ".services[$id].source.image == null" in workflow
@@ -293,6 +294,7 @@ def test_railway_waiter_requires_success_and_fails_closed():
     assert "expected_config_file" in waiter
     assert ".meta.cliMessage // .meta.commitMessage" in waiter
     assert "environment config" in waiter
+    assert '"${railway_bin}" link' not in waiter
     assert ".services[$id].configFile" in waiter
     assert ".services[$id].source.repo == null" in waiter
     assert ".services[$id].source.image == null" in waiter
