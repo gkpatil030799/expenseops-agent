@@ -67,10 +67,43 @@ jobs:
           ref: ${{ inputs.release_sha }}
           fetch-depth: 0
 
+      - name: Materialize the reviewed release orchestrator
+        env:
+          REVIEWED_ORCHESTRATOR_SHA: ${{ github.sha }}
+        run: |
+          set -Eeuo pipefail
+          if [[ ! "${REVIEWED_ORCHESTRATOR_SHA}" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "The reviewed release orchestrator must be a full commit SHA." >&2
+            exit 1
+          fi
+          git cat-file -e "${REVIEWED_ORCHESTRATOR_SHA}^{commit}"
+          git merge-base --is-ancestor "${REVIEWED_ORCHESTRATOR_SHA}" origin/main
+          orchestrator_dir="${RUNNER_TEMP}/expenseops-release-orchestrator"
+          install -d -m 0700 "${orchestrator_dir}"
+          git show \
+            "${REVIEWED_ORCHESTRATOR_SHA}:scripts/bootstrap_database_roles.py" \
+            >"${orchestrator_dir}/bootstrap_database_roles.py"
+          git show \
+            "${REVIEWED_ORCHESTRATOR_SHA}:scripts/railway_deploy_and_wait.sh" \
+            >"${orchestrator_dir}/railway_deploy_and_wait.sh"
+          chmod 0700 \
+            "${orchestrator_dir}/bootstrap_database_roles.py" \
+            "${orchestrator_dir}/railway_deploy_and_wait.sh"
+          echo "EXPENSEOPS_ROLE_UTILITY=${orchestrator_dir}/bootstrap_database_roles.py" \
+            >>"${GITHUB_ENV}"
+          echo "EXPENSEOPS_RAILWAY_DEPLOY_HELPER=${orchestrator_dir}/railway_deploy_and_wait.sh" \
+            >>"${GITHUB_ENV}"
+
       - name: Set up Python for fail-closed release validation
         uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: "3.11.13"
+
+      - name: Verify the reviewed release utilities
+        run: |
+          set -Eeuo pipefail
+          python -m py_compile "${EXPENSEOPS_ROLE_UTILITY}"
+          bash -n "${EXPENSEOPS_RAILWAY_DEPLOY_HELPER}"
 
       - name: Install the pinned PostgreSQL snapshot client
         run: |
@@ -368,6 +401,26 @@ jobs:
             >>"${GITHUB_ENV}"
           unset postgres_variables selected_public_url selected_target_sha256
           unset POSTGRES_URL_TO_HASH RAILWAY_TOKEN
+
+      - name: Reconcile reviewed grants before the recovery proof
+        if: ${{ inputs.release_phase != 'rollback' }}
+        env:
+          APP_ENV: production
+          DATABASE_URL: ${{ secrets.EXPENSEOPS_MIGRATION_DATABASE_URL }}
+          ENVIRONMENT: production
+        run: |
+          set -Eeuo pipefail
+          set +x
+          migration_target_sha256="$(DATABASE_URL_TO_VERIFY="${DATABASE_URL}" python -c \
+            'import hashlib, os, sys; from urllib.parse import unquote, urlsplit; parsed=urlsplit(os.environ["DATABASE_URL_TO_VERIFY"]); host=(parsed.hostname or "").casefold(); database=unquote(parsed.path.removeprefix("/")); username=unquote(parsed.username or ""); (parsed.scheme in {"postgres", "postgresql"} and username == "expenseops_migrator" and parsed.password and host and database and "/" not in database) or sys.exit("Migration URL must identify the reviewed migrator and one database"); port=parsed.port or 5432; print(hashlib.sha256(f"{host}|{port}|{database}".encode()).hexdigest())')"
+          if [[ "${migration_target_sha256}" != \
+            "${EXPENSEOPS_SELECTED_POSTGRES_PUBLIC_TARGET_SHA256}" ]]
+          then
+            echo "Migration URL does not target the selected production Postgres." >&2
+            exit 1
+          fi
+          python "${EXPENSEOPS_ROLE_UTILITY}" --reconcile-runtime-grants
+          unset DATABASE_URL_TO_VERIFY migration_target_sha256
 
       - name: Create and restore-verify a fresh logical backup
         env:
@@ -1700,14 +1753,14 @@ jobs:
           set +x
           alembic upgrade head
           alembic current --check-heads
-          python scripts/bootstrap_database_roles.py --reconcile-runtime-grants
+          python "${EXPENSEOPS_ROLE_UTILITY}" --reconcile-runtime-grants
           alembic current --check-heads
 
       - name: Deploy outbox worker after migrations succeed
         env:
           RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
         run: |
-          bash scripts/railway_deploy_and_wait.sh \
+          bash "${EXPENSEOPS_RAILWAY_DEPLOY_HELPER}" \
             "${RAILWAY_OUTBOX_SERVICE_ID}" \
             /railway.outbox.json \
             "${RELEASE_SHA}" \
@@ -1717,7 +1770,7 @@ jobs:
         env:
           RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
         run: |
-          bash scripts/railway_deploy_and_wait.sh \
+          bash "${EXPENSEOPS_RAILWAY_DEPLOY_HELPER}" \
             "${RAILWAY_GMAIL_RECEIPTS_SERVICE_ID}" \
             /railway.gmail-receipts.json \
             "${RELEASE_SHA}" \
@@ -1727,7 +1780,7 @@ jobs:
         env:
           RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
         run: |
-          bash scripts/railway_deploy_and_wait.sh \
+          bash "${EXPENSEOPS_RAILWAY_DEPLOY_HELPER}" \
             "${RAILWAY_GMAIL_PROMOTIONS_SERVICE_ID}" \
             /railway.gmail-promotions.json \
             "${RELEASE_SHA}" \
@@ -1737,7 +1790,7 @@ jobs:
         env:
           RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
         run: |
-          bash scripts/railway_deploy_and_wait.sh \
+          bash "${EXPENSEOPS_RAILWAY_DEPLOY_HELPER}" \
             "${RAILWAY_WEB_SERVICE_ID}" \
             /railway.web.json \
             "${RELEASE_SHA}" \

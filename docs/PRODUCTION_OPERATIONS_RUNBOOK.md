@@ -23,6 +23,16 @@ web healthcheck to `/readiness`. Both commits belong to the same reviewed PR.
 After `0029`, the compatibility commit—not the pre-cutover application—is the
 oldest permitted application rollback target. Never downgrade `0029`.
 
+The workflow owns its release orchestration separately from the selected
+application SHA. It materializes the reviewed role-reconciliation and Railway
+deployment helpers from the protected workflow commit, so a compatibility or
+rollback application revision cannot reintroduce stale infrastructure logic.
+Before creating the logical backup it idempotently reconciles only the reviewed
+database ACLs with `expenseops_migrator`; this may repair missing backup/runtime
+grants but does not change schema or customer/domain rows. The fresh encrypted
+dump and isolated PostgreSQL 18 restore must then succeed before Alembic or any
+Railway upload can run.
+
 1. Release only clean, reviewed commits on `main` after
    `.github/workflows/release-gate.yml` passes. Record both full SHAs. The merge
    must preserve the standalone compatibility and hardening commits; do not

@@ -221,6 +221,8 @@ def test_production_release_is_manual_and_all_runtimes_precede_web():
 def test_production_release_preflights_topology_hobby_recovery_and_credentials():
     workflow = (ROOT / ".github/workflows/production-release.yml").read_text(encoding="utf-8")
 
+    orchestrator = workflow.index("Materialize the reviewed release orchestrator")
+    pre_backup_reconcile = workflow.index("Reconcile reviewed grants before the recovery proof")
     preflight = workflow.index("Verify Railway service topology before any upload")
     migration = workflow.index(
         "Apply migrations and reconcile grants before any Railway deployment"
@@ -255,7 +257,16 @@ def test_production_release_preflights_topology_hobby_recovery_and_credentials()
     assert ".live.backupSetCount" not in workflow
 
     artifact = workflow.index("Upload only the authenticated encrypted backup")
+    assert orchestrator < pre_backup_reconcile < backup
     assert preflight < backup < artifact < first_upload
+    assert "${{ github.sha }}" in workflow
+    assert "REVIEWED_ORCHESTRATOR_SHA}:scripts/bootstrap_database_roles.py" in workflow
+    assert "REVIEWED_ORCHESTRATOR_SHA}:scripts/railway_deploy_and_wait.sh" in workflow
+    assert "EXPENSEOPS_ROLE_UTILITY=" in workflow
+    assert "EXPENSEOPS_RAILWAY_DEPLOY_HELPER=" in workflow
+    assert workflow.count('python "${EXPENSEOPS_ROLE_UTILITY}" --reconcile-runtime-grants') == 2
+    assert workflow.count('bash "${EXPENSEOPS_RAILWAY_DEPLOY_HELPER}"') == 4
+    assert "Migration URL does not target the selected production Postgres." in workflow
     assert (
         "EXPENSEOPS_BACKUP_DATABASE_URL: ${{ secrets.EXPENSEOPS_BACKUP_DATABASE_URL }}"
     ) in recovery
@@ -395,7 +406,7 @@ def test_production_release_preflights_topology_hobby_recovery_and_credentials()
     assert "DATABASE_URL: ${{ secrets.EXPENSEOPS_MIGRATION_DATABASE_URL }}" in migration_commands
     upgrade = migration_commands.index("alembic upgrade head")
     first_head_check = migration_commands.index("alembic current --check-heads")
-    reconcile = migration_commands.index("bootstrap_database_roles.py --reconcile-runtime-grants")
+    reconcile = migration_commands.index('"${EXPENSEOPS_ROLE_UTILITY}" --reconcile-runtime-grants')
     second_head_check = migration_commands.index(
         "alembic current --check-heads", first_head_check + 1
     )
