@@ -24,8 +24,18 @@ def test_runtime_readiness_reports_real_restricted_role_and_rls():
     response = readiness()
     payload = json.loads(response.body)
     checks = payload["checks"]
+    rls_checks = {
+        key: checks[key]
+        for key in (
+            "database_rls",
+            "tenant_rls_enabled",
+            "tenant_rls_forced",
+            "tenant_rls_policies_hardened",
+            "tenant_routing_functions_hardened",
+        )
+    }
 
-    assert response.status_code == (200 if HARDENED_RLS_EXPECTED else 503), checks
+    assert response.status_code == (200 if HARDENED_RLS_EXPECTED else 503), rls_checks
     assert payload["status"] == ("ready" if HARDENED_RLS_EXPECTED else "not_ready")
     assert checks["database"] == "ok"
     assert checks["migration_current"] is True
