@@ -1580,8 +1580,7 @@ jobs:
             --limit 20 \
             --json)"
           latest_success_message="$(jq -r \
-            '[.[] | select(.status == "SUCCESS")][0] \
-             | (.meta.cliMessage // .meta.commitMessage // "")' \
+            '[.[] | select(.status == "SUCCESS")][0] | (.meta.cliMessage // .meta.commitMessage // "")' \
             <<<"${deployments}")"
           expected_message="ExpenseOps production web ${COMPATIBILITY_SHA}"
           if [[ "${latest_success_message}" != "${expected_message}" ]]; then

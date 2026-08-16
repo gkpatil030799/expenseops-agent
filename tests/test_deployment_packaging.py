@@ -444,6 +444,33 @@ def test_production_release_has_explicit_cutover_normal_and_rollback_guards():
     assert "if: ${{ inputs.release_phase != 'rollback' }}" in workflow
 
 
+def test_hardened_release_parses_latest_successful_railway_deployment():
+    workflow = (ROOT / ".github/workflows/production-release.yml").read_text(encoding="utf-8")
+    jq_filter = (
+        '[.[] | select(.status == "SUCCESS")][0] | (.meta.cliMessage // .meta.commitMessage // "")'
+    )
+    assert f"'{jq_filter}'" in workflow
+
+    deployments = [
+        {"status": "FAILED", "meta": {"cliMessage": "failed"}},
+        {
+            "status": "SUCCESS",
+            "meta": {"cliMessage": "ExpenseOps production web compatibility-sha"},
+        },
+        {"status": "SUCCESS", "meta": {"commitMessage": "older"}},
+    ]
+    result = subprocess.run(
+        ["jq", "-r", jq_filter],
+        input=json.dumps(deployments),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "ExpenseOps production web compatibility-sha"
+
+
 def test_inline_hobby_recovery_program_is_valid_python():
     program = _inline_hobby_recovery_program()
 
