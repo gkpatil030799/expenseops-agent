@@ -71,8 +71,8 @@ async function mockSpendingInsights(page: Page) {
       viewer_share_identity_connected: true,
       pending_transactions_excluded: true,
     },
-    summary: { total_cents: 128450, personal_cents: 74200, shared_cents: 43800, classified_cents: 118000, unreviewed_cents: 10450, refund_cents: 0, transaction_count: 31, average_cents: 4144 },
-    comparison: { total_cents: 116200, personal_cents: 68100, shared_cents: 39400, classified_cents: 107500, unreviewed_cents: 8700, refund_cents: 0, transaction_count: 28, average_cents: 4150 },
+    summary: { total_cents: 128450, personal_cents: 74200, shared_cents: 43800, classified_cents: 118000, unreviewed_cents: 10450, credits_cents: 0, unknown_share_transactions: 0, unknown_credit_share_transactions: 0, transaction_count: 31, average_cents: 4144 },
+    comparison: { total_cents: 116200, personal_cents: 68100, shared_cents: 39400, classified_cents: 107500, unreviewed_cents: 8700, credits_cents: 0, unknown_share_transactions: 0, unknown_credit_share_transactions: 0, transaction_count: 28, average_cents: 4150 },
     trend: [
       { period: "2026-07-13", total_cents: 17400, personal_cents: 11200, shared_cents: 5100, transactions: 5 },
       { period: "2026-07-20", total_cents: 28200, personal_cents: 16100, shared_cents: 9800, transactions: 7 },
@@ -112,7 +112,7 @@ async function mockSpendingInsights(page: Page) {
     accounts: ["Chase checking", "Freedom card"],
     categories: ["Food & Dining", "Health", "Home & Bills", "Lifestyle", "Transportation"],
     merchants: ["Aldi", "APS", "Costco", "Shell", "Target"],
-    data_quality: { unknown_share_transactions: 0, unreviewed_cents: 10450, pending_review_cents: 10450, uncategorized_cents: 0, pending_transactions_excluded: true },
+    data_quality: { unknown_share_transactions: 0, unknown_credit_share_transactions: 0, unreviewed_cents: 10450, pending_review_cents: 10450, uncategorized_cents: 0, pending_transactions_excluded: true },
   } }));
 }
 

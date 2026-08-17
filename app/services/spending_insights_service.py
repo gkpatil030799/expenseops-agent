@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import json
+import re
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import date, timedelta
 from decimal import Decimal, InvalidOperation
+from enum import StrEnum
 from typing import Literal
 
 from sqlalchemy import select
@@ -15,29 +17,91 @@ from app.models import ExpenseTransaction, SplitwiseIntegration, TransactionStat
 SpendBasis = Literal["card", "actual_share"]
 ReviewType = Literal["all", "personal", "shared"]
 Granularity = Literal["day", "week", "month"]
+ComparisonMode = Literal["immediately_preceding", "same_weekdays_last_week"]
 
 
 CATEGORY_MAP: dict[str, tuple[str, ...]] = {
-    "Food & Dining": ("food", "dining", "restaurant", "grocer", "coffee", "delivery"),
-    "Lifestyle": ("shop", "clothing", "beauty", "entertainment", "recreation"),
-    "Home & Bills": ("home", "rent", "utility", "bill", "internet", "phone"),
-    "Transportation": ("transport", "taxi", "ride", "uber", "lyft", "gas", "parking", "auto"),
+    "Food & Dining": (
+        "food and drink",
+        "food",
+        "dining",
+        "restaurant",
+        "restaurants",
+        "grocery",
+        "groceries",
+        "coffee",
+        "fast food",
+        "food delivery",
+    ),
+    # Health precedes Lifestyle so PERSONAL_CARE_GYMS_AND_FITNESS_CENTERS
+    # remains health while hair/beauty personal-care rows remain lifestyle.
+    "Health": ("health", "medical", "pharmacy", "fitness", "gym", "gyms"),
+    "Lifestyle": (
+        "general merchandise",
+        "personal care",
+        "shop",
+        "shops",
+        "shopping",
+        "superstore",
+        "superstores",
+        "online marketplace",
+        "online marketplaces",
+        "clothing",
+        "electronics",
+        "convenience",
+        "department store",
+        "department stores",
+        "hair",
+        "beauty",
+        "entertainment",
+        "recreation",
+    ),
+    "Home & Bills": (
+        "home",
+        "rent",
+        "utility",
+        "utilities",
+        "bill",
+        "bills",
+        "internet",
+        "phone",
+    ),
+    "Transportation": (
+        "transport",
+        "transportation",
+        "taxi",
+        "ride",
+        "rideshare",
+        "rideshares",
+        "uber",
+        "lyft",
+        "gas",
+        "parking",
+        "auto",
+        "automotive",
+    ),
     "Travel": ("travel", "airline", "hotel", "lodging"),
-    "Health": ("health", "medical", "pharmacy", "fitness"),
-    "Subscriptions": ("subscription", "streaming"),
+    "Subscriptions": ("subscription", "subscriptions", "streaming"),
 }
 
-EXCLUDED_CATEGORY_TERMS = ("transfer", "credit card payment", "loan payment", "payment")
 MATERIAL_CHANGE_CENTS = 2_500
 MATERIAL_CHANGE_PERCENT = 15
 MATERIAL_SHARE_OF_TOTAL_PERCENT = 5
 
 
+class SpendClassification(StrEnum):
+    PURCHASE = "purchase"
+    CREDIT = "credit"
+    EXCLUDED = "excluded"
+
+
 @dataclass(frozen=True)
 class SpendRow:
     tx: ExpenseTransaction
+    classification: SpendClassification
     card_cents: int
     selected_cents: int | None
+    selected_credit_cents: int | None
     parent_category: str
     source_category: str
     merchant: str
@@ -63,10 +127,15 @@ class SpendingInsightsService:
         spend_basis: SpendBasis = "card",
         granularity: Granularity = "day",
         currency_code: str | None = None,
+        comparison_mode: ComparisonMode = "immediately_preceding",
     ) -> dict:
         period_days = (end_date - start_date).days + 1
-        previous_end = start_date - timedelta(days=1)
-        previous_start = previous_end - timedelta(days=period_days - 1)
+        if comparison_mode == "same_weekdays_last_week":
+            previous_start = start_date - timedelta(days=7)
+            previous_end = end_date - timedelta(days=7)
+        else:
+            previous_end = start_date - timedelta(days=1)
+            previous_start = previous_end - timedelta(days=period_days - 1)
         transactions = list(
             self.db.scalars(
                 select(ExpenseTransaction).where(
@@ -109,9 +178,28 @@ class SpendingInsightsService:
             name: _sum(row for row in current if row.review_type == name)
             for name in ("personal", "shared")
         }
-        unknown_share = sum(1 for row in current if row.selected_cents is None)
+        unknown_share = current_summary["unknown_share_transactions"]
+        unknown_credit_share = current_summary["unknown_credit_share_transactions"]
         unreviewed_cents = sum(
-            row.card_cents for row in current if row.tx.status == TransactionStatus.ASK_USER.value
+            _value(row) for row in current if row.tx.status == TransactionStatus.ASK_USER.value
+        )
+        known_purchases = [row for row in current if _has_selected_purchase_spend(row)]
+        purchase_comparison_complete = not (
+            current_summary["unknown_share_transactions"]
+            or previous_summary["unknown_share_transactions"]
+        )
+        notable_changes = (
+            _notable_changes(
+                current_summary,
+                previous_summary,
+                categories,
+                merchants,
+                personal_shared,
+                previous,
+                selected_currency,
+            )
+            if purchase_comparison_complete
+            else []
         )
 
         return {
@@ -121,6 +209,7 @@ class SpendingInsightsService:
                 "previous_start_date": previous_start.isoformat(),
                 "previous_end_date": previous_end.isoformat(),
                 "granularity": granularity,
+                "comparison_mode": comparison_mode,
             },
             "scope": {
                 "currency": selected_currency,
@@ -142,20 +231,13 @@ class SpendingInsightsService:
             "shared_people": _shared_breakdown(current, "people"),
             "shared_groups": _shared_breakdown(current, "groups"),
             "category_trend": _category_trend(current, start_date, end_date, granularity),
-            "notable_changes": _notable_changes(
-                current_summary,
-                previous_summary,
-                categories,
-                merchants,
-                personal_shared,
-                previous,
-                selected_currency,
-            ),
-            "accounts": sorted({row.tx.account_id for row in current if row.tx.account_id}),
-            "categories": sorted({row.parent_category for row in current}),
-            "merchants": sorted({row.merchant for row in current}),
+            "notable_changes": notable_changes,
+            "accounts": sorted({row.tx.account_id for row in known_purchases if row.tx.account_id}),
+            "categories": sorted({row.parent_category for row in known_purchases}),
+            "merchants": sorted({row.merchant for row in known_purchases}),
             "data_quality": {
                 "unknown_share_transactions": unknown_share,
+                "unknown_credit_share_transactions": unknown_credit_share,
                 "unreviewed_cents": unreviewed_cents,
                 # Kept during the response-contract transition for older clients.
                 "pending_review_cents": unreviewed_cents,
@@ -195,13 +277,21 @@ class SpendingInsightsService:
         review_type: ReviewType,
     ) -> list[SpendRow]:
         merchant_query = (merchant or "").casefold()
+        category_query = _normalize_category(category)
         return [
             row
             for row in rows
             if row.tx.date
             and start_date <= row.tx.date <= end_date
             and (not account_id or row.tx.account_id == account_id)
-            and (not category or row.parent_category == category)
+            and (
+                not category_query
+                or category_query
+                in {
+                    _normalize_category(row.parent_category),
+                    _normalize_category(row.source_category),
+                }
+            )
             and (not merchant_query or merchant_query in row.merchant.casefold())
             and (review_type == "all" or row.review_type == review_type)
         ]
@@ -213,7 +303,8 @@ def _to_spend_row(
     viewer_splitwise_user_id: int | None,
 ) -> SpendRow | None:
     category = (tx.category or "").strip()
-    if any(term in category.casefold() for term in EXCLUDED_CATEGORY_TERMS):
+    classification = classify_spend_transaction(tx)
+    if classification is SpendClassification.EXCLUDED:
         return None
     card_cents = tx.amount_cents
     review_type = (
@@ -223,19 +314,31 @@ def _to_spend_row(
         if tx.status in {TransactionStatus.SHARED_DRAFT.value, TransactionStatus.POSTED.value}
         else "unreviewed"
     )
-    selected = card_cents
+    selected: int | None = card_cents if classification is SpendClassification.PURCHASE else None
+    selected_credit: int | None = (
+        abs(card_cents) if classification is SpendClassification.CREDIT else None
+    )
     people: tuple[str, ...] = ()
     group = None
-    if review_type == "shared":
-        share, people, group = _split_details(
-            tx.splitwise_payload_json, viewer_splitwise_user_id
-        )
+    if review_type == "shared" and classification is SpendClassification.PURCHASE:
+        share, people, group = _split_details(tx.splitwise_payload_json, viewer_splitwise_user_id)
         if basis == "actual_share":
-            selected = share
+            selected = share if share is None or share >= 0 else None
+    elif (
+        review_type == "shared"
+        and classification is SpendClassification.CREDIT
+        and basis == "actual_share"
+    ):
+        # Existing Splitwise payloads describe purchase responsibility, not how a
+        # later credit should be allocated. Never substitute the whole card credit
+        # or a stale positive owed-share value for the viewer's unknown credit share.
+        selected_credit = None
     return SpendRow(
         tx=tx,
+        classification=classification,
         card_cents=card_cents,
         selected_cents=selected,
+        selected_credit_cents=selected_credit,
         parent_category=_parent_category(category),
         source_category=category or "Uncategorized",
         merchant=(tx.merchant_name or tx.name or "Unknown merchant").strip(),
@@ -249,11 +352,65 @@ def _to_spend_row(
 def _parent_category(category: str) -> str:
     if not category:
         return "Uncategorized"
-    normalized = category.casefold()
+    normalized = _normalize_category(category)
+    if normalized == "uncategorized":
+        return "Uncategorized"
     for parent, terms in CATEGORY_MAP.items():
-        if any(term in normalized for term in terms):
+        if any(_category_has_term(normalized, term) for term in terms):
             return parent
     return "Other"
+
+
+def classify_spend_transaction(tx: ExpenseTransaction) -> SpendClassification:
+    """Classify one canonical bank row before any spending/share projection."""
+
+    if tx.pending or tx.status == TransactionStatus.REMOVED.value:
+        return SpendClassification.EXCLUDED
+    if _is_excluded_category(tx.category):
+        return SpendClassification.EXCLUDED
+    if tx.amount_cents > 0:
+        return SpendClassification.PURCHASE
+    if tx.amount_cents < 0:
+        return SpendClassification.CREDIT
+    return SpendClassification.EXCLUDED
+
+
+def _normalize_category(value: str | None) -> str:
+    return " ".join(re.sub(r"[^a-z0-9]+", " ", str(value or "").casefold()).split())
+
+
+def _category_has_term(normalized: str, term: str) -> bool:
+    return f" {term} " in f" {normalized} "
+
+
+def _is_excluded_category(category: str | None) -> bool:
+    raw = str(category or "").strip()
+    normalized = _normalize_category(category)
+    if not normalized:
+        return False
+    # Plaid's legacy category hierarchy is serialized as ``Primary / Detail``.
+    # A primary Payment(s) segment is authoritative, while an arbitrary purchase
+    # label that merely contains the word "payment" is not.
+    primary_segment = _normalize_category(raw.split("/", 1)[0])
+    if primary_segment in {"payment", "payments"}:
+        return True
+    if primary_segment in {"transfer", "transfers", "transfer in", "transfer out"}:
+        return True
+    if primary_segment in {"loan payment", "loan payments"}:
+        return True
+    if re.fullmatch(
+        r"(?:payments? (?:credit )?card|(?:credit )?card payments?)",
+        normalized,
+    ):
+        return True
+    return normalized in {
+        "payment",
+        "payments",
+        "card payment",
+        "card payments",
+        "credit card payment",
+        "credit card payments",
+    }
 
 
 def _split_details(
@@ -301,12 +458,20 @@ def _value(row: SpendRow) -> int:
     return row.selected_cents or 0
 
 
+def _has_selected_purchase_spend(row: SpendRow) -> bool:
+    return (
+        row.classification is SpendClassification.PURCHASE
+        and row.selected_cents is not None
+        and row.selected_cents > 0
+    )
+
+
 def _sum(rows) -> int:
     return sum(_value(row) for row in rows)
 
 
 def _summary(rows: list[SpendRow]) -> dict[str, int]:
-    known = [row for row in rows if row.selected_cents is not None]
+    known = [row for row in rows if _has_selected_purchase_spend(row)]
     total = _sum(known)
     personal = _sum(row for row in known if row.review_type == "personal")
     shared = _sum(row for row in known if row.review_type == "shared")
@@ -317,7 +482,25 @@ def _summary(rows: list[SpendRow]) -> dict[str, int]:
         "shared_cents": shared,
         "classified_cents": personal + shared,
         "unreviewed_cents": unreviewed,
-        "refund_cents": _sum(row for row in known if _value(row) < 0),
+        "credits_cents": sum(
+            row.selected_credit_cents or 0
+            for row in rows
+            if row.classification is SpendClassification.CREDIT
+        ),
+        "unknown_share_transactions": sum(
+            1
+            for row in rows
+            if row.classification is SpendClassification.PURCHASE
+            and row.review_type == "shared"
+            and row.selected_cents is None
+        ),
+        "unknown_credit_share_transactions": sum(
+            1
+            for row in rows
+            if row.classification is SpendClassification.CREDIT
+            and row.review_type == "shared"
+            and row.selected_credit_cents is None
+        ),
         "transaction_count": len(known),
         "average_cents": round(total / len(known)) if known else 0,
     }
@@ -326,7 +509,7 @@ def _summary(rows: list[SpendRow]) -> dict[str, int]:
 def _breakdown(rows: list[SpendRow], key) -> list[dict]:
     values: dict[str, dict[str, int]] = defaultdict(lambda: {"amount": 0, "count": 0})
     for row in rows:
-        if row.selected_cents is None:
+        if not _has_selected_purchase_spend(row):
             continue
         name = key(row)
         values[name]["amount"] += _value(row)
@@ -339,9 +522,7 @@ def _breakdown(rows: list[SpendRow], key) -> list[dict]:
                 "amount_cents": value["amount"],
                 "transaction_count": value["count"],
                 "percentage": (
-                    round(abs(value["amount"]) / magnitude_total * 100, 1)
-                    if magnitude_total
-                    else 0
+                    round(abs(value["amount"]) / magnitude_total * 100, 1) if magnitude_total else 0
                 ),
             }
             for name, value in values.items()
@@ -371,7 +552,7 @@ def _trend(rows: list[SpendRow], start: date, end: date, granularity: Granularit
         lambda: {"total_cents": 0, "personal_cents": 0, "shared_cents": 0, "transactions": 0}
     )
     for row in rows:
-        if row.selected_cents is None or not row.tx.date:
+        if not _has_selected_purchase_spend(row) or not row.tx.date:
             continue
         bucket = _bucket_start(row.tx.date, granularity)
         values[bucket]["total_cents"] += _value(row)
@@ -389,7 +570,7 @@ def _trend(rows: list[SpendRow], start: date, end: date, granularity: Granularit
 def _category_trend(rows, start, end, granularity) -> list[dict]:
     values: dict[date, dict[str, int]] = defaultdict(lambda: defaultdict(int))
     for row in rows:
-        if row.selected_cents is not None and row.tx.date:
+        if _has_selected_purchase_spend(row) and row.tx.date:
             values[_bucket_start(row.tx.date, granularity)][row.parent_category] += _value(row)
     return [
         {"period": period.isoformat(), "categories": dict(categories)}
@@ -400,7 +581,7 @@ def _category_trend(rows, start, end, granularity) -> list[dict]:
 def _shared_breakdown(rows: list[SpendRow], mode: str) -> list[dict]:
     amounts: dict[str, int] = defaultdict(int)
     for row in rows:
-        if row.review_type != "shared" or row.selected_cents is None:
+        if row.review_type != "shared" or not _has_selected_purchase_spend(row):
             continue
         names = row.people if mode == "people" else ((row.group,) if row.group else ())
         for name in names:
@@ -422,10 +603,21 @@ def _notable_changes(
 ):
     notes: list[dict] = []
     previous_breakdown = _breakdown(previous_rows, lambda row: row.parent_category)
+    current_categories = {item["name"]: item["amount_cents"] for item in categories}
     previous_categories = {item["name"]: item["amount_cents"] for item in previous_breakdown}
-    for item in categories:
-        baseline = previous_categories.get(item["name"], 0)
-        delta = item["amount_cents"] - baseline
+    category_changes = sorted(
+        (
+            (
+                name,
+                current_categories.get(name, 0),
+                previous_categories.get(name, 0),
+            )
+            for name in current_categories.keys() | previous_categories.keys()
+        ),
+        key=lambda item: (-abs(item[1] - item[2]), item[0]),
+    )
+    for name, amount, baseline in category_changes:
+        delta = amount - baseline
         percent = abs(delta) / abs(baseline) * 100 if baseline else 100
         share = abs(delta) / abs(current["total_cents"]) * 100 if current["total_cents"] else 0
         if (
@@ -437,11 +629,11 @@ def _notable_changes(
                 {
                     "kind": "category",
                     "direction": "up" if delta > 0 else "down",
-                    "label": item["name"],
+                    "label": name,
                     "amount_cents": delta,
                     "detail": (
-                        f'{"+" if delta > 0 else "-"}{currency_code} '
-                        f'{abs(delta) / 100:,.0f} '
+                        f"{'+' if delta > 0 else '-'}{currency_code} "
+                        f"{abs(delta) / 100:,.0f} "
                         "vs previous period"
                     ),
                 }
@@ -454,10 +646,7 @@ def _notable_changes(
                 "direction": "neutral",
                 "label": merchant["name"],
                 "amount_cents": merchant["amount_cents"],
-                "detail": (
-                    f'Top merchant · {currency_code} '
-                    f'{merchant["amount_cents"] / 100:,.0f}'
-                ),
+                "detail": (f"Top merchant · {currency_code} {merchant['amount_cents'] / 100:,.0f}"),
             }
         )
 
@@ -479,8 +668,7 @@ def _notable_changes(
                 "label": "Shared spending mix",
                 "amount_cents": 0,
                 "detail": (
-                    f'{abs(mix_delta)} percentage points '
-                    f'{"higher" if mix_delta > 0 else "lower"}'
+                    f"{abs(mix_delta)} percentage points {'higher' if mix_delta > 0 else 'lower'}"
                 ),
             }
         )

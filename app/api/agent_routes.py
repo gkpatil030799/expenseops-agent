@@ -15,9 +15,9 @@ from app.agent.contracts import (
     AgentFeedbackRequest,
     AgentMessageCreate,
     AgentMessageOut,
-    AgentStructuredResponse,
     AgentTurnCreate,
     AgentTurnOut,
+    hydrate_persisted_agent_response,
 )
 from app.agent.runtime import AgentRuntimeError, ReadOnlyAgentOrchestrator
 from app.agent.service import (
@@ -330,7 +330,7 @@ def _message_out(
     feedback_state: AgentMessageFeedbackState | None = None,
 ) -> AgentMessageOut:
     structured = (
-        AgentStructuredResponse.model_validate(value.structured_response_json)
+        hydrate_persisted_agent_response(value.structured_response_json)
         if value.structured_response_json
         else None
     )

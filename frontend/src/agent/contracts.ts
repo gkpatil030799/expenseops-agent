@@ -129,8 +129,15 @@ export type AgentSpendingSummaryBlock = AgentResponseBlockBase & {
   start_date: string;
   end_date: string;
   currency_code: string;
+  spend_basis: "card" | "actual_share";
   total_cents: number;
   previous_total_cents: number | null;
+  credits_cents: number;
+  previous_credits_cents: number;
+  unknown_share_transactions: number;
+  previous_unknown_share_transactions: number;
+  unknown_credit_share_transactions: number;
+  previous_unknown_credit_share_transactions: number;
   change_percent: number | null;
   highlights: string[];
   top_categories: AgentSpendingBreakdownItem[];

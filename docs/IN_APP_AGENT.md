@@ -257,6 +257,25 @@ text. Unknown blocks or schema versions show a safe unavailable state. The rende
 `dangerouslySetInnerHTML`, execute model-provided code, interpret arbitrary markdown, load remote
 components, or turn arbitrary model URLs into navigation.
 
+For `spending_summary`, Total and prior-period Total are non-negative eligible purchase spending;
+category and merchant rows use the same purchase-only universe. Required `spend_basis` is either
+`card` or `actual_share`, allowing the renderer to label Total card spend versus My actual share
+without inference. `credits_cents` is a separate non-negative magnitude and never reduces the
+primary Total. The flattened block also requires non-negative `previous_credits_cents`, current
+and prior `unknown_share_transactions`, and current and prior
+`unknown_credit_share_transactions`. Those period-specific counts separately disclose shared
+purchases and credits omitted from actual-share results because ExpenseOps has no canonical viewer
+allocation; the UI never guesses one. Confirmed amounts and deltas remain visible, but an exact
+delta is labeled `Confirmed allocations only` and its percentage is suppressed when either
+purchase period is incomplete. Category deltas are hidden and What changed is explicitly marked
+incomplete rather than reporting no material change. Card-basis credits use raw
+card magnitude and all four unknown-share counts must be zero. Direct Insights labels the
+actual-share count as Confirmed transactions because omitted shared purchases are not counted.
+The TypeScript network validator
+enforces those invariants rather than accepting signed primary spending values. Persisted legacy
+blocks missing the credit contract are projected as the agreed text plus recalculation empty state
+instead of rendering retired net-spend numbers.
+
 Supported navigation is semantic: a fixed application-owned action can request an existing
 Expense Review, Insights, Activity, Deals, Household, or Settings destination. The shell performs
 the actual allowlisted navigation. The model cannot provide an arbitrary route, callback, or

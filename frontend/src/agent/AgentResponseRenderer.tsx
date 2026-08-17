@@ -581,6 +581,9 @@ function SpendingSummaryCard({
       </CardHeader>
       <CardContent className="space-y-4 pt-0">
         <div>
+          <p className="text-xs font-medium text-slate-600">
+            {block.spend_basis === "actual_share" ? "My actual share" : "Total card spend"}
+          </p>
           <p className="text-3xl font-semibold tracking-tight text-slate-950">
             {formatMinor(block.total_cents, block.currency_code)}
           </p>
@@ -589,6 +592,36 @@ function SpendingSummaryCard({
               Prior period {formatMinor(block.previous_total_cents, block.currency_code)}
               {typeof block.change_percent === "number"
                 ? ` · ${formatPercentage(block.change_percent)}`
+                : ""}
+            </p>
+          ) : null}
+          {block.credits_cents ? (
+            <p className="mt-1 text-xs font-medium text-emerald-700">
+              {block.spend_basis === "actual_share" ? "Attributable credits" : "Card credits"} reported separately {formatMinor(block.credits_cents, block.currency_code)}
+            </p>
+          ) : null}
+          {block.previous_credits_cents ? (
+            <p className="mt-1 text-xs text-slate-600">
+              {block.spend_basis === "actual_share" ? "Prior attributable credits" : "Prior card credits"} {formatMinor(block.previous_credits_cents, block.currency_code)}
+            </p>
+          ) : null}
+          {block.unknown_share_transactions || block.previous_unknown_share_transactions ? (
+            <p className="mt-2 text-xs font-medium text-amber-800">
+              {block.unknown_share_transactions
+                ? `${block.unknown_share_transactions} current shared purchase${block.unknown_share_transactions === 1 ? " was" : "s were"} omitted because your allocation is unavailable. `
+                : ""}
+              {block.previous_unknown_share_transactions
+                ? `${block.previous_unknown_share_transactions} prior shared purchase${block.previous_unknown_share_transactions === 1 ? " was" : "s were"} omitted from the comparison because your allocation is unavailable.`
+                : ""}
+            </p>
+          ) : null}
+          {block.unknown_credit_share_transactions || block.previous_unknown_credit_share_transactions ? (
+            <p className="mt-2 text-xs font-medium text-amber-800">
+              {block.unknown_credit_share_transactions
+                ? `${block.unknown_credit_share_transactions} current shared credit${block.unknown_credit_share_transactions === 1 ? "" : "s"} ${block.unknown_credit_share_transactions === 1 ? "was" : "were"} omitted because your allocation is unavailable. `
+                : ""}
+              {block.previous_unknown_credit_share_transactions
+                ? `${block.previous_unknown_credit_share_transactions} prior shared credit${block.previous_unknown_credit_share_transactions === 1 ? "" : "s"} ${block.previous_unknown_credit_share_transactions === 1 ? "was" : "were"} omitted from the comparison because your allocation is unavailable.`
                 : ""}
             </p>
           ) : null}

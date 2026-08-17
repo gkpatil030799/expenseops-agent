@@ -21,6 +21,7 @@ from app.agent.contracts import (
     AgentPageContext,
     AgentStructuredResponse,
     AgentSurface,
+    hydrate_persisted_agent_response,
 )
 from app.agent.tooling import (
     AgentTool,
@@ -187,8 +188,15 @@ def test_structured_response_accepts_every_versioned_platform_neutral_block():
                     "start_date": "2026-08-01",
                     "end_date": "2026-08-14",
                     "currency_code": "USD",
+                    "spend_basis": "card",
                     "total_cents": 12_500,
                     "previous_total_cents": 10_000,
+                    "credits_cents": 500,
+                    "previous_credits_cents": 0,
+                    "unknown_share_transactions": 0,
+                    "previous_unknown_share_transactions": 0,
+                    "unknown_credit_share_transactions": 0,
+                    "previous_unknown_credit_share_transactions": 0,
                     "change_percent": 25,
                     "highlights": ["Dining increased."],
                 },
@@ -288,6 +296,143 @@ def test_structured_response_accepts_every_versioned_platform_neutral_block():
         "empty",
     ]
     assert "html" not in str(dumped).casefold()
+
+
+def test_persisted_retired_net_spend_response_is_replaced_without_mutation():
+    saved = {
+        "schema_version": "1.0",
+        "blocks": [
+            {"type": "text", "text": "Old net total was -USD 12.34 at Private Merchant."},
+            {
+                "type": "spending_summary",
+                "title": "Old spending",
+                "start_date": "2026-08-01",
+                "end_date": "2026-08-14",
+                "currency_code": "USD",
+                "total_cents": -1_234,
+            },
+        ],
+    }
+    before = {
+        "schema_version": saved["schema_version"],
+        "blocks": [dict(block) for block in saved["blocks"]],
+    }
+
+    hydrated = hydrate_persisted_agent_response(saved)
+
+    assert saved == before
+    assert [block.type for block in hydrated.blocks] == ["text", "empty"]
+    serialized = hydrated.model_dump_json()
+    assert "retired net-spend semantics" in serialized
+    assert "Recalculate this spending answer" in serialized
+    assert "Private Merchant" not in serialized
+    assert "-1234" not in serialized
+
+
+@pytest.mark.parametrize(
+    "unsafe_fields",
+    [
+        {"total_cents": -1},
+        {"previous_total_cents": -1},
+        {"top_categories": [{"name": "Food", "amount_cents": -1}]},
+        {"top_merchants": [{"name": "Shop", "previous_amount_cents": -1}]},
+    ],
+)
+def test_persisted_negative_primary_spending_projection_is_retired(unsafe_fields):
+    block = {
+        "type": "spending_summary",
+        "title": "Saved",
+        "start_date": "2026-08-01",
+        "end_date": "2026-08-14",
+        "currency_code": "USD",
+        "spend_basis": "card",
+        "total_cents": 100,
+        "previous_total_cents": 50,
+        "credits_cents": 0,
+        "previous_credits_cents": 0,
+        "unknown_share_transactions": 0,
+        "previous_unknown_share_transactions": 0,
+        "unknown_credit_share_transactions": 0,
+        "previous_unknown_credit_share_transactions": 0,
+        **unsafe_fields,
+    }
+
+    hydrated = hydrate_persisted_agent_response({"schema_version": "1.0", "blocks": [block]})
+
+    assert [value.type for value in hydrated.blocks] == ["text", "empty"]
+
+
+def test_current_purchase_spending_response_hydrates_strictly_without_adaptation():
+    payload = {
+        "schema_version": "1.0",
+        "blocks": [
+            {
+                "type": "spending_summary",
+                "title": "Spending summary",
+                "start_date": "2026-08-01",
+                "end_date": "2026-08-14",
+                "currency_code": "USD",
+                "spend_basis": "actual_share",
+                "total_cents": 12_500,
+                "previous_total_cents": 10_000,
+                "credits_cents": 500,
+                "previous_credits_cents": 100,
+                "unknown_share_transactions": 1,
+                "previous_unknown_share_transactions": 2,
+                "unknown_credit_share_transactions": 1,
+                "previous_unknown_credit_share_transactions": 2,
+            }
+        ],
+    }
+
+    hydrated = hydrate_persisted_agent_response(payload)
+
+    assert len(hydrated.blocks) == 1
+    block = hydrated.blocks[0]
+    assert block.type == "spending_summary"
+    assert block.spend_basis == "actual_share"
+    assert block.total_cents == 12_500
+    assert block.previous_total_cents == 10_000
+    assert block.credits_cents == 500
+    assert block.previous_credits_cents == 100
+    assert block.unknown_share_transactions == 1
+    assert block.previous_unknown_share_transactions == 2
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"spend_basis": "card", "unknown_share_transactions": 1},
+        {"spend_basis": "card", "previous_unknown_credit_share_transactions": 1},
+        {
+            "spend_basis": "actual_share",
+            "unknown_share_transactions": 1,
+            "change_percent": 10.0,
+        },
+    ],
+)
+def test_spending_summary_rejects_incoherent_basis_quality_combinations(overrides):
+    block = {
+        "type": "spending_summary",
+        "title": "Spending summary",
+        "start_date": "2026-08-01",
+        "end_date": "2026-08-14",
+        "currency_code": "USD",
+        "spend_basis": "card",
+        "total_cents": 100,
+        "previous_total_cents": 50,
+        "credits_cents": 0,
+        "previous_credits_cents": 0,
+        "unknown_share_transactions": 0,
+        "previous_unknown_share_transactions": 0,
+        "unknown_credit_share_transactions": 0,
+        "previous_unknown_credit_share_transactions": 0,
+        "change_percent": None,
+        **overrides,
+    }
+
+    with pytest.raises(ValidationError):
+        AgentStructuredResponse.model_validate({"blocks": [block]})
 
 
 def test_v1_structured_response_still_hydrates_original_domain_bounds_and_fields():
@@ -778,7 +923,14 @@ def test_non_finite_tool_output_and_structured_response_are_rejected():
                         "start_date": "2026-08-01",
                         "end_date": "2026-08-14",
                         "currency_code": "USD",
+                        "spend_basis": "card",
                         "total_cents": 100,
+                        "credits_cents": 0,
+                        "previous_credits_cents": 0,
+                        "unknown_share_transactions": 0,
+                        "previous_unknown_share_transactions": 0,
+                        "unknown_credit_share_transactions": 0,
+                        "previous_unknown_credit_share_transactions": 0,
                         "change_percent": float("nan"),
                     }
                 ]

@@ -167,6 +167,7 @@ def test_live_openai_read_only_turns_use_canonical_tools(record_property) -> Non
                 "merchant": None,
                 "review_type": None,
                 "spend_basis": "card",
+                "comparison_mode": None,
                 "currency_code": None,
             }
             assert summaries[0].total_cents == 4_321, tool_calls[0].arguments_json
@@ -364,6 +365,7 @@ def test_live_openai_read_only_turns_use_canonical_tools(record_property) -> Non
                 "merchant": None,
                 "review_type": None,
                 "spend_basis": "card",
+                "comparison_mode": None,
                 "currency_code": "USD",
             }
             assert calls_by_name["search_transactions"].arguments_json == {

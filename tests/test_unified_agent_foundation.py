@@ -321,6 +321,63 @@ def test_conversation_api_is_private_to_owner_even_inside_one_workspace(
     assert cross_workspace_user.status_code == 404
 
 
+def test_conversation_history_adapts_retired_spending_without_rewriting_saved_json(
+    agent_foundation_db,
+):
+    factory, contexts, _state = agent_foundation_db
+    legacy = {
+        "schema_version": "1.0",
+        "blocks": [
+            {"type": "text", "text": "Old net answer was USD 90.00 at Private Merchant."},
+            {
+                "type": "spending_summary",
+                "title": "Old spending",
+                "start_date": "2026-08-01",
+                "end_date": "2026-08-14",
+                "currency_code": "USD",
+                "total_cents": 9_000,
+            },
+        ],
+    }
+    with _scoped(factory, contexts["a"]) as db:
+        service = UnifiedAgentService(db, _agent_settings())
+        conversation = service.create_conversation(owner_user_id=contexts["a"].user_id)
+        message = AgentMessage(
+            workspace_id=contexts["a"].workspace_id,
+            conversation_id=conversation.id,
+            owner_user_id=contexts["a"].user_id,
+            role="assistant",
+            status="completed",
+            structured_response_json=legacy,
+        )
+        db.add(message)
+        db.commit()
+        message_public_id = message.public_id
+        conversation_public_id = conversation.public_id
+
+    response = TestClient(app).get(
+        f"/api/agent/conversations/{conversation_public_id}",
+        headers={"Authorization": "Bearer agent-token-a"},
+    )
+
+    assert response.status_code == 200
+    assistant = next(
+        item for item in response.json()["messages"] if item["public_id"] == message_public_id
+    )
+    blocks = assistant["structured_response"]["blocks"]
+    assert [block["type"] for block in blocks] == ["text", "empty"]
+    serialized = str(blocks)
+    assert "retired net-spend semantics" in serialized
+    assert "Private Merchant" not in serialized
+    assert "9000" not in serialized
+    with _scoped(factory, contexts["a"]) as db:
+        persisted = db.scalar(
+            select(AgentMessage).where(AgentMessage.public_id == message_public_id)
+        )
+        assert persisted is not None
+        assert persisted.structured_response_json == legacy
+
+
 def test_run_id_guessing_is_private_to_owner_and_workspace(agent_foundation_db):
     factory, contexts, _state = agent_foundation_db
     with _scoped(factory, contexts["a"]) as db:
@@ -415,7 +472,14 @@ def test_run_tool_call_and_structured_response_metadata_persist_without_prompts(
                     "start_date": "2026-08-01",
                     "end_date": "2026-08-14",
                     "currency_code": "USD",
+                    "spend_basis": "card",
                     "total_cents": 12_500,
+                    "credits_cents": 0,
+                    "previous_credits_cents": 0,
+                    "unknown_share_transactions": 0,
+                    "previous_unknown_share_transactions": 0,
+                    "unknown_credit_share_transactions": 0,
+                    "previous_unknown_credit_share_transactions": 0,
                 }
             ]
         )
