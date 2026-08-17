@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import time
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from hashlib import sha256
@@ -820,7 +821,7 @@ def _handle_receipt_attachment(message: dict, db: DbSession) -> bool:
         file_id = str(document.get("file_id") or "")
         filename = str(document.get("file_name") or "receipt")
     elif photos:
-        photo = max(photos, key=lambda value: int(value.get("file_size") or 0))
+        photo = _select_telegram_receipt_photo(photos)
         file_id = str(photo.get("file_id") or "")
         mime_type = "image/jpeg"
         filename = "telegram-receipt.jpg"
@@ -829,6 +830,13 @@ def _handle_receipt_attachment(message: dict, db: DbSession) -> bool:
     chat_id = str((message.get("chat") or {}).get("id") or "")
     telegram = TelegramService()
     try:
+        acknowledgment_started = time.monotonic()
+        telegram.send_message("Got it — I'm reading this receipt.", chat_id=chat_id)
+        log_event(
+            logger,
+            "telegram_receipt_acknowledged",
+            latency_ms=max(0, round((time.monotonic() - acknowledgment_started) * 1000)),
+        )
         content, _ = telegram.download_file(file_id)
         receipt = ReceiptIngestionService(db).ingest_attachment(
             source="telegram",
@@ -838,11 +846,7 @@ def _handle_receipt_attachment(message: dict, db: DbSession) -> bool:
             filename=filename,
         )
         if receipt.parse_status == "failed":
-            telegram.send_message(
-                "I couldn't read that receipt. Try a clearer image/PDF "
-                "or review it in the dashboard.",
-                chat_id=chat_id,
-            )
+            telegram.send_message(_receipt_failure_message(receipt.failure_code), chat_id=chat_id)
         else:
             telegram.send_message(
                 format_receipt_review_message(receipt),
@@ -851,11 +855,61 @@ def _handle_receipt_attachment(message: dict, db: DbSession) -> bool:
                 ),
                 chat_id=chat_id,
             )
-    except ValueError:
+    except (PermissionError, ValueError):
         telegram.send_message(
             "I couldn't download that receipt. Please try sending it again.", chat_id=chat_id
         )
     return True
+
+
+def _select_telegram_receipt_photo(photos: list[dict]) -> dict:
+    if not photos:
+        raise ValueError("telegram_receipt_photo_missing")
+    maximum = get_settings().receipt_max_attachment_bytes
+    within_limit = [
+        photo
+        for photo in photos
+        if not int(photo.get("file_size") or 0) or int(photo.get("file_size") or 0) <= maximum
+    ]
+    candidates = within_limit or photos
+    return max(
+        candidates,
+        key=lambda value: (
+            int(value.get("width") or 0) * int(value.get("height") or 0),
+            int(value.get("file_size") or 0),
+        ),
+    )
+
+
+def _receipt_failure_message(code: str | None) -> str:
+    if code == "receipt_non_receipt":
+        return "This doesn't look like a receipt. Send a photo with the full receipt visible."
+    if code in {
+        "receipt_image_empty",
+        "receipt_image_corrupt",
+        "receipt_image_too_small",
+        "receipt_image_unreadable",
+        "receipt_image_pixel_limit",
+    }:
+        return (
+            "I couldn't reliably read this photo. Try another photo with the full receipt "
+            "visible and the text in focus."
+        )
+    if code in {
+        "receipt_provider_timeout",
+        "receipt_provider_rate_limited",
+        "receipt_provider_unavailable",
+        "receipt_parse_failed",
+    }:
+        return "We couldn't process this photo right now. Please try again."
+    if code == "receipt_attachment_too_large":
+        return "That receipt photo is too large. Try a standard phone photo under 10 MB."
+    if code in {"unsupported_receipt_type", "receipt_media_type_mismatch"}:
+        return "Send the receipt as a JPEG, PNG, WebP, or PDF."
+    return (
+        "I couldn't reliably read that receipt. "
+        "Try taking another photo with the full receipt visible."
+    )
 
 
 def _handle_receipt_callback(

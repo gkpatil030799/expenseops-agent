@@ -44,6 +44,23 @@ class GmailClient:
             params={"format": "full"},
         ).json()
 
+    def get_attachment(self, message_id: str, attachment_id: str, token: str) -> bytes:
+        value = self.request(
+            "GET",
+            f"https://gmail.googleapis.com/gmail/v1/users/{self.settings.gmail_user_id}"
+            f"/messages/{message_id}/attachments/{attachment_id}",
+            headers={"Authorization": f"Bearer {token}"},
+        ).json()
+        data = str(value.get("data") or "")
+        if not data:
+            raise ValueError("gmail_attachment_empty")
+        import base64
+
+        try:
+            return base64.urlsafe_b64decode(data + "=" * (-len(data) % 4))
+        except ValueError as exc:
+            raise ValueError("gmail_attachment_invalid") from exc
+
     def request(self, method: str, url: str, **kwargs) -> httpx.Response:
         if self.client:
             response = self.client.request(method, url, **kwargs)

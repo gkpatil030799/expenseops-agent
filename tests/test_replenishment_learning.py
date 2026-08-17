@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import base64
+import io
 from datetime import UTC, date, datetime, timedelta
 from types import SimpleNamespace
 
 import httpx
 import pytest
+from PIL import Image
 from sqlalchemy import create_engine, func, select
 from sqlalchemy.orm import sessionmaker
 
@@ -75,6 +77,12 @@ class StaticParser:
         return self.parsed
 
 
+def receipt_image_bytes(*, width: int = 640, height: int = 960) -> bytes:
+    output = io.BytesIO()
+    Image.new("RGB", (width, height), "white").save(output, format="JPEG", quality=95)
+    return output.getvalue()
+
+
 def item(db, name="Paper towels", cadence=30) -> HouseholdItem:
     value = HouseholdItem(name=name, cadence_days=cadence, enabled=True)
     db.add(value)
@@ -138,7 +146,7 @@ def test_telegram_receipt_ingestion_parses_matches_and_preserves_raw_name(db):
     receipt = service.ingest_attachment(
         source="telegram",
         source_external_id="message-1",
-        content=b"image bytes",
+        content=receipt_image_bytes(),
         mime_type="image/jpeg",
         filename="receipt.jpg",
     )
@@ -154,8 +162,11 @@ def test_receipt_parser_uses_structured_vision_output():
     response_body = {
         "output_text": (
             '{"merchant":"Costco","purchased_at":"2026-08-09T10:00:00Z",'
-            '"subtotal_cents":1000,"tax_cents":80,"total_cents":1080,'
-            '"currency":"USD","confidence":0.98,"items":[{"name":"Eggs",'
+            '"is_receipt":true,"merchant_confidence":0.99,'
+            '"date_confidence":0.98,"subtotal_cents":1000,"tax_cents":80,'
+            '"tip_cents":0,"discount_cents":0,"total_cents":1080,'
+            '"total_confidence":0.99,"currency":"USD","confidence":0.98,'
+            '"line_items_complete":true,"quality_warnings":[],"items":[{"name":"Eggs",'
             '"quantity":12,"unit":"count","unit_price_cents":null,'
             '"line_total_cents":1080,"brand":null,"category":"grocery",'
             '"confidence":0.99,"is_household_purchase":true,'
@@ -174,7 +185,7 @@ def test_receipt_parser_uses_structured_vision_output():
     parser = OpenAIReceiptParser(
         settings(receipt_parser_provider="openai", openai_api_key="test-key"), client
     )
-    result = parser.parse_attachment(b"private image", "image/jpeg", "receipt.jpg")
+    result = parser.parse_attachment(receipt_image_bytes(), "image/jpeg", "receipt.jpg")
     assert result.items[0].name == "Eggs"
     assert result.items[0].quantity == 12
     assert result.items[0].classification == "perishable_grocery"
@@ -266,12 +277,8 @@ def test_receipt_history_pagination_reports_truthful_total(db):
         )
         service.ignore(receipt.id)
 
-    first = list_receipts(
-        db=db, limit=2, offset=0, bucket="history", include_meta=True
-    )
-    second = list_receipts(
-        db=db, limit=2, offset=2, bucket="history", include_meta=True
-    )
+    first = list_receipts(db=db, limit=2, offset=0, bucket="history", include_meta=True)
+    second = list_receipts(db=db, limit=2, offset=2, bucket="history", include_meta=True)
     assert first["total"] == 3
     assert len(first["items"]) == 2
     assert first["has_more"] is True
@@ -437,14 +444,14 @@ def test_duplicate_receipt_hash_across_sources_is_deduplicated(db):
     first = service.ingest_attachment(
         source="telegram",
         source_external_id="tg-1",
-        content=b"same receipt",
+        content=receipt_image_bytes(),
         mime_type="image/jpeg",
         filename="a.jpg",
     )
     second = service.ingest_attachment(
         source="gmail",
         source_external_id="gm-1",
-        content=b"same receipt",
+        content=receipt_image_bytes(),
         mime_type="image/jpeg",
         filename="b.jpg",
     )
@@ -716,9 +723,9 @@ def test_gmail_sync_is_narrow_and_message_id_idempotent(db):
 
 
 def test_gmail_receipt_sync_resumes_capped_message_pages(db):
-    encoded = base64.urlsafe_b64encode(
-        b"Order number 12. Subtotal $10. Total $11. Receipt"
-    ).decode("ascii")
+    encoded = base64.urlsafe_b64encode(b"Order number 12. Subtotal $10. Total $11. Receipt").decode(
+        "ascii"
+    )
     list_requests = []
 
     def handler(request: httpx.Request) -> httpx.Response:

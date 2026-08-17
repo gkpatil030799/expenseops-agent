@@ -2,13 +2,16 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import time
 from datetime import UTC, datetime, timedelta
 from difflib import SequenceMatcher
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, selectinload
 
 from app.config import Settings, get_settings
+from app.logging_config import log_event
 from app.models import (
     ExpenseTransaction,
     HouseholdCadenceSource,
@@ -17,6 +20,8 @@ from app.models import (
     PurchaseReceiptItem,
     ReceiptItemMatchStatus,
     ReceiptParseStatus,
+    User,
+    WorkspaceMembership,
     utc_now,
 )
 from app.services.acquisition_service import AcquisitionService
@@ -27,6 +32,7 @@ from app.services.item_normalization_service import (
 )
 from app.services.managed_auth_service import record_audit_once
 from app.services.quantity_normalization_service import normalize_quantity
+from app.services.receipt_artifact_service import ReceiptArtifactError, build_receipt_artifact
 from app.services.receipt_learning_service import (
     TRACKABLE_CLASSIFICATIONS,
     classify_receipt_line,
@@ -36,6 +42,7 @@ from app.services.receipt_parser_service import (
     ParsedReceipt,
     ReceiptParser,
     ReceiptParserError,
+    assess_parsed_receipt,
     build_receipt_parser,
 )
 
@@ -63,23 +70,101 @@ class ReceiptIngestionService:
         filename: str,
         auto_confirm_high_confidence: bool = False,
     ) -> PurchaseReceipt:
-        if len(content) > self.settings.receipt_max_attachment_bytes:
-            raise ValueError("receipt_attachment_too_large")
+        started = time.monotonic()
         fingerprint = hashlib.sha256(content).hexdigest()
         existing = self._existing(source, source_external_id, fingerprint)
         if existing:
             return existing
         try:
-            parsed = self.parser.parse_attachment(content, mime_type, filename)
-        except ReceiptParserError as exc:
+            artifact = build_receipt_artifact(
+                source=source,
+                source_external_id=source_external_id,
+                content=content,
+                mime_type=mime_type,
+                filename=filename,
+                max_bytes=self.settings.receipt_max_attachment_bytes,
+            )
+        except ReceiptArtifactError as exc:
+            self._log_parse_result(
+                "receipt_image_parse_failed",
+                source=source,
+                media_class="image" if mime_type.startswith("image/") else "unknown",
+                started=started,
+                failure_code=str(exc),
+            )
             return self._failed_receipt(source, source_external_id, fingerprint, str(exc))
-        return self._persist(
+        log_event(
+            logger,
+            "receipt_image_received",
+            source=source,
+            media_class=artifact.media_class,
+            size_bytes=artifact.size_bytes,
+            orientation_corrected=artifact.orientation_corrected,
+            width=artifact.width,
+            height=artifact.height,
+        )
+        try:
+            parse_artifact = getattr(self.parser, "parse_artifact", None)
+            if callable(parse_artifact):
+                parsed = parse_artifact(artifact)
+            else:
+                parsed = self.parser.parse_attachment(
+                    artifact.normalized_content,
+                    artifact.media_type,
+                    artifact.filename,
+                )
+        except ReceiptParserError as exc:
+            self._log_parse_result(
+                "receipt_image_parse_failed",
+                source=source,
+                media_class=artifact.media_class,
+                started=started,
+                failure_code=exc.code,
+                normalization_latency_ms=artifact.normalization_latency_ms,
+            )
+            return self._failed_receipt(source, source_external_id, fingerprint, str(exc))
+        assessment = assess_parsed_receipt(parsed)
+        if assessment.quality in {"unusable", "non_receipt"}:
+            event = (
+                "receipt_non_receipt_detected"
+                if assessment.quality == "non_receipt"
+                else "receipt_image_parse_failed"
+            )
+            self._log_parse_result(
+                event,
+                source=source,
+                media_class=artifact.media_class,
+                started=started,
+                failure_code=assessment.failure_code,
+                normalization_latency_ms=artifact.normalization_latency_ms,
+            )
+            return self._failed_receipt(
+                source,
+                source_external_id,
+                fingerprint,
+                assessment.failure_code or "receipt_image_unreadable",
+            )
+        self._ensure_scope_still_active()
+        receipt = self._persist(
             source,
             source_external_id,
             fingerprint,
             parsed,
+            failure_code=assessment.failure_code,
             auto_confirm_high_confidence=auto_confirm_high_confidence,
         )
+        self._log_parse_result(
+            "receipt_image_parse_partial"
+            if assessment.quality == "partial"
+            else "receipt_image_parse_success",
+            source=source,
+            media_class=artifact.media_class,
+            started=started,
+            failure_code=assessment.failure_code,
+            normalization_latency_ms=artifact.normalization_latency_ms,
+            receipt=receipt,
+        )
+        return receipt
 
     def ingest_text(
         self,
@@ -97,11 +182,21 @@ class ReceiptIngestionService:
             parsed = self.parser.parse_text(text)
         except ReceiptParserError as exc:
             return self._failed_receipt(source, source_external_id, fingerprint, str(exc))
+        assessment = assess_parsed_receipt(parsed)
+        if assessment.quality in {"unusable", "non_receipt"}:
+            return self._failed_receipt(
+                source,
+                source_external_id,
+                fingerprint,
+                assessment.failure_code or "receipt_text_unreadable",
+            )
+        self._ensure_scope_still_active()
         return self._persist(
             source,
             source_external_id,
             fingerprint,
             parsed,
+            failure_code=assessment.failure_code,
             auto_confirm_high_confidence=auto_confirm_high_confidence,
         )
 
@@ -452,6 +547,7 @@ class ReceiptIngestionService:
         fingerprint: str,
         parsed: ParsedReceipt,
         *,
+        failure_code: str | None,
         auto_confirm_high_confidence: bool,
     ) -> PurchaseReceipt:
         merchant_key = normalize_merchant(parsed.merchant)
@@ -468,8 +564,11 @@ class ReceiptIngestionService:
             currency=parsed.currency,
             parse_status=ReceiptParseStatus.NEEDS_REVIEW.value,
             parse_confidence=parsed.confidence,
+            failure_code=failure_code,
         )
-        receipt.transaction_id = self._reconcile_transaction(receipt)
+        receipt.transaction_id, transaction_match_ambiguous = self._reconcile_transaction(receipt)
+        if transaction_match_ambiguous and receipt.failure_code is None:
+            receipt.failure_code = "receipt_transaction_match_ambiguous"
         self.db.add(receipt)
         self.db.flush()
         normalizer = ItemNormalizationService(self.db)
@@ -561,12 +660,20 @@ class ReceiptIngestionService:
             resource_type="purchase_receipt",
             resource_id=str(receipt.id),
         )
-        self.db.commit()
+        try:
+            self.db.commit()
+        except IntegrityError:
+            # A duplicate Telegram webhook or concurrent Gmail job can pass the
+            # initial lookup in two sessions. The database uniqueness boundary
+            # wins; return the already-created receipt instead of parsing twice.
+            self.db.rollback()
+            concurrent = self._existing(source, external_id, fingerprint)
+            if concurrent is not None:
+                return concurrent
+            raise
         receipt = self.get(receipt.id)
         metrics = safe_learning_metrics(receipt)
         metrics["automatic_alias_hits"] = automatic_alias_hits
-        from app.logging_config import log_event
-
         log_event(logger, "receipt_learning_analyzed", **metrics)
         matched = [
             line
@@ -579,6 +686,8 @@ class ReceiptIngestionService:
         )
         if (
             auto_confirm_high_confidence
+            and failure_code is None
+            and not transaction_match_ambiguous
             and parsed.confidence >= self.settings.receipt_auto_match_confidence
             and all_confident
             and all(
@@ -626,13 +735,39 @@ class ReceiptIngestionService:
             failure_code=code[:64],
         )
         self.db.add(receipt)
-        self.db.commit()
+        try:
+            self.db.commit()
+        except IntegrityError:
+            self.db.rollback()
+            concurrent = self._existing(source, external_id, fingerprint)
+            if concurrent is not None:
+                return concurrent
+            raise
         self.db.refresh(receipt)
         return receipt
 
-    def _reconcile_transaction(self, receipt: PurchaseReceipt) -> int | None:
+    def _ensure_scope_still_active(self) -> None:
+        """Recheck request/job authority after the potentially slow provider call."""
+
+        workspace_id = self.db.info.get("workspace_id")
+        user_id = self.db.info.get("user_id")
+        if not isinstance(workspace_id, int) or not isinstance(user_id, int):
+            return
+        membership = self.db.scalar(
+            select(WorkspaceMembership.id).where(
+                WorkspaceMembership.workspace_id == workspace_id,
+                WorkspaceMembership.user_id == user_id,
+            )
+        )
+        active_user = self.db.scalar(
+            select(User.id).where(User.id == user_id, User.status == "active")
+        )
+        if membership is None or active_user is None:
+            raise PermissionError("receipt_scope_revoked")
+
+    def _reconcile_transaction(self, receipt: PurchaseReceipt) -> tuple[int | None, bool]:
         if receipt.total_cents is None or receipt.purchased_at is None:
-            return None
+            return None, False
         purchased = receipt.purchased_at.date()
         candidates = self.db.execute(
             select(ExpenseTransaction).where(
@@ -644,13 +779,64 @@ class ReceiptIngestionService:
                 ),
             )
         ).scalars()
-        best: tuple[float, ExpenseTransaction] | None = None
+        matches: list[tuple[float, ExpenseTransaction]] = []
         for tx in candidates:
             tx_merchant = normalize_merchant(tx.merchant_name or tx.name)
             score = SequenceMatcher(None, receipt.merchant_normalized or "", tx_merchant).ratio()
-            if best is None or score > best[0]:
-                best = (score, tx)
-        return best[1].id if best and best[0] >= 0.55 else None
+            if score >= 0.55:
+                matches.append((score, tx))
+        matches.sort(key=lambda value: (-value[0], value[1].id))
+        if not matches:
+            return None, False
+        if len(matches) > 1 and abs(matches[0][0] - matches[1][0]) <= 0.05:
+            log_event(
+                logger,
+                "receipt_transaction_match_ambiguous",
+                candidate_count=len(matches),
+            )
+            return None, True
+        log_event(logger, "receipt_transaction_match_success", candidate_count=len(matches))
+        return matches[0][1].id, False
+
+    def _log_parse_result(
+        self,
+        event: str,
+        *,
+        source: str,
+        media_class: str,
+        started: float,
+        failure_code: str | None,
+        normalization_latency_ms: int | None = None,
+        receipt: PurchaseReceipt | None = None,
+    ) -> None:
+        observation = getattr(self.parser, "last_observation", None)
+        request_count = int(getattr(observation, "request_count", 0) or 0)
+        log_event(
+            logger,
+            event,
+            source=source,
+            media_class=media_class,
+            normalization_latency_ms=normalization_latency_ms,
+            provider_latency_ms=getattr(observation, "latency_ms", None),
+            total_latency_ms=max(0, round((time.monotonic() - started) * 1000)),
+            provider_request_count=request_count,
+            input_tokens=getattr(observation, "input_tokens", None),
+            output_tokens=getattr(observation, "output_tokens", None),
+            estimated_cost_micros=getattr(observation, "estimated_cost_micros", None),
+            retry_used=request_count > 1,
+            retry_reason=getattr(observation, "retry_reason", None),
+            failure_code=failure_code,
+            item_count=len(receipt.items) if receipt is not None else 0,
+            transaction_matched=bool(receipt and receipt.transaction_id),
+        )
+        if request_count > 1:
+            log_event(
+                logger,
+                "receipt_image_retry",
+                source=source,
+                media_class=media_class,
+                retry_reason=getattr(observation, "retry_reason", None),
+            )
 
 
 def _logical_purchase_key(

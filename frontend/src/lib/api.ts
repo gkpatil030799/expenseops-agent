@@ -53,7 +53,12 @@ export async function api<T>(path: string, options: RequestInit = {}): Promise<T
   const headers = new Headers(options.headers);
   headers.set("Accept", "application/json");
   headers.set("X-Request-ID", requestId);
-  if (options.body != null && !headers.has("Content-Type")) headers.set("Content-Type", "application/json");
+  const browserManagedBody =
+    (typeof FormData !== "undefined" && options.body instanceof FormData) ||
+    (typeof Blob !== "undefined" && options.body instanceof Blob);
+  if (options.body != null && !headers.has("Content-Type") && !browserManagedBody) {
+    headers.set("Content-Type", "application/json");
+  }
 
   let slow = false;
   const slowTimer = globalThis.setTimeout(() => {

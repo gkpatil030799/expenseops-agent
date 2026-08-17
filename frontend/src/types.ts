@@ -272,6 +272,8 @@ export type PurchaseReceipt = {
   total_cents: number | null;
   currency: string;
   parse_status: string;
+  parse_quality: "complete" | "partial" | "failed";
+  quality_message: string | null;
   parse_confidence: number | null;
   failure_code: string | null;
   transaction_id: number | null;

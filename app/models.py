@@ -363,6 +363,7 @@ class ReceiptSource(StrEnum):
     TELEGRAM = "telegram"
     GMAIL = "gmail"
     MANUAL = "manual"
+    WEB = "web"
 
 
 class ReceiptParseStatus(StrEnum):

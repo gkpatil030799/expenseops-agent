@@ -32,6 +32,20 @@ describe("api client", () => {
     expect(new Headers(request?.headers).get("X-Request-ID")).toBeTruthy();
   });
 
+  it("lets the browser set multipart boundaries for receipt photos", async () => {
+    vi.mocked(fetch).mockResolvedValue(
+      new Response(JSON.stringify({ ok: true }), { status: 200 }),
+    );
+    const form = new FormData();
+    form.append("file", new Blob(["synthetic"], { type: "image/jpeg" }), "receipt.jpg");
+
+    await api("/api/replenishment/receipts/upload", { method: "POST", body: form });
+
+    const request = vi.mocked(fetch).mock.calls[0][1];
+    expect(new Headers(request?.headers).has("Content-Type")).toBe(false);
+    expect(request?.body).toBe(form);
+  });
+
   it("throws a structured error with server detail and correlation ID", async () => {
     vi.mocked(fetch).mockResolvedValue(new Response(JSON.stringify({ detail: "Provider unavailable" }), {
       status: 503,

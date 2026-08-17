@@ -314,6 +314,8 @@ async function mockHousehold(page: Page): Promise<void> {
     total_cents: 1_899,
     currency: "USD",
     parse_status: "needs_review",
+    parse_quality: "complete",
+    quality_message: null,
     parse_confidence: 0.94,
     failure_code: null,
     transaction_id: null,

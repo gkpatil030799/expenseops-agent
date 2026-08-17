@@ -2,12 +2,14 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 from typing import Literal
+from uuid import uuid4
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, File, HTTPException, Query, UploadFile
 from sqlalchemy import func, select
 from sqlalchemy.orm import selectinload
 
 from app.api.deps import DbSession
+from app.config import get_settings
 from app.models import (
     HouseholdItem,
     HouseholdItemAcquisition,
@@ -179,6 +181,28 @@ def list_receipts(
         "offset": offset,
         "has_more": offset + len(items) < total,
     }
+
+
+@router.post("/receipts/upload", response_model=ReceiptOut)
+def upload_receipt_photo(db: DbSession, file: UploadFile = File(...)) -> dict:
+    # This handler includes synchronous image validation and provider I/O, so a
+    # normal def keeps it on FastAPI's worker thread instead of blocking the
+    # application event loop.
+    content = file.file.read(get_settings().receipt_max_attachment_bytes + 1)
+    file.file.close()
+    try:
+        receipt = ReceiptIngestionService(db).ingest_attachment(
+            source="web",
+            source_external_id=f"upload-{uuid4()}",
+            content=content,
+            mime_type=str(file.content_type or "application/octet-stream"),
+            filename=str(file.filename or "receipt"),
+        )
+    except PermissionError as exc:
+        raise HTTPException(
+            status_code=403, detail="Receipt upload is no longer authorized."
+        ) from exc
+    return _receipt_dict(receipt)
 
 
 @router.post("/receipts/{receipt_id}/confirm", response_model=ReceiptOut)
@@ -378,6 +402,7 @@ def _receipt_dict(receipt: PurchaseReceipt) -> dict:
         if line.household_item_id is None and line.match_status in {"rejected", "irrelevant"}
     )
     total = len(receipt.items)
+    parse_quality, quality_message = _receipt_quality(receipt)
     return {
         "id": receipt.id,
         "source": receipt.source,
@@ -386,6 +411,8 @@ def _receipt_dict(receipt: PurchaseReceipt) -> dict:
         "total_cents": receipt.total_cents,
         "currency": receipt.currency,
         "parse_status": receipt.parse_status,
+        "parse_quality": parse_quality,
+        "quality_message": quality_message,
         "parse_confidence": receipt.parse_confidence,
         "failure_code": receipt.failure_code,
         "transaction_id": receipt.transaction_id,
@@ -417,6 +444,38 @@ def _receipt_dict(receipt: PurchaseReceipt) -> dict:
             for line in receipt.items
         ],
     }
+
+
+def _receipt_quality(receipt: PurchaseReceipt) -> tuple[str, str | None]:
+    if receipt.parse_status == "failed":
+        messages = {
+            "receipt_non_receipt": "This image does not look like a receipt.",
+            "receipt_attachment_too_large": "This file is too large. Upload a photo under 10 MB.",
+            "unsupported_receipt_type": "Upload a JPEG, PNG, WebP, or PDF receipt.",
+            "receipt_media_type_mismatch": "The file type does not match its contents.",
+            "receipt_provider_timeout": "Receipt processing timed out. Try again.",
+            "receipt_provider_rate_limited": "Receipt processing is busy right now. Try again.",
+            "receipt_provider_unavailable": "Receipt processing is temporarily unavailable.",
+        }
+        return (
+            "failed",
+            messages.get(
+                receipt.failure_code,
+                "I couldn't reliably read this receipt. "
+                "Try a clearer photo with the full receipt visible.",
+            ),
+        )
+    messages = {
+        "receipt_partial_extraction": "I read part of this receipt. Check the extracted items.",
+        "receipt_total_uncertain": "I found useful details but could not reliably read the total.",
+        "receipt_arithmetic_mismatch": (
+            "The extracted amounts do not fully add up. Review before confirming."
+        ),
+        "receipt_transaction_match_ambiguous": "More than one transaction may match this receipt.",
+    }
+    if receipt.failure_code in messages:
+        return "partial", messages[receipt.failure_code]
+    return "complete", None
 
 
 def _prediction_dict(prediction: ReplenishmentPrediction) -> dict:

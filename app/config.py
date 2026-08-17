@@ -119,7 +119,12 @@ class Settings(BaseSettings):
     agent_purchasing_enabled: bool = False
 
     receipt_parser_provider: Literal["fallback", "openai"] = "fallback"
-    receipt_parser_model: str = "gpt-4.1-mini"
+    # Receipt photos contain dense, small text. The cost-sensitive GPT-5.6 tier
+    # preserves original image dimensions with auto detail, unlike the former
+    # 2,048px-capped gpt-4.1-mini path. Operators may still pin another model.
+    receipt_parser_model: str = "gpt-5.6-luna"
+    receipt_parser_image_detail: Literal["auto", "high"] = "auto"
+    receipt_parser_max_attempts: int = Field(default=2, ge=1, le=2)
     receipt_max_attachment_bytes: int = Field(default=10_000_000, ge=100_000, le=25_000_000)
     receipt_auto_match_confidence: float = Field(default=0.9, ge=0.0, le=1.0)
     receipt_possible_match_confidence: float = Field(default=0.65, ge=0.0, le=1.0)
