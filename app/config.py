@@ -251,6 +251,7 @@ class Settings(BaseSettings):
             errors.append("Plaid webhook verification must be enabled for production.")
         if self.agent_enabled and self.agent_read_tools_enabled and not self.openai_api_key:
             errors.append("OPENAI_API_KEY must be configured when the read-only agent is enabled.")
+        errors.extend(self._receipt_parser_runtime_errors())
         if errors:
             raise ValueError("Unsafe production web configuration: " + " ".join(errors))
 
@@ -259,8 +260,22 @@ class Settings(BaseSettings):
             return
         errors = self._production_secret_errors()
         errors.extend(self._production_database_errors())
+        errors.extend(self._receipt_parser_runtime_errors())
         if errors:
             raise ValueError("Unsafe production worker configuration: " + " ".join(errors))
+
+    def _receipt_parser_runtime_errors(self) -> list[str]:
+        receipt_intake_active = bool(self.telegram_bot_token or self.gmail_receipt_sync_enabled)
+        if not receipt_intake_active:
+            return []
+        errors: list[str] = []
+        if self.receipt_parser_provider != "openai":
+            errors.append(
+                "The OpenAI receipt parser must be configured when receipt intake is active."
+            )
+        if not self.openai_api_key:
+            errors.append("OPENAI_API_KEY must be configured when receipt intake is active.")
+        return errors
 
     def _production_secret_errors(self) -> list[str]:
         errors: list[str] = []

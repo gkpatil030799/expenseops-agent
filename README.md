@@ -244,11 +244,11 @@ Confirming a receipt does **not** create a Splitwise expense.
 OPENAI_API_KEY=""
 OPENAI_MODEL="gpt-4.1-mini"
 RECEIPT_PARSER_PROVIDER="openai"
-RECEIPT_PARSER_MODEL="gpt-4.1-mini"
+RECEIPT_PARSER_MODEL="gpt-5.6-luna"
 ```
 
-Without an OpenAI key, deterministic and fallback paths remain available where
-supported. Keep model usage bounded by the limits in `.env.example`.
+Without an OpenAI key, image/PDF receipt parsing is unavailable; manual Household
+Ops remains available. Keep model usage bounded by the limits in `.env.example`.
 
 ### Gmail: learn from receipts and tame Promotions
 

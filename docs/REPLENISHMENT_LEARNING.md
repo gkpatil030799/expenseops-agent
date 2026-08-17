@@ -138,7 +138,7 @@ Required for automatic Telegram receipt parsing:
 APP_PUBLIC_URL="https://your-private-app.example"
 OPENAI_API_KEY="..."
 RECEIPT_PARSER_PROVIDER="openai"
-RECEIPT_PARSER_MODEL="gpt-4.1-mini"
+RECEIPT_PARSER_MODEL="gpt-5.6-luna"
 ```
 
 Optional controls:

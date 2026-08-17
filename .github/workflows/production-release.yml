@@ -1675,6 +1675,40 @@ jobs:
             false
           unset expected
 
+      - name: Verify receipt processing configuration
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          verify_receipt_runtime() {
+            local service_id="$1"
+            local variables provider model openai_key
+            variables="$(railway variable list \
+              --project "${RAILWAY_PROJECT_ID}" \
+              --environment "${RAILWAY_PRODUCTION_ENVIRONMENT_ID}" \
+              --service "${service_id}" \
+              --json)"
+            provider="$(jq -r '.RECEIPT_PARSER_PROVIDER // ""' <<<"${variables}")"
+            model="$(jq -r '.RECEIPT_PARSER_MODEL // ""' <<<"${variables}")"
+            openai_key="$(jq -r '.OPENAI_API_KEY // ""' <<<"${variables}")"
+            if [[ "${provider}" != "openai" ]]; then
+              echo "Receipt runtime ${service_id} must use the OpenAI parser." >&2
+              exit 1
+            fi
+            if [[ "${model}" != "gpt-5.6-luna" ]]; then
+              echo "Receipt runtime ${service_id} must use the reviewed receipt model." >&2
+              exit 1
+            fi
+            if [[ -z "${openai_key}" ]]; then
+              echo "Receipt runtime ${service_id} is missing OPENAI_API_KEY." >&2
+              exit 1
+            fi
+            unset variables provider model openai_key
+          }
+          verify_receipt_runtime "${RAILWAY_OUTBOX_SERVICE_ID}"
+          verify_receipt_runtime "${RAILWAY_GMAIL_RECEIPTS_SERVICE_ID}"
+          verify_receipt_runtime "${RAILWAY_WEB_SERVICE_ID}"
+
       - name: Verify database credentials are isolated by service
         env:
           RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}

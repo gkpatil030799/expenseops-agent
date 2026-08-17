@@ -882,6 +882,11 @@ def _select_telegram_receipt_photo(photos: list[dict]) -> dict:
 
 
 def _receipt_failure_message(code: str | None) -> str:
+    if code == "receipt_parser_not_configured":
+        return (
+            "Receipt reading is temporarily unavailable. Your photo was not rejected. "
+            "Please send it again after the service is restored."
+        )
     if code == "receipt_non_receipt":
         return "This doesn't look like a receipt. Send a photo with the full receipt visible."
     if code in {

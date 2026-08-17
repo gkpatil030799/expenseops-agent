@@ -292,6 +292,13 @@ def readiness() -> JSONResponse:
             settings.splitwise_api_key or settings.has_splitwise_oauth1_consumer
         ),
         "openai_configured": bool(settings.openai_api_key),
+        "receipt_parser_provider": settings.receipt_parser_provider,
+        "receipt_parser_configured": bool(
+            settings.receipt_parser_provider == "openai" and settings.openai_api_key
+        ),
+        "receipt_intake_active": bool(
+            settings.telegram_bot_token or settings.gmail_receipt_sync_enabled
+        ),
         "google_maps_configured": bool(settings.google_maps_api_key),
         "migration_revision": None,
         "migration_current": False,
@@ -721,6 +728,9 @@ def readiness() -> JSONResponse:
         not settings.is_production_mode or bool(checks["database_rls"]),
         not settings.is_production_mode or bool(checks["trusted_hosts_configured"]),
         not settings.is_production_mode or bool(checks["https_enforced"]),
+        not settings.is_production_mode
+        or not bool(checks["receipt_intake_active"])
+        or bool(checks["receipt_parser_configured"]),
     ]
     ready = all(critical)
     return JSONResponse(

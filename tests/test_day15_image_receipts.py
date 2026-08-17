@@ -45,6 +45,7 @@ from app.services.receipt_parser_service import (
     ParsedReceiptItem,
     ReceiptParseObservation,
     ReceiptParserError,
+    UnavailableReceiptParser,
     assess_parsed_receipt,
 )
 from app.tenancy import TenantContext, set_session_tenant
@@ -522,6 +523,94 @@ def test_duplicate_external_id_is_idempotent_and_does_not_reparse(db):
     assert parser.calls == 1
 
 
+def test_new_message_reprocesses_transiently_failed_image_then_deduplicates_success(db):
+    content = _image_bytes()
+    failed = ReceiptIngestionService(
+        db, _settings(receipt_parser_provider="fallback"), UnavailableReceiptParser()
+    ).ingest_attachment(
+        source="telegram",
+        source_external_id="parser-unavailable-message",
+        content=content,
+        mime_type="image/jpeg",
+        filename="receipt.jpg",
+    )
+    assert failed.parse_status == "failed"
+    assert failed.failure_code == "receipt_parser_not_configured"
+
+    parser = _StaticArtifactParser(_parsed_receipt())
+    recovered = ReceiptIngestionService(db, _settings(), parser).ingest_attachment(
+        source="telegram",
+        source_external_id="new-telegram-message",
+        content=content,
+        mime_type="image/jpeg",
+        filename="receipt.jpg",
+    )
+    assert recovered.id != failed.id
+    assert recovered.parse_status == "needs_review"
+    assert recovered.failure_code is None
+    assert parser.calls == 1
+
+    duplicate = ReceiptIngestionService(
+        db, _settings(), _StaticArtifactParser(_parsed_receipt())
+    ).ingest_attachment(
+        source="web",
+        source_external_id="same-image-after-recovery",
+        content=content,
+        mime_type="image/jpeg",
+        filename="receipt.jpg",
+    )
+    assert duplicate.id == recovered.id
+    assert db.scalar(select(func.count(PurchaseReceipt.id))) == 2
+
+
+def test_same_webhook_replay_keeps_transient_failure_idempotent(db):
+    content = _image_bytes()
+    service = ReceiptIngestionService(
+        db, _settings(receipt_parser_provider="fallback"), UnavailableReceiptParser()
+    )
+    failed = service.ingest_attachment(
+        source="telegram",
+        source_external_id="same-failed-webhook",
+        content=content,
+        mime_type="image/jpeg",
+        filename="receipt.jpg",
+    )
+    parser = _StaticArtifactParser(_parsed_receipt())
+    replay = ReceiptIngestionService(db, _settings(), parser).ingest_attachment(
+        source="telegram",
+        source_external_id="same-failed-webhook",
+        content=content,
+        mime_type="image/jpeg",
+        filename="receipt.jpg",
+    )
+    assert replay.id == failed.id
+    assert parser.calls == 0
+
+
+def test_identical_permanently_unreadable_image_is_not_reparsed(db):
+    content = _image_bytes()
+    unusable = ParsedReceipt(None, None, None, None, None, items=[], confidence=0.2)
+    first_parser = _StaticArtifactParser(unusable)
+    failed = ReceiptIngestionService(db, _settings(), first_parser).ingest_attachment(
+        source="telegram",
+        source_external_id="unreadable-first",
+        content=content,
+        mime_type="image/jpeg",
+        filename="receipt.jpg",
+    )
+    second_parser = _StaticArtifactParser(_parsed_receipt())
+    duplicate = ReceiptIngestionService(db, _settings(), second_parser).ingest_attachment(
+        source="telegram",
+        source_external_id="unreadable-second",
+        content=content,
+        mime_type="image/jpeg",
+        filename="receipt.jpg",
+    )
+    assert failed.failure_code == "receipt_image_unreadable"
+    assert duplicate.id == failed.id
+    assert second_parser.calls == 0
+
+
 def test_receipt_deleted_before_review_is_not_resurrected_or_learned(db):
     service = ReceiptIngestionService(db, _settings(), _StaticArtifactParser(_parsed_receipt()))
     receipt = service.ingest_attachment(
@@ -682,6 +771,10 @@ def test_telegram_selects_highest_resolution_useful_variant_and_maps_safe_errors
     assert selected["file_id"] == "large"
     assert "MIME" not in _receipt_failure_message("receipt_media_type_mismatch")
     assert "try again" in _receipt_failure_message("receipt_provider_unavailable").casefold()
+    configuration_message = _receipt_failure_message("receipt_parser_not_configured")
+    assert "temporarily unavailable" in configuration_message.casefold()
+    assert "photo was not rejected" in configuration_message.casefold()
+    assert "full receipt" not in configuration_message.casefold()
 
 
 def test_real_telegram_photo_regression_acknowledges_then_sends_real_image_to_ingestion(

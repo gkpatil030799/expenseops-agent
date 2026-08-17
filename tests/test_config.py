@@ -207,6 +207,61 @@ def test_production_config_requires_openai_key_when_read_agent_is_enabled():
         settings.validate_web_runtime()
 
 
+@pytest.mark.parametrize(
+    ("overrides", "message"),
+    [
+        (
+            {"receipt_parser_provider": "fallback", "openai_api_key": "configured-key"},
+            "receipt parser",
+        ),
+        (
+            {"receipt_parser_provider": "openai", "openai_api_key": ""},
+            "OPENAI_API_KEY",
+        ),
+    ],
+)
+def test_production_telegram_receipts_require_configured_openai_parser(overrides, message):
+    settings = _safe_production_settings(
+        telegram_bot_token="configured-telegram-bot",
+        **overrides,
+    )
+
+    with pytest.raises(ValueError, match=message):
+        settings.validate_web_runtime()
+
+
+def test_production_telegram_receipts_accept_configured_openai_parser():
+    settings = _safe_production_settings(
+        telegram_bot_token="configured-telegram-bot",
+        receipt_parser_provider="openai",
+        openai_api_key="configured-key",
+    )
+
+    settings.validate_web_runtime()
+
+
+def test_production_outbox_worker_rejects_unconfigured_telegram_receipt_parser():
+    settings = _safe_production_settings(
+        telegram_bot_token="configured-telegram-bot",
+        receipt_parser_provider="fallback",
+        openai_api_key="configured-key",
+    )
+
+    with pytest.raises(ValueError, match="receipt parser"):
+        settings.validate_worker_runtime()
+
+
+def test_production_gmail_receipt_worker_requires_openai_key():
+    settings = _safe_production_settings(
+        gmail_receipt_sync_enabled=True,
+        receipt_parser_provider="openai",
+        openai_api_key="",
+    )
+
+    with pytest.raises(ValueError, match="OPENAI_API_KEY"):
+        settings.validate_worker_runtime()
+
+
 def test_production_config_rejects_local_plaid_webhook_bypass():
     with pytest.raises(ValueError, match="ALLOW_UNVERIFIED_PLAID_WEBHOOKS"):
         _safe_production_settings(allow_unverified_plaid_webhooks_for_local_test=True)
