@@ -57,9 +57,16 @@ describe("Attention Center contracts", () => {
   });
 
   it("has no browser persistence side effects", () => {
-    const localSpy = vi.spyOn(Storage.prototype, "setItem");
-    parseAttentionPreference(preferences);
-    expect(localSpy).not.toHaveBeenCalled();
-    localSpy.mockRestore();
+    const localSetItem = vi.fn();
+    const sessionSetItem = vi.fn();
+    vi.stubGlobal("localStorage", { setItem: localSetItem });
+    vi.stubGlobal("sessionStorage", { setItem: sessionSetItem });
+    try {
+      parseAttentionPreference(preferences);
+      expect(localSetItem).not.toHaveBeenCalled();
+      expect(sessionSetItem).not.toHaveBeenCalled();
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 });
