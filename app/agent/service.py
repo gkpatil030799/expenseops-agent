@@ -35,6 +35,7 @@ from app.models import (
     AgentMessage,
     AgentRun,
     AgentToolCall,
+    FinancialOperation,
     new_agent_public_id,
     utc_now,
 )
@@ -1428,6 +1429,14 @@ class UnifiedAgentService:
                 "Agent proposal could not be persisted safely",
             ) from exc
         self.db.refresh(proposal)
+        log_event(
+            logger,
+            "agent_action_proposed",
+            proposal_id=proposal.public_id,
+            tool_name=proposal.tool_name,
+            operation_kind=proposal.operation_kind,
+            proposal_latency_ms=_duration_ms(tool_run.started_at, proposal.created_at),
+        )
         return proposal
 
     def confirm_action_proposal(
@@ -1536,10 +1545,283 @@ class UnifiedAgentService:
         self.db.commit()
         self.db.expire(proposal)
         confirmed = self._get_proposal(public_id, owner_user_id=owner_user_id)
-        # Confirmation is deliberately terminal for this foundation. A future
-        # executor must consume this exact stored snapshot via a separate,
-        # idempotent domain adapter; this service never executes it.
+        log_event(
+            logger,
+            "agent_action_confirmed",
+            proposal_id=confirmed.public_id,
+            tool_name=confirmed.tool_name,
+            operation_kind=confirmed.operation_kind,
+            confirmation_latency_ms=_duration_ms(
+                confirmed.created_at,
+                confirmed.confirmed_at,
+            ),
+        )
         return confirmed
+
+    def claim_action_proposal_execution(
+        self,
+        public_id: str,
+        *,
+        owner_user_id: int,
+    ) -> tuple[AgentActionProposal, bool]:
+        """Claim one confirmed proposal for server-side execution.
+
+        The boolean is true only for the request that performed the durable
+        confirmed -> executing transition. Callers may still reconcile an
+        already-executing local action after a lost response.
+        """
+
+        workspace_id = self._require_write_scope(owner_user_id)
+        proposal = self._get_proposal(public_id, owner_user_id=owner_user_id)
+        if proposal.status == "completed":
+            return proposal, False
+        if proposal.status == "executing":
+            return proposal, False
+        if proposal.status != "confirmed":
+            raise AgentConflictError(
+                "proposal_state_conflict",
+                "Agent action proposal is not confirmed for execution",
+            )
+        now = utc_now()
+        result = self.db.execute(
+            update(AgentActionProposal)
+            .where(
+                AgentActionProposal.id == proposal.id,
+                AgentActionProposal.workspace_id == workspace_id,
+                AgentActionProposal.owner_user_id == owner_user_id,
+                AgentActionProposal.status == "confirmed",
+                AgentActionProposal.confirmed_by_user_id == owner_user_id,
+            )
+            .values(
+                status="executing",
+                attempt_count=AgentActionProposal.attempt_count + 1,
+                execution_started_at=now,
+                updated_at=now,
+                version=AgentActionProposal.version + 1,
+            )
+            .execution_options(synchronize_session=False)
+        )
+        if result.rowcount != 1:
+            self.db.rollback()
+            proposal = self._get_proposal(public_id, owner_user_id=owner_user_id)
+            if proposal.status in {"executing", "completed"}:
+                return proposal, False
+            raise AgentConflictError(
+                "proposal_state_conflict",
+                "Agent action proposal could not be claimed for execution",
+            )
+        record_audit(
+            self.db,
+            workspace_id=workspace_id,
+            user_id=owner_user_id,
+            event_type="agent_action_execution_started",
+            resource_type="agent_action_proposal",
+            resource_id=proposal.public_id,
+            metadata={"tool_name": proposal.tool_name},
+        )
+        self.db.commit()
+        return self._get_proposal(public_id, owner_user_id=owner_user_id), True
+
+    def complete_action_proposal(
+        self,
+        public_id: str,
+        *,
+        owner_user_id: int,
+        result_metadata: dict[str, Any],
+    ) -> AgentActionProposal:
+        workspace_id = self._require_write_scope(owner_user_id)
+        proposal = self._get_proposal(public_id, owner_user_id=owner_user_id)
+        if proposal.status == "completed":
+            return proposal
+        if proposal.status != "executing":
+            raise AgentConflictError(
+                "proposal_state_conflict",
+                "Agent action proposal is not executing",
+            )
+        now = utc_now()
+        safe_result = _safe_json(result_metadata)
+        result = self.db.execute(
+            update(AgentActionProposal)
+            .where(
+                AgentActionProposal.id == proposal.id,
+                AgentActionProposal.workspace_id == workspace_id,
+                AgentActionProposal.owner_user_id == owner_user_id,
+                AgentActionProposal.status == "executing",
+            )
+            .values(
+                status="completed",
+                result_metadata_json=safe_result,
+                error_code=None,
+                error_message=None,
+                completed_at=now,
+                updated_at=now,
+                version=AgentActionProposal.version + 1,
+            )
+            .execution_options(synchronize_session=False)
+        )
+        if result.rowcount != 1:
+            self.db.rollback()
+            proposal = self._get_proposal(public_id, owner_user_id=owner_user_id)
+            if proposal.status == "completed":
+                return proposal
+            raise AgentConflictError(
+                "proposal_state_conflict",
+                "Agent action proposal could not be completed",
+            )
+        record_audit(
+            self.db,
+            workspace_id=workspace_id,
+            user_id=owner_user_id,
+            event_type="agent_action_completed",
+            resource_type="agent_action_proposal",
+            resource_id=proposal.public_id,
+            metadata={"tool_name": proposal.tool_name, "outcome": "succeeded"},
+        )
+        self.db.commit()
+        completed = self._get_proposal(public_id, owner_user_id=owner_user_id)
+        log_event(
+            logger,
+            "agent_action_completed",
+            proposal_id=completed.public_id,
+            tool_name=completed.tool_name,
+            operation_kind=completed.operation_kind,
+            execution_latency_ms=_duration_ms(
+                completed.execution_started_at,
+                completed.completed_at,
+            ),
+            action_latency_ms=_duration_ms(completed.created_at, completed.completed_at),
+        )
+        return completed
+
+    def record_action_proposal_execution_metadata(
+        self,
+        public_id: str,
+        *,
+        owner_user_id: int,
+        result_metadata: dict[str, Any],
+    ) -> AgentActionProposal:
+        """Attach a safe durable-operation reference while execution remains in flight."""
+
+        workspace_id = self._require_write_scope(owner_user_id)
+        proposal = self._get_proposal(public_id, owner_user_id=owner_user_id)
+        if proposal.status == "completed":
+            return proposal
+        if proposal.status != "executing":
+            raise AgentConflictError(
+                "proposal_state_conflict",
+                "Agent action proposal is not executing",
+            )
+        safe_result = _safe_json(result_metadata)
+        now = utc_now()
+        result = self.db.execute(
+            update(AgentActionProposal)
+            .where(
+                AgentActionProposal.id == proposal.id,
+                AgentActionProposal.workspace_id == workspace_id,
+                AgentActionProposal.owner_user_id == owner_user_id,
+                AgentActionProposal.status == "executing",
+            )
+            .values(
+                result_metadata_json=safe_result,
+                updated_at=now,
+                version=AgentActionProposal.version + 1,
+            )
+            .execution_options(synchronize_session=False)
+        )
+        if result.rowcount != 1:
+            self.db.rollback()
+            raise AgentConflictError(
+                "proposal_state_conflict",
+                "Agent action proposal execution reference could not be recorded",
+            )
+        self.db.commit()
+        recorded = self._get_proposal(public_id, owner_user_id=owner_user_id)
+        log_event(
+            logger,
+            "agent_action_operation_queued",
+            proposal_id=recorded.public_id,
+            tool_name=recorded.tool_name,
+            operation_kind=recorded.operation_kind,
+            execution_latency_ms=_duration_ms(
+                recorded.execution_started_at,
+                recorded.updated_at,
+            ),
+        )
+        return recorded
+
+    def fail_action_proposal(
+        self,
+        public_id: str,
+        *,
+        owner_user_id: int,
+        error_code: str,
+        ambiguous: bool = False,
+    ) -> AgentActionProposal:
+        workspace_id = self._require_write_scope(owner_user_id)
+        proposal = self._get_proposal(public_id, owner_user_id=owner_user_id)
+        if proposal.status in {"failed", "ambiguous"}:
+            return proposal
+        if proposal.status not in {"confirmed", "executing"}:
+            raise AgentConflictError(
+                "proposal_state_conflict",
+                "Agent action proposal cannot be failed from its current state",
+            )
+        now = utc_now()
+        status_value = "ambiguous" if ambiguous else "failed"
+        safe_code = _safe_error_code(error_code)
+        result = self.db.execute(
+            update(AgentActionProposal)
+            .where(
+                AgentActionProposal.id == proposal.id,
+                AgentActionProposal.workspace_id == workspace_id,
+                AgentActionProposal.owner_user_id == owner_user_id,
+                AgentActionProposal.status.in_(("confirmed", "executing")),
+            )
+            .values(
+                status=status_value,
+                error_code=safe_code,
+                error_message=_SAFE_FAILURE_MESSAGE,
+                completed_at=now,
+                updated_at=now,
+                version=AgentActionProposal.version + 1,
+            )
+            .execution_options(synchronize_session=False)
+        )
+        if result.rowcount != 1:
+            self.db.rollback()
+            raise AgentConflictError(
+                "proposal_state_conflict",
+                "Agent action proposal could not be failed safely",
+            )
+        record_audit(
+            self.db,
+            workspace_id=workspace_id,
+            user_id=owner_user_id,
+            event_type=("agent_action_ambiguous" if ambiguous else "agent_action_failed"),
+            resource_type="agent_action_proposal",
+            resource_id=proposal.public_id,
+            metadata={
+                "tool_name": proposal.tool_name,
+                "outcome": status_value,
+                "error_code": safe_code,
+            },
+        )
+        self.db.commit()
+        failed = self._get_proposal(public_id, owner_user_id=owner_user_id)
+        log_event(
+            logger,
+            "agent_action_ambiguous" if ambiguous else "agent_action_failed",
+            proposal_id=failed.public_id,
+            tool_name=failed.tool_name,
+            operation_kind=failed.operation_kind,
+            error_code=failed.error_code,
+            execution_latency_ms=_duration_ms(
+                failed.execution_started_at,
+                failed.completed_at,
+            ),
+            action_latency_ms=_duration_ms(failed.created_at, failed.completed_at),
+        )
+        return failed
 
     def cancel_action_proposal(
         self,
@@ -1573,9 +1855,27 @@ class UnifiedAgentService:
             raise AgentConflictError(
                 "proposal_state_conflict", "Agent action proposal cannot be cancelled"
             )
+        record_audit(
+            self.db,
+            workspace_id=workspace_id,
+            user_id=owner_user_id,
+            event_type="agent_action_cancelled",
+            resource_type="agent_action_proposal",
+            resource_id=proposal.public_id,
+            metadata={"tool_name": proposal.tool_name, "outcome": "cancelled"},
+        )
         self.db.commit()
         self.db.expire(proposal)
-        return self._get_proposal(public_id, owner_user_id=owner_user_id)
+        cancelled = self._get_proposal(public_id, owner_user_id=owner_user_id)
+        log_event(
+            logger,
+            "agent_action_cancelled",
+            proposal_id=cancelled.public_id,
+            tool_name=cancelled.tool_name,
+            operation_kind=cancelled.operation_kind,
+            action_latency_ms=_duration_ms(cancelled.created_at, cancelled.cancelled_at),
+        )
+        return cancelled
 
     def get_run(self, public_id: str, *, owner_user_id: int) -> AgentRun:
         return self._get_run(public_id, owner_user_id=owner_user_id)
@@ -1592,6 +1892,172 @@ class UnifiedAgentService:
         if message is None:
             raise AgentNotFoundError("message_not_found", "Agent message not found")
         return message
+
+    def get_action_proposal(
+        self,
+        public_id: str,
+        *,
+        owner_user_id: int,
+    ) -> AgentActionProposal:
+        return self._get_proposal(public_id, owner_user_id=owner_user_id)
+
+    def action_proposals_for_messages(
+        self,
+        *,
+        owner_user_id: int,
+        messages: list[AgentMessage],
+    ) -> dict[str, AgentActionProposal]:
+        """Load only proposal states referenced by these tenant-owned messages."""
+
+        workspace_id = self._require_enabled_scope(owner_user_id)
+        proposal_ids: set[str] = set()
+        for message in messages:
+            response = message.structured_response_json
+            if not isinstance(response, dict):
+                continue
+            blocks = response.get("blocks")
+            if not isinstance(blocks, list):
+                continue
+            for block in blocks:
+                if not isinstance(block, dict) or block.get("type") != "action_confirmation":
+                    continue
+                value = block.get("proposal_id")
+                if isinstance(value, str) and 1 <= len(value) <= 128:
+                    proposal_ids.add(value)
+        if not proposal_ids:
+            return {}
+        proposals = self.db.scalars(
+            select(AgentActionProposal).where(
+                AgentActionProposal.workspace_id == workspace_id,
+                AgentActionProposal.owner_user_id == owner_user_id,
+                AgentActionProposal.public_id.in_(proposal_ids),
+            )
+        )
+        values = list(proposals)
+        for proposal in values:
+            self._refresh_external_proposal_state(
+                proposal,
+                workspace_id=workspace_id,
+                owner_user_id=owner_user_id,
+            )
+        if values:
+            values = list(
+                self.db.scalars(
+                    select(AgentActionProposal)
+                    .where(
+                        AgentActionProposal.workspace_id == workspace_id,
+                        AgentActionProposal.owner_user_id == owner_user_id,
+                        AgentActionProposal.public_id.in_(proposal_ids),
+                    )
+                    .execution_options(populate_existing=True)
+                )
+            )
+        return {proposal.public_id: proposal for proposal in values}
+
+    def _refresh_external_proposal_state(
+        self,
+        proposal: AgentActionProposal,
+        *,
+        workspace_id: int,
+        owner_user_id: int,
+    ) -> None:
+        if proposal.operation_kind != "external_action" or proposal.status != "executing":
+            return
+        result_metadata = proposal.result_metadata_json or {}
+        operation_id = result_metadata.get("financial_operation_id")
+        if not isinstance(operation_id, int) or operation_id < 1:
+            return
+        operation = self.db.scalar(
+            select(FinancialOperation).where(
+                FinancialOperation.id == operation_id,
+                FinancialOperation.workspace_id == workspace_id,
+                FinancialOperation.actor_user_id == owner_user_id,
+                FinancialOperation.correlation_id == proposal.public_id,
+            )
+        )
+        if operation is None:
+            return
+        if operation.state == "succeeded" and operation.provider_object_id:
+            status_value = "completed"
+            error_code = None
+            outcome = "succeeded"
+        elif operation.state == "needs_reconciliation":
+            status_value = "ambiguous"
+            error_code = "ambiguous_provider_outcome"
+            outcome = "ambiguous"
+        elif operation.state == "failed":
+            status_value = "failed"
+            error_code = _safe_error_code(operation.error_code or "provider_rejected")
+            outcome = "failed"
+        else:
+            return
+        now = utc_now()
+        changed = self.db.execute(
+            update(AgentActionProposal)
+            .where(
+                AgentActionProposal.id == proposal.id,
+                AgentActionProposal.workspace_id == workspace_id,
+                AgentActionProposal.owner_user_id == owner_user_id,
+                AgentActionProposal.status == "executing",
+            )
+            .values(
+                status=status_value,
+                error_code=error_code,
+                error_message=(None if error_code is None else _SAFE_FAILURE_MESSAGE),
+                completed_at=now,
+                updated_at=now,
+                version=AgentActionProposal.version + 1,
+                result_metadata_json={
+                    **result_metadata,
+                    "state": outcome,
+                    "provider_object_id": operation.provider_object_id,
+                },
+            )
+            .execution_options(synchronize_session=False)
+        )
+        if changed.rowcount != 1:
+            self.db.rollback()
+            return
+        record_audit(
+            self.db,
+            workspace_id=workspace_id,
+            user_id=owner_user_id,
+            event_type=(
+                "agent_action_completed"
+                if status_value == "completed"
+                else "agent_action_ambiguous"
+                if status_value == "ambiguous"
+                else "agent_action_failed"
+            ),
+            resource_type="agent_action_proposal",
+            resource_id=proposal.public_id,
+            metadata={
+                "tool_name": proposal.tool_name,
+                "outcome": outcome,
+                "error_code": error_code,
+                "financial_operation_id": operation.id,
+            },
+        )
+        self.db.commit()
+        log_event(
+            logger,
+            (
+                "agent_action_reconciled"
+                if status_value == "completed"
+                else "agent_action_ambiguous"
+                if status_value == "ambiguous"
+                else "agent_action_failed"
+            ),
+            proposal_id=proposal.public_id,
+            tool_name=proposal.tool_name,
+            operation_kind=proposal.operation_kind,
+            outcome=outcome,
+            provider_operation_latency_ms=_duration_ms(
+                operation.created_at,
+                operation.completed_at or operation.updated_at,
+            ),
+            action_latency_ms=_duration_ms(proposal.created_at, now),
+        )
 
     def find_run_for_trigger_message(
         self,
@@ -1665,10 +2131,14 @@ class UnifiedAgentService:
         for_update: bool = False,
     ) -> AgentActionProposal:
         workspace_id = self._require_write_scope(owner_user_id)
-        statement = select(AgentActionProposal).where(
-            AgentActionProposal.workspace_id == workspace_id,
-            AgentActionProposal.owner_user_id == owner_user_id,
-            AgentActionProposal.public_id == public_id,
+        statement = (
+            select(AgentActionProposal)
+            .where(
+                AgentActionProposal.workspace_id == workspace_id,
+                AgentActionProposal.owner_user_id == owner_user_id,
+                AgentActionProposal.public_id == public_id,
+            )
+            .execution_options(populate_existing=True)
         )
         if for_update:
             statement = statement.with_for_update()
@@ -1932,6 +2402,12 @@ def _safe_error_message(_value: str) -> str:
     # Persist only a fixed customer-safe summary. Detailed diagnostics belong in
     # controlled, redacted telemetry, never in customer data tables.
     return _SAFE_FAILURE_MESSAGE
+
+
+def _duration_ms(started_at: datetime | None, completed_at: datetime | None) -> int | None:
+    if started_at is None or completed_at is None:
+        return None
+    return max(0, int((_aware(completed_at) - _aware(started_at)).total_seconds() * 1000))
 
 
 def _aware(value: datetime) -> datetime:

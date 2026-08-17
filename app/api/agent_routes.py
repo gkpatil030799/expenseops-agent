@@ -6,7 +6,15 @@ from fastapi import APIRouter, HTTPException, Query, status
 from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel
 
+from app.agent.action_tools import register_action_tools
+from app.agent.actions import (
+    AgentActionExecutor,
+    action_confirmation_block,
+    refresh_action_confirmation_blocks,
+)
 from app.agent.contracts import (
+    AgentActionConfirmationBlock,
+    AgentActionDecisionRequest,
     AgentCapabilities,
     AgentConversationCreate,
     AgentConversationDetail,
@@ -19,6 +27,7 @@ from app.agent.contracts import (
     AgentTurnOut,
     hydrate_persisted_agent_response,
 )
+from app.agent.read_tools import build_read_tool_registry
 from app.agent.runtime import AgentRuntimeError, ReadOnlyAgentOrchestrator
 from app.agent.service import (
     AgentConflictError,
@@ -132,6 +141,10 @@ def get_conversation(
             owner_user_id=user.id,
             messages=messages,
         )
+        proposal_states = service.action_proposals_for_messages(
+            owner_user_id=user.id,
+            messages=messages,
+        )
     except AgentFoundationError as exc:
         _raise_agent_error(exc)
     return AgentConversationDetail(
@@ -141,6 +154,7 @@ def get_conversation(
                 message,
                 conversation.public_id,
                 feedback_state=feedback_states.get(message.public_id),
+                proposal_states=proposal_states,
             )
             for message in messages
         ],
@@ -205,6 +219,66 @@ def record_message_feedback(
 
 
 @router.post(
+    "/proposals/{proposal_public_id}/confirm",
+    response_model=AgentActionConfirmationBlock,
+)
+def confirm_action_proposal(
+    proposal_public_id: str,
+    payload: AgentActionDecisionRequest,
+    db: DbSession,
+    user: CurrentUser,
+    workspace: CurrentWorkspace,
+) -> AgentActionConfirmationBlock:
+    """Confirm and execute one frozen proposal without invoking OpenAI."""
+
+    _check_agent_rate_limit(
+        f"agent-action:{workspace.id}:{user.id}",
+        limit=10,
+        window_seconds=60,
+        operation="confirm_action",
+    )
+    try:
+        proposal = _build_action_executor(db).confirm_and_execute(
+            proposal_public_id,
+            owner_user_id=user.id,
+            expected_version=payload.proposal_version,
+        )
+        return action_confirmation_block(proposal)
+    except AgentFoundationError as exc:
+        _raise_agent_error(exc)
+
+
+@router.post(
+    "/proposals/{proposal_public_id}/cancel",
+    response_model=AgentActionConfirmationBlock,
+)
+def cancel_action_proposal(
+    proposal_public_id: str,
+    payload: AgentActionDecisionRequest,
+    db: DbSession,
+    user: CurrentUser,
+    workspace: CurrentWorkspace,
+) -> AgentActionConfirmationBlock:
+    """Cancel one awaiting proposal; no domain mutation is performed."""
+
+    _check_agent_rate_limit(
+        f"agent-action:{workspace.id}:{user.id}",
+        limit=10,
+        window_seconds=60,
+        operation="cancel_action",
+    )
+    try:
+        proposal = _build_action_executor(db).cancel(
+            proposal_public_id,
+            owner_user_id=user.id,
+            expected_version=payload.proposal_version,
+        )
+        return action_confirmation_block(proposal)
+    except AgentFoundationError as exc:
+        _raise_agent_error(exc)
+
+
+@router.post(
     "/conversations/{conversation_public_id}/turns",
     response_model=AgentTurnOut,
     status_code=status.HTTP_201_CREATED,
@@ -216,7 +290,7 @@ async def run_read_only_turn(
     user: CurrentUser,
     workspace: CurrentWorkspace,
 ) -> AgentTurnOut:
-    """Run one bounded, idempotent read-only agent turn."""
+    """Run one bounded, idempotent Agent turn under server-owned capabilities."""
 
     settings = get_settings()
     if not settings.agent_enabled or not settings.agent_read_tools_enabled:
@@ -252,7 +326,7 @@ async def stream_read_only_turn(
     user: CurrentUser,
     workspace: CurrentWorkspace,
 ) -> StreamingResponse:
-    """Stream one read-only turn using ExpenseOps-owned semantic events."""
+    """Stream one bounded Agent turn using ExpenseOps-owned semantic events."""
 
     settings = get_settings()
     if not settings.agent_enabled or not settings.agent_read_tools_enabled:
@@ -328,12 +402,15 @@ def _message_out(
     conversation_public_id: str,
     *,
     feedback_state: AgentMessageFeedbackState | None = None,
+    proposal_states: dict | None = None,
 ) -> AgentMessageOut:
     structured = (
         hydrate_persisted_agent_response(value.structured_response_json)
         if value.structured_response_json
         else None
     )
+    if structured is not None and proposal_states:
+        structured = refresh_action_confirmation_blocks(structured, proposal_states)
     return AgentMessageOut(
         public_id=value.public_id,
         conversation_public_id=conversation_public_id,
@@ -351,6 +428,13 @@ def _build_read_only_orchestrator(db: DbSession) -> ReadOnlyAgentOrchestrator:
     """Small construction seam for deterministic route and integration tests."""
 
     return ReadOnlyAgentOrchestrator(db, settings=get_settings())
+
+
+def _build_action_executor(db: DbSession) -> AgentActionExecutor:
+    settings = get_settings()
+    registry = build_read_tool_registry(settings)
+    register_action_tools(registry)
+    return AgentActionExecutor(db, registry=registry, settings=settings)
 
 
 def _check_agent_rate_limit(

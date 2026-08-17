@@ -279,11 +279,13 @@ export async function mockAgentApp(
   page: Page,
   {
     agentEnabled = true,
+    agentReadOnly = true,
     initialConversation = false,
     messages = [],
     holdArchiveRequest = false,
   }: {
     agentEnabled?: boolean;
+    agentReadOnly?: boolean;
     initialConversation?: boolean;
     messages?:
       | AgentMessage[]
@@ -323,7 +325,7 @@ export async function mockAgentApp(
             name: "Patil household",
             workspace_type: "household",
           },
-          features: { agent: { enabled: agentFeatureEnabled, read_only: true } },
+          features: { agent: { enabled: agentFeatureEnabled, read_only: agentReadOnly } },
         },
       });
     }

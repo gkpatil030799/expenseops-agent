@@ -8,12 +8,14 @@ import {
   Inbox,
   Info,
   ListChecks,
+  LoaderCircle,
   PackageCheck,
   PlugZap,
   ReceiptText,
   Tags,
+  ShieldCheck,
 } from "lucide-react";
-import type { ReactNode } from "react";
+import { useState, type ReactNode } from "react";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -22,6 +24,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import type {
   AgentAttentionPriority,
   AgentAttentionSummaryBlock,
+  AgentActionConfirmationBlock,
   AgentEmptyStateBlock,
   AgentErrandSummaryBlock,
   AgentIntegrationStatusBlock,
@@ -46,10 +49,20 @@ export function AgentResponseRenderer({
   response,
   onNavigate,
   onRetry,
+  onConfirmAction,
+  onCancelAction,
+  isActionPending,
 }: {
   response: AgentStructuredResponse;
   onNavigate?: (request: AgentNavigationRequest) => void;
   onRetry?: () => void;
+  onConfirmAction?: (
+    block: AgentActionConfirmationBlock,
+  ) => Promise<AgentActionConfirmationBlock>;
+  onCancelAction?: (
+    block: AgentActionConfirmationBlock,
+  ) => Promise<AgentActionConfirmationBlock>;
+  isActionPending?: (proposalId: string) => boolean;
 }) {
   try {
     parseAgentStructuredResponse(response);
@@ -96,6 +109,16 @@ export function AgentResponseRenderer({
             return <AttentionSummaryCard key={key} block={block} onNavigate={onNavigate} />;
           case "navigation":
             return <NavigationCard key={key} block={block} onNavigate={onNavigate} />;
+          case "action_confirmation":
+            return (
+              <ActionConfirmationCard
+                key={key}
+                block={block}
+                pending={isActionPending?.(block.proposal_id) || false}
+                onConfirm={onConfirmAction}
+                onCancel={onCancelAction}
+              />
+            );
           case "error":
             return (
               <Card key={key} className="border-rose-200 bg-rose-50/70">
@@ -122,6 +145,105 @@ export function AgentResponseRenderer({
         }
       })}
     </div>
+  );
+}
+
+function ActionConfirmationCard({
+  block,
+  pending,
+  onConfirm,
+  onCancel,
+}: {
+  block: AgentActionConfirmationBlock;
+  pending: boolean;
+  onConfirm?: (
+    block: AgentActionConfirmationBlock,
+  ) => Promise<AgentActionConfirmationBlock>;
+  onCancel?: (
+    block: AgentActionConfirmationBlock,
+  ) => Promise<AgentActionConfirmationBlock>;
+}) {
+  const [error, setError] = useState("");
+  const awaiting = block.status === "awaiting_confirmation";
+  const statusCopy: Record<AgentActionConfirmationBlock["status"], string> = {
+    awaiting_confirmation: "Review the exact effect below. Nothing changes until you confirm.",
+    confirmed: "Confirmed. ExpenseOps is preparing the action.",
+    executing: "ExpenseOps is applying the confirmed action.",
+    completed: "Completed. The confirmed action was applied.",
+    cancelled: "Cancelled. Nothing was changed.",
+    expired: "This confirmation expired. Ask the Agent to prepare a new one.",
+    failed: "This action could not be completed safely. Nothing else will be retried automatically.",
+    ambiguous: "ExpenseOps could not verify the outcome safely. Review the transaction before retrying.",
+  };
+
+  async function decide(
+    callback: ((value: AgentActionConfirmationBlock) => Promise<AgentActionConfirmationBlock>) | undefined,
+  ) {
+    if (!callback || pending || !awaiting) return;
+    setError("");
+    try {
+      await callback(block);
+    } catch {
+      setError("The proposal changed or could not be applied safely. Reload the conversation.");
+    }
+  }
+
+  return (
+    <Card
+      data-testid="agent-action-confirmation"
+      className={block.status === "completed" ? "border-emerald-300 bg-emerald-50/40" : "border-amber-300 bg-amber-50/40"}
+    >
+      <CardHeader className="pb-3">
+        <div className="flex min-w-0 items-start gap-3">
+          <span className="flex size-10 shrink-0 items-center justify-center rounded-control bg-amber-100 text-amber-800">
+            <ShieldCheck className="size-5" aria-hidden="true" />
+          </span>
+          <div className="min-w-0">
+            <p className="text-xs font-semibold uppercase tracking-wide text-amber-800">
+              Confirmation required
+            </p>
+            <CardTitle className="mt-1 text-base [overflow-wrap:anywhere]">{block.title}</CardTitle>
+          </div>
+        </div>
+      </CardHeader>
+      <CardContent className="space-y-4 pt-0">
+        <p className="text-sm leading-5 text-slate-800 [overflow-wrap:anywhere]">{block.summary}</p>
+        <dl className="divide-y divide-slate-200 overflow-hidden rounded-control border border-slate-200 bg-white">
+          {block.details.map((detail) => (
+            <div key={detail.label} className="flex min-h-11 items-start justify-between gap-3 px-3 py-2">
+              <dt className="text-xs font-medium text-slate-500">{detail.label}</dt>
+              <dd className="min-w-0 text-right text-sm font-semibold text-slate-900 [overflow-wrap:anywhere]">{detail.value}</dd>
+            </div>
+          ))}
+        </dl>
+        <p className="text-xs leading-5 text-slate-600" role="status">{statusCopy[block.status]}</p>
+        {awaiting && onConfirm && onCancel ? (
+          <div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
+            <Button
+              type="button"
+              variant="outline"
+              className="min-h-11"
+              disabled={pending}
+              onClick={() => void decide(onCancel)}
+            >
+              {block.cancel_label}
+            </Button>
+            <Button
+              type="button"
+              className="min-h-11"
+              disabled={pending}
+              onClick={() => void decide(onConfirm)}
+            >
+              {pending ? (
+                <LoaderCircle className="size-4 animate-spin motion-reduce:animate-none" aria-hidden="true" />
+              ) : null}
+              {pending ? "Applying…" : block.confirm_label}
+            </Button>
+          </div>
+        ) : null}
+        {error ? <p className="text-sm text-rose-700" role="alert">{error}</p> : null}
+      </CardContent>
+    </Card>
   );
 }
 

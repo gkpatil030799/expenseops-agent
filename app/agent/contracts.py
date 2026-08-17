@@ -543,6 +543,7 @@ class AgentActionPreview(StrictAgentModel):
 class AgentActionConfirmationBlock(AgentActionPreview):
     block_id: str | None = Field(default=None, min_length=1, max_length=100)
     type: Literal["action_confirmation"] = "action_confirmation"
+    action: Literal["mark_transaction_personal", "post_splitwise_expense"]
     proposal_id: str = Field(min_length=1, max_length=128)
     proposal_version: int = Field(ge=1)
     status: Literal[
@@ -556,6 +557,10 @@ class AgentActionConfirmationBlock(AgentActionPreview):
         "ambiguous",
     ]
     expires_at: datetime
+
+
+class AgentActionDecisionRequest(StrictAgentModel):
+    proposal_version: int = Field(ge=1)
 
 
 class AgentErrorBlock(AgentResponseBlockBase):

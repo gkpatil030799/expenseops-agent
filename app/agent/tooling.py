@@ -44,6 +44,14 @@ class UnsafeToolOutputError(AgentToolError):
     pass
 
 
+class AgentActionClarificationRequired(AgentToolError):
+    """A consequential request is safe but lacks one canonical target."""
+
+    def __init__(self, message: str, *, code: str = "action_clarification_required") -> None:
+        super().__init__(message)
+        self.code = code
+
+
 class ToolEffect(StrEnum):
     READ = "read"
     WRITE = "write"
@@ -94,6 +102,10 @@ class AgentToolContext:
 
 
 AgentToolHandler = Callable[[AgentToolContext, BaseModel], BaseModel | Mapping[str, Any]]
+AgentToolProposalBuilder = Callable[
+    [AgentToolContext, BaseModel],
+    BaseModel | Mapping[str, Any],
+]
 AgentToolPreviewBuilder = Callable[
     [AgentToolContext, BaseModel],
     AgentActionPreview | Mapping[str, Any],
@@ -110,6 +122,8 @@ class AgentTool:
     handler: AgentToolHandler
     confirmation_required: bool = False
     capability: ToolCapability = ToolCapability.STANDARD
+    proposal_model: type[BaseModel] | None = None
+    proposal_builder: AgentToolProposalBuilder | None = None
     preview_builder: AgentToolPreviewBuilder | None = None
     version: str = "1.0"
 
@@ -137,6 +151,8 @@ class AgentTool:
                 )
             if self.preview_builder is not None:
                 raise ValueError("READ tools cannot define an action preview builder")
+            if self.proposal_model is not None or self.proposal_builder is not None:
+                raise ValueError("READ tools cannot define proposal normalization")
             if self.capability is ToolCapability.PURCHASING:
                 raise ValueError("Purchasing tools must be consequential actions")
         else:
@@ -205,6 +221,13 @@ class AgentToolRegistry:
         _require_strict_model(tool.output_model, label="output")
         _reject_forbidden_schema_keys(tool.input_model.model_json_schema(), label="input")
         _reject_forbidden_schema_keys(tool.output_model.model_json_schema(), label="output")
+        if tool.proposal_model is not None:
+            _require_strict_model(tool.proposal_model, label="proposal")
+            _reject_forbidden_schema_keys(
+                tool.proposal_model.model_json_schema(),
+                label="proposal",
+                allow_server_owned_user_ids=True,
+            )
         self._tools[tool.name] = tool
 
     def get(self, name: str) -> AgentTool:
@@ -284,8 +307,22 @@ class AgentToolRegistry:
                 "Agent purchasing actions are disabled",
                 code="purchasing_disabled",
             )
+        proposal_model = tool.proposal_model or tool.input_model
+        raw_proposal = (
+            tool.proposal_builder(context, validated_arguments)
+            if tool.proposal_builder is not None
+            else validated_arguments
+        )
+        validated_proposal = proposal_model.model_validate(raw_proposal, strict=True)
+        normalized_arguments = validated_proposal.model_dump(mode="json")
+        _reject_forbidden_proposal_keys(normalized_arguments)
+        _require_finite_json(
+            normalized_arguments,
+            label="proposal arguments",
+            error_type=UnsafeToolArgumentsError,
+        )
         preview = AgentActionPreview.model_validate(
-            tool.preview_builder(context, validated_arguments)
+            tool.preview_builder(context, validated_proposal)
         )
         return self._issue(
             AgentToolDispatchResult(
@@ -492,12 +529,16 @@ def _normalized_key(value: Any) -> str:
     return re.sub(r"[^a-z0-9]+", "_", str(value).strip().casefold()).strip("_")
 
 
-def _is_forbidden_key(value: Any) -> bool:
+def _is_forbidden_key(
+    value: Any,
+    *,
+    allow_server_owned_user_ids: bool = False,
+) -> bool:
     key = _normalized_key(value)
     compact = key.replace("_", "")
     return (
         key in _SENSITIVE_EXACT_KEYS
-        or key in _SERVER_CONTEXT_KEYS
+        or (key in _SERVER_CONTEXT_KEYS and not (allow_server_owned_user_ids and key == "user_id"))
         or any(key.endswith(suffix) for suffix in _SENSITIVE_KEY_SUFFIXES)
         or any(
             compact.endswith(suffix)
@@ -513,29 +554,47 @@ def _is_forbidden_key(value: Any) -> bool:
             )
         )
         or compact
-        in {
-            "actoruserid",
-            "requestid",
-            "tenantid",
-            "userid",
-            "workspaceid",
-        }
+        in (
+            {
+                "actoruserid",
+                "requestid",
+                "tenantid",
+                "workspaceid",
+            }
+            | (set() if allow_server_owned_user_ids else {"userid"})
+        )
     )
 
 
-def _reject_forbidden_schema_keys(schema: Mapping[str, Any], *, label: str) -> None:
+def _reject_forbidden_schema_keys(
+    schema: Mapping[str, Any],
+    *,
+    label: str,
+    allow_server_owned_user_ids: bool = False,
+) -> None:
     properties = schema.get("properties")
     if isinstance(properties, Mapping):
         for key in properties:
-            if _is_forbidden_key(key):
+            if _is_forbidden_key(
+                key,
+                allow_server_owned_user_ids=allow_server_owned_user_ids,
+            ):
                 raise ValueError(f"Agent tool {label} schema contains forbidden field '{key}'")
     for value in schema.values():
         if isinstance(value, Mapping):
-            _reject_forbidden_schema_keys(value, label=label)
+            _reject_forbidden_schema_keys(
+                value,
+                label=label,
+                allow_server_owned_user_ids=allow_server_owned_user_ids,
+            )
         elif isinstance(value, list):
             for item in value:
                 if isinstance(item, Mapping):
-                    _reject_forbidden_schema_keys(item, label=label)
+                    _reject_forbidden_schema_keys(
+                        item,
+                        label=label,
+                        allow_server_owned_user_ids=allow_server_owned_user_ids,
+                    )
 
 
 def _reject_forbidden_argument_keys(
@@ -561,6 +620,15 @@ def _reject_forbidden_output_keys(value: Any) -> None:
     )
 
 
+def _reject_forbidden_proposal_keys(value: Any) -> None:
+    _reject_forbidden_payload_keys(
+        value,
+        label="proposal arguments",
+        error_type=UnsafeToolArgumentsError,
+        allow_server_owned_user_ids=True,
+    )
+
+
 def _reject_forbidden_payload_keys(
     value: Any,
     *,
@@ -568,6 +636,7 @@ def _reject_forbidden_payload_keys(
     error_type: type[AgentToolError],
     depth: int = 0,
     seen: set[int] | None = None,
+    allow_server_owned_user_ids: bool = False,
 ) -> None:
     if depth > _MAX_ARGUMENT_DEPTH:
         raise error_type(f"Agent tool {label} is nested too deeply")
@@ -579,7 +648,10 @@ def _reject_forbidden_payload_keys(
         seen.add(identity)
         try:
             for key, item in value.items():
-                if _is_forbidden_key(key):
+                if _is_forbidden_key(
+                    key,
+                    allow_server_owned_user_ids=allow_server_owned_user_ids,
+                ):
                     raise error_type(f"Agent tool {label} contains forbidden field '{key}'")
                 _reject_forbidden_payload_keys(
                     item,
@@ -587,6 +659,7 @@ def _reject_forbidden_payload_keys(
                     error_type=error_type,
                     depth=depth + 1,
                     seen=seen,
+                    allow_server_owned_user_ids=allow_server_owned_user_ids,
                 )
         finally:
             seen.remove(identity)
@@ -604,6 +677,7 @@ def _reject_forbidden_payload_keys(
                     error_type=error_type,
                     depth=depth + 1,
                     seen=seen,
+                    allow_server_owned_user_ids=allow_server_owned_user_ids,
                 )
         finally:
             seen.remove(identity)

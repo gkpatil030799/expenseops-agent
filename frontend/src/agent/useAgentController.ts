@@ -1,11 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
-import {
-  AgentProtocolError,
-} from "./validation";
+import { AgentProtocolError } from "./validation";
 import {
   AgentStreamError,
   archiveAgentConversation,
+  cancelAgentAction,
+  confirmAgentAction,
   createAgentConversation,
   listAgentConversations,
   loadAgentConversation,
@@ -13,6 +13,7 @@ import {
   streamAgentTurn,
 } from "./api";
 import type {
+  AgentActionConfirmationBlock,
   AgentConversation,
   AgentFeedbackCreate,
   AgentFeedbackOut,
@@ -52,6 +53,13 @@ export type AgentController = {
     messagePublicId: string,
     payload: AgentFeedbackCreate,
   ) => Promise<AgentFeedbackOut>;
+  confirmAction: (
+    block: AgentActionConfirmationBlock,
+  ) => Promise<AgentActionConfirmationBlock>;
+  cancelAction: (
+    block: AgentActionConfirmationBlock,
+  ) => Promise<AgentActionConfirmationBlock>;
+  isActionPending: (proposalId: string) => boolean;
   reload: () => Promise<void>;
   clearError: () => void;
 };
@@ -63,6 +71,24 @@ type RetryAttempt = {
   pageContext: AgentPageContext | null;
   reuseClientMessageId: boolean;
 };
+
+const ACTION_STATUS_POLL_DELAYS_MS = [400, 800, 1_200, 1_600] as const;
+
+function findActionBlock(
+  messages: AgentMessage[],
+  proposalId: string,
+): AgentActionConfirmationBlock | null {
+  for (const message of messages) {
+    for (const block of message.structured_response?.blocks || []) {
+      if (block.type === "action_confirmation" && block.proposal_id === proposalId) return block;
+    }
+  }
+  return null;
+}
+
+function waitFor(milliseconds: number): Promise<void> {
+  return new Promise((resolve) => window.setTimeout(resolve, milliseconds));
+}
 
 export function useAgentController(pageContext: AgentPageContext | null): AgentController {
   const [conversations, setConversations] = useState<AgentConversation[]>([]);
@@ -78,6 +104,8 @@ export function useAgentController(pageContext: AgentPageContext | null): AgentC
   const [error, setError] = useState<AgentUiError | null>(null);
   const [canRetry, setCanRetry] = useState(false);
   const [announcement, setAnnouncement] = useState("");
+  const [pendingActionIds, setPendingActionIds] = useState<Set<string>>(() => new Set());
+  const pendingActionIdsRef = useRef<Set<string>>(new Set());
   const streamController = useRef<AbortController | null>(null);
   const sendingRef = useRef(false);
   const conversationBusyRef = useRef(true);
@@ -376,6 +404,87 @@ export function useAgentController(pageContext: AgentPageContext | null): AgentC
     [],
   );
 
+  const updateActionBlock = useCallback((updated: AgentActionConfirmationBlock) => {
+    setMessages((current) =>
+      current.map((message) => {
+        if (!message.structured_response) return message;
+        let changed = false;
+        const blocks = message.structured_response.blocks.map((block) => {
+          if (
+            block.type === "action_confirmation" &&
+            block.proposal_id === updated.proposal_id
+          ) {
+            changed = true;
+            return updated;
+          }
+          return block;
+        });
+        return changed
+          ? { ...message, structured_response: { ...message.structured_response, blocks } }
+          : message;
+      }),
+    );
+  }, []);
+
+  const decideAction = useCallback(
+    async (
+      block: AgentActionConfirmationBlock,
+      decision: "confirm" | "cancel",
+    ) => {
+      if (pendingActionIdsRef.current.has(block.proposal_id)) return block;
+      pendingActionIdsRef.current.add(block.proposal_id);
+      setPendingActionIds(new Set(pendingActionIdsRef.current));
+      try {
+        const updated =
+          decision === "confirm"
+            ? await confirmAgentAction(block.proposal_id, {
+                proposal_version: block.proposal_version,
+              })
+            : await cancelAgentAction(block.proposal_id, {
+                proposal_version: block.proposal_version,
+              });
+        updateActionBlock(updated);
+        setAnnouncement(
+          updated.status === "completed"
+            ? "Agent action completed."
+            : updated.status === "cancelled"
+              ? "Agent action cancelled."
+              : "Agent action status updated.",
+        );
+        const conversation = activeRef.current;
+        let latest = updated;
+        if (conversation) {
+          let detail = await loadAgentConversation(conversation.public_id);
+          setMessages(detail.messages);
+          latest = findActionBlock(detail.messages, block.proposal_id) || latest;
+          if (decision === "confirm" && latest.status === "executing") {
+            for (const delay of ACTION_STATUS_POLL_DELAYS_MS) {
+              await waitFor(delay);
+              detail = await loadAgentConversation(conversation.public_id);
+              setMessages(detail.messages);
+              latest = findActionBlock(detail.messages, block.proposal_id) || latest;
+              if (latest.status !== "executing" && latest.status !== "confirmed") break;
+            }
+          }
+        }
+        return latest;
+      } finally {
+        pendingActionIdsRef.current.delete(block.proposal_id);
+        setPendingActionIds(new Set(pendingActionIdsRef.current));
+      }
+    },
+    [updateActionBlock],
+  );
+
+  const confirmAction = useCallback(
+    (block: AgentActionConfirmationBlock) => decideAction(block, "confirm"),
+    [decideAction],
+  );
+  const cancelAction = useCallback(
+    (block: AgentActionConfirmationBlock) => decideAction(block, "cancel"),
+    [decideAction],
+  );
+
   return {
     conversations,
     activeConversation,
@@ -396,6 +505,9 @@ export function useAgentController(pageContext: AgentPageContext | null): AgentC
     sendMessage,
     retryLastMessage,
     submitFeedback,
+    confirmAction,
+    cancelAction,
+    isActionPending: (proposalId: string) => pendingActionIds.has(proposalId),
     reload,
     clearError: () => setError(null),
   };

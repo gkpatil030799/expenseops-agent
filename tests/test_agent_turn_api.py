@@ -10,6 +10,7 @@ from fastapi.testclient import TestClient
 
 import app.api.agent_routes as agent_routes
 from app.agent.contracts import (
+    AgentActionConfirmationBlock,
     AgentAssistantDeltaEvent,
     AgentMessageOut,
     AgentRunCompletedEvent,
@@ -126,6 +127,61 @@ class FakeOrchestrator:
             raise self.error
 
 
+class FakeActionExecutor:
+    def __init__(self) -> None:
+        self.confirm_calls: list[dict[str, Any]] = []
+        self.cancel_calls: list[dict[str, Any]] = []
+
+    def confirm_and_execute(
+        self,
+        proposal_public_id: str,
+        *,
+        owner_user_id: int,
+        expected_version: int,
+    ):
+        self.confirm_calls.append(
+            {
+                "proposal_public_id": proposal_public_id,
+                "owner_user_id": owner_user_id,
+                "expected_version": expected_version,
+            }
+        )
+        return _proposal(proposal_public_id, "completed", expected_version + 3)
+
+    def cancel(
+        self,
+        proposal_public_id: str,
+        *,
+        owner_user_id: int,
+        expected_version: int,
+    ):
+        self.cancel_calls.append(
+            {
+                "proposal_public_id": proposal_public_id,
+                "owner_user_id": owner_user_id,
+                "expected_version": expected_version,
+            }
+        )
+        return _proposal(proposal_public_id, "cancelled", expected_version + 1)
+
+
+def _proposal(public_id: str, status: str, version: int):
+    return SimpleNamespace(
+        public_id=public_id,
+        tool_name="propose_mark_transaction_personal",
+        preview_json={
+            "title": "Mark transaction personal",
+            "summary": "This transaction will be marked personal.",
+            "details": [{"label": "Merchant", "value": "Costco"}],
+            "confirm_label": "Mark personal",
+            "cancel_label": "Cancel",
+        },
+        version=version,
+        status=status,
+        expires_at=NOW,
+    )
+
+
 def _client(
     monkeypatch: pytest.MonkeyPatch,
     *,
@@ -190,6 +246,53 @@ def _turn_out(
             created_at=NOW,
         ),
     )
+
+
+def test_action_decision_endpoints_send_only_proposal_version_and_never_run_orchestrator(
+    monkeypatch,
+):
+    client, orchestrator, limiter = _client(monkeypatch)
+    action_executor = FakeActionExecutor()
+    monkeypatch.setattr(agent_routes, "_build_action_executor", lambda _db: action_executor)
+
+    confirmed = client.post(
+        "/api/agent/proposals/proposal-1/confirm",
+        json={"proposal_version": 4},
+    )
+    cancelled = client.post(
+        "/api/agent/proposals/proposal-2/cancel",
+        json={"proposal_version": 7},
+    )
+    rejected_extra = client.post(
+        "/api/agent/proposals/proposal-3/confirm",
+        json={"proposal_version": 1, "transaction_id": 99},
+    )
+
+    assert confirmed.status_code == 200
+    assert AgentActionConfirmationBlock.model_validate(confirmed.json()).status == "completed"
+    assert cancelled.status_code == 200
+    assert AgentActionConfirmationBlock.model_validate(cancelled.json()).status == "cancelled"
+    assert rejected_extra.status_code == 422
+    assert action_executor.confirm_calls == [
+        {
+            "proposal_public_id": "proposal-1",
+            "owner_user_id": 17,
+            "expected_version": 4,
+        }
+    ]
+    assert action_executor.cancel_calls == [
+        {
+            "proposal_public_id": "proposal-2",
+            "owner_user_id": 17,
+            "expected_version": 7,
+        }
+    ]
+    assert orchestrator.calls == []
+    assert orchestrator.stream_calls == []
+    assert limiter.calls == [
+        ("agent-action:29:17", 10, 60),
+        ("agent-action:29:17", 10, 60),
+    ]
 
 
 def test_turn_endpoint_passes_typed_context_and_scopes_rate_limit(monkeypatch):

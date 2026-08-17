@@ -376,10 +376,15 @@ export type AgentProposalState =
  */
 export type AgentActionConfirmationBlock = AgentResponseBlockBase & AgentActionPreview & {
   type: "action_confirmation";
+  action: "mark_transaction_personal" | "post_splitwise_expense";
   proposal_id: string;
   proposal_version: number;
   status: AgentProposalState;
   expires_at: string;
+};
+
+export type AgentActionDecision = {
+  proposal_version: number;
 };
 
 export type AgentErrorBlock = AgentResponseBlockBase & {
