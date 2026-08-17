@@ -19,7 +19,7 @@ authenticated browser + semantic page context
   -> ExpenseOps API, rate limit, owner/workspace scope
   -> canonical AgentConversation / AgentMessage / AgentRun
   -> official OpenAI Agents SDK, fact-free terminal marker, store=False
-  -> seven typed ExpenseOps READ tools through the policy registry
+  -> eight typed ExpenseOps READ tools through the policy registry
   -> tenant-scoped PostgreSQL queries and validated bounded outputs
   -> code-owned evidence bundle and canonical response composer
   -> ExpenseOps semantic SSE -> strict browser validation and rendering
@@ -34,7 +34,7 @@ The reviewed boundaries are:
 
 - Model: `gpt-4.1-mini`, prompt `expenseops-readonly-v1.4`, at most 4 SDK turns, 3 tools, 30 seconds,
   and 800 output tokens. The provider terminal contract contains no account facts.
-- Tools: exactly seven registered READ tools. There is no SQL, shell, Python, URL fetch, secret,
+- Tools: exactly eight registered READ tools. There is no SQL, shell, Python, URL fetch, secret,
   write, Splitwise, or purchasing tool on the model surface.
 - Grounding: validated tool evidence enters an in-memory same-run bundle; deterministic code owns
   totals, lists, partial-state wording, response caps, links, and action refusals.

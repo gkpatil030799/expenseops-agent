@@ -136,22 +136,12 @@ class SpendingInsightsService:
         else:
             previous_end = start_date - timedelta(days=1)
             previous_start = previous_end - timedelta(days=period_days - 1)
-        transactions = list(
-            self.db.scalars(
-                select(ExpenseTransaction).where(
-                    ExpenseTransaction.date >= previous_start,
-                    ExpenseTransaction.date <= end_date,
-                    ExpenseTransaction.status != TransactionStatus.REMOVED.value,
-                    ExpenseTransaction.pending.is_(False),
-                )
-            )
-        )
         viewer_splitwise_user_id = self._viewer_splitwise_user_id()
-        rows = [
-            row
-            for tx in transactions
-            if (row := _to_spend_row(tx, spend_basis, viewer_splitwise_user_id))
-        ]
+        rows = self.canonical_rows(
+            start_date=previous_start,
+            end_date=end_date,
+            spend_basis=spend_basis,
+        )
         scoped_current = self._filter(
             rows, start_date, end_date, account_id, category, merchant, review_type
         )
@@ -247,6 +237,37 @@ class SpendingInsightsService:
                 "pending_transactions_excluded": True,
             },
         }
+
+    def canonical_rows(
+        self,
+        *,
+        start_date: date,
+        end_date: date,
+        spend_basis: SpendBasis,
+    ) -> list[SpendRow]:
+        """Return the one canonical purchase/credit projection used by analytics.
+
+        Lifestyle intelligence deliberately consumes this seam instead of
+        reimplementing sign, Splitwise-share, pending, removed, currency, or
+        transfer/payment semantics.
+        """
+
+        criteria = [
+            ExpenseTransaction.date >= start_date,
+            ExpenseTransaction.date <= end_date,
+            ExpenseTransaction.status != TransactionStatus.REMOVED.value,
+            ExpenseTransaction.pending.is_(False),
+        ]
+        workspace_id = self.db.info.get("workspace_id")
+        if workspace_id is not None:
+            criteria.append(ExpenseTransaction.workspace_id == int(workspace_id))
+        transactions = list(self.db.scalars(select(ExpenseTransaction).where(*criteria)))
+        viewer_splitwise_user_id = self._viewer_splitwise_user_id()
+        return [
+            row
+            for tx in transactions
+            if (row := _to_spend_row(tx, spend_basis, viewer_splitwise_user_id))
+        ]
 
     def _viewer_splitwise_user_id(self) -> int | None:
         actor_user_id = self.db.info.get("user_id")

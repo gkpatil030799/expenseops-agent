@@ -58,6 +58,8 @@ from app.agent.contracts import (
     AgentErrorBlock,
     AgentIntegrationStatusBlock,
     AgentIntegrationStatusItem,
+    AgentLifestyleBreakdownItem,
+    AgentLifestyleSummaryBlock,
     AgentMessageOut,
     AgentNavigationBlock,
     AgentPageContext,
@@ -130,7 +132,7 @@ from app.tenancy import (
 
 logger = logging.getLogger(__name__)
 
-READ_ONLY_PROMPT_VERSION = "expenseops-readonly-v1.4"
+READ_ONLY_PROMPT_VERSION = "expenseops-readonly-v1.5"
 CONTROLLED_ACTION_PROMPT_VERSION = "expenseops-controlled-actions-v1.2"
 MAX_AGENT_TOOL_CALLS = 3
 MAX_AGENT_TURNS = 4
@@ -154,6 +156,7 @@ MAX_ATTENTION_ITEMS = 12
 
 EvidenceDomain = Literal[
     "spending",
+    "lifestyle",
     "transactions",
     "replenishment",
     "receipts",
@@ -164,6 +167,7 @@ EvidenceDomain = Literal[
 
 _TOOL_DOMAIN: dict[str, EvidenceDomain] = {
     "get_spending_insights": "spending",
+    "get_lifestyle_dining_insights": "lifestyle",
     "search_transactions": "transactions",
     "get_household_replenishment": "replenishment",
     "get_receipts": "receipts",
@@ -173,6 +177,7 @@ _TOOL_DOMAIN: dict[str, EvidenceDomain] = {
 }
 _DOMAIN_ORDER: tuple[EvidenceDomain, ...] = (
     "spending",
+    "lifestyle",
     "transactions",
     "replenishment",
     "receipts",
@@ -1988,6 +1993,9 @@ def _sdk_tool_exposure(
     requested, so the SDK cannot select that tool for the turn.
     """
 
+    if _is_single_domain_lifestyle_query(user_text):
+        return frozenset({"get_lifestyle_dining_insights"})
+
     if _is_explicit_week_comparison_query(user_text):
         return frozenset({"get_spending_insights"})
 
@@ -2012,6 +2020,30 @@ def _sdk_tool_exposure(
     ):
         return None
     return frozenset({"get_spending_insights"})
+
+
+def _is_single_domain_lifestyle_query(user_text: str) -> bool:
+    if re.search(
+        r"\b(?:transactions?|charges?|receipts?|deals?|offers?|promotions?|household|"
+        r"replenishment|errands?|integrations?|splitwise|mark\s+personal)\b",
+        user_text,
+        re.IGNORECASE,
+    ):
+        return False
+    has_activity = re.search(
+        r"\b(?:coffee|cafes?|espresso|restaurants?|eat(?:ing)?\s+out|dining\s+habits?|"
+        r"food\s+delivery|delivery\s+orders?|nightlife|bars?|pubs?|typical\s+check)\b",
+        user_text,
+        re.IGNORECASE,
+    )
+    has_analytic_intent = re.search(
+        r"\b(?:spend|spent|spending|buy|buying|bought|often|frequency|frequent|visit|visits|"
+        r"more|less|increase|increased|decrease|decreased|change|changed|typical|average|"
+        r"check|shared|personal|weekday|weekend)\b",
+        user_text,
+        re.IGNORECASE,
+    )
+    return bool(has_activity and has_analytic_intent)
 
 
 def _explicit_attention_tool_plan(
@@ -2559,6 +2591,11 @@ Rules:
   the transaction date/category/merchant/review/currency scope exactly, set
   include_pending=false, and always honor the explicit/current spend basis. Rows can be
   labeled supporting detail only for card basis; actual-share rows remain separate.
+  For coffee, restaurant, food-delivery, or reliably categorized nightlife behavior,
+  use get_lifestyle_dining_insights instead of household replenishment. Do not call
+  get_spending_insights unless the latest message separately requests broader spending.
+  Report frequency and totals without health, addiction, relationship, moral, or
+  protected-trait inference. Leave insufficient lifestyle subtype evidence uncertain.
   For a household need plus offer use replenishment plus deals. For broad attention requests,
   check at most the three domains most directly relevant to the request and do not imply
   unchecked domains were covered. When the user explicitly names two or three supported
@@ -2782,6 +2819,8 @@ def compose_grounded_response(
 def _single_evidence_response(evidence: ReadToolEvidence) -> AgentStructuredResponse:
     if evidence.tool_name == "get_spending_insights":
         return _spending_response(evidence.output)
+    if evidence.tool_name == "get_lifestyle_dining_insights":
+        return _lifestyle_response(evidence.output)
     if evidence.tool_name == "search_transactions":
         return _transaction_response(evidence.output)
     if evidence.tool_name == "get_household_replenishment":
@@ -3201,6 +3240,8 @@ def _multi_domain_response(bundle: RunEvidenceBundle) -> AgentStructuredResponse
 def _bounded_domain_response(evidence: ReadToolEvidence) -> AgentStructuredResponse:
     if evidence.tool_name == "get_spending_insights":
         return _spending_response(evidence.output)
+    if evidence.tool_name == "get_lifestyle_dining_insights":
+        return _lifestyle_response(evidence.output)
     if evidence.tool_name == "search_transactions":
         return _transaction_response(evidence.output, max_rows=MAX_MULTI_TRANSACTION_ROWS)
     if evidence.tool_name == "get_household_replenishment":
@@ -3472,6 +3513,95 @@ def _errand_is_time_sensitive(row: dict[str, Any], current_date: date) -> bool:
         return date.fromisoformat(due_on) <= current_date
     except ValueError:
         return False
+
+
+def _lifestyle_response(output: dict[str, Any]) -> AgentStructuredResponse:
+    summary = output["summary"]
+    comparison = output.get("comparison")
+    activity_type = str(output["activity_type"])
+    currency = str(output["currency_code"])
+    spend_basis = str(output["spend_basis"])
+    label = {
+        "all": "Lifestyle & dining",
+        "coffee": "Coffee",
+        "restaurants": "Restaurant",
+        "delivery": "Food delivery",
+        "nightlife": "Nightlife",
+    }[activity_type]
+    total = int(summary["total_cents"])
+    count = int(summary["transaction_count"])
+    average = int(summary["average_cents"])
+    text = (
+        f"{label} purchases totaled {_money(currency, total)} across {count} "
+        f"transaction{'s' if count != 1 else ''}; the average was {_money(currency, average)}."
+    )
+    previous_total: int | None = None
+    previous_count: int | None = None
+    previous_unknown_shares = 0
+    previous_unknown_credit_shares = 0
+    if isinstance(comparison, dict):
+        previous_total = int(comparison["total_cents"])
+        previous_count = int(comparison["transaction_count"])
+        previous_unknown_shares = int(comparison["unknown_share_transactions"])
+        previous_unknown_credit_shares = int(comparison["unknown_credit_share_transactions"])
+        text += (
+            f" The comparable prior period had {previous_count} purchase"
+            f"{'s' if previous_count != 1 else ''} totaling {_money(currency, previous_total)}."
+        )
+    unknown_shares = int(summary["unknown_share_transactions"])
+    unknown_credit_shares = int(summary["unknown_credit_share_transactions"])
+    if unknown_shares or previous_unknown_shares:
+        text += " Actual-share comparisons use confirmed allocations only."
+    if int(output.get("uncertain_transaction_count") or 0):
+        text += " Some Food & Dining transactions remained unclassified by lifestyle subtype."
+    activities = [
+        AgentLifestyleBreakdownItem.model_validate(item)
+        for item in list(output.get("activities") or [])[:4]
+    ]
+    merchants = [
+        AgentLifestyleBreakdownItem.model_validate(item)
+        for item in list(output.get("top_merchants") or [])[:8]
+    ]
+    block = AgentLifestyleSummaryBlock(
+        title=f"{label} summary",
+        start_date=date.fromisoformat(output["start_date"]),
+        end_date=date.fromisoformat(output["end_date"]),
+        previous_start_date=(
+            date.fromisoformat(output["previous_start_date"])
+            if output.get("previous_start_date")
+            else None
+        ),
+        previous_end_date=(
+            date.fromisoformat(output["previous_end_date"])
+            if output.get("previous_end_date")
+            else None
+        ),
+        activity_type=activity_type,
+        currency_code=currency,
+        spend_basis=spend_basis,
+        total_cents=total,
+        credits_cents=int(summary["credits_cents"]),
+        transaction_count=count,
+        average_cents=average,
+        personal_cents=int(summary["personal_cents"]),
+        shared_cents=int(summary["shared_cents"]),
+        unreviewed_cents=int(summary["unreviewed_cents"]),
+        previous_total_cents=previous_total,
+        previous_transaction_count=previous_count,
+        unknown_share_transactions=unknown_shares,
+        previous_unknown_share_transactions=previous_unknown_shares,
+        unknown_credit_share_transactions=unknown_credit_shares,
+        previous_unknown_credit_share_transactions=previous_unknown_credit_shares,
+        weekday_cents=int(summary["weekday_cents"]),
+        weekday_count=int(summary["weekday_count"]),
+        weekend_cents=int(summary["weekend_cents"]),
+        weekend_count=int(summary["weekend_count"]),
+        uncertain_transaction_count=int(output.get("uncertain_transaction_count") or 0),
+        observations=[str(item)[:500] for item in list(output.get("observations") or [])[:6]],
+        activities=activities,
+        top_merchants=merchants,
+    )
+    return AgentStructuredResponse(blocks=[AgentTextBlock(text=text), block])
 
 
 def _spending_response(output: dict[str, Any]) -> AgentStructuredResponse:
@@ -4263,6 +4393,12 @@ def _public_progress_event(
 def _tool_activity(tool_name: str | None) -> tuple[str, str, str] | None:
     if tool_name == "get_spending_insights":
         return ("spending", "Checking your spending…", "Spending data is ready.")
+    if tool_name == "get_lifestyle_dining_insights":
+        return (
+            "spending",
+            "Checking lifestyle and dining activity…",
+            "Lifestyle and dining data is ready.",
+        )
     if tool_name == "search_transactions":
         return ("transactions", "Looking through your transactions…", "Transactions are ready.")
     if tool_name == "get_household_replenishment":

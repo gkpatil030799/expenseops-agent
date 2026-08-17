@@ -34,6 +34,10 @@ class ContextualToolPolicy:
             for name, value in source.get(tool_name, {}).items():
                 if effective.get(name) is None:
                     effective[name] = value
+        if tool_name == "get_lifestyle_dining_insights":
+            detected_activity = self.current_defaults.get(tool_name, {}).get("activity_type")
+            if detected_activity in {"all", "coffee", "restaurants", "delivery", "nightlife"}:
+                effective["activity_type"] = detected_activity
         if tool_name == "search_transactions":
             # These selectors are mutually exclusive. A non-null model/user
             # selector outranks the current page default for its alternate.
@@ -169,6 +173,11 @@ def build_contextual_tool_policy(
     """
 
     current = _surface_filter_defaults(page_context)
+    lifestyle_activity = _lifestyle_activity_from_text(text)
+    if lifestyle_activity is not None:
+        current.setdefault("get_lifestyle_dining_insights", {})["activity_type"] = (
+            lifestyle_activity
+        )
     requested_kind = _requested_entity_kind(text)
     has_described_target = _DESCRIBED_REFERENT.search(text) is not None
     implicit_receipt_action = bool(
@@ -252,6 +261,26 @@ def contextual_clarification_text(kind: str) -> str:
     return f"Which {label} do you mean? Select one or describe it more specifically."
 
 
+def _lifestyle_activity_from_text(text: str) -> str | None:
+    lowered = text.casefold()
+    matches = [
+        activity
+        for activity, pattern in (
+            ("coffee", r"\b(?:coffee|cafes?|espresso)\b"),
+            ("delivery", r"\b(?:food\s+delivery|delivery\s+orders?)\b"),
+            ("nightlife", r"\b(?:nightlife|bars?|pubs?)\b"),
+            (
+                "restaurants",
+                r"\b(?:restaurants?|eat(?:ing)?\s+out|dining\s+habits?|typical\s+check)\b",
+            ),
+        )
+        if re.search(pattern, lowered)
+    ]
+    if len(matches) > 1:
+        return "all"
+    return matches[0] if matches else None
+
+
 def _surface_filter_defaults(
     page_context: AgentPageContext | None,
 ) -> dict[str, dict[str, Any]]:
@@ -279,10 +308,17 @@ def _surface_filter_defaults(
             "currency_code",
         }
         _put_selected(result, "get_spending_insights", values, spending_keys)
+        _put_selected(
+            result,
+            "get_lifestyle_dining_insights",
+            values,
+            {"start_date", "end_date", "account_id", "merchant", "currency_code", "spend_basis"},
+        )
         _put_selected(result, "search_transactions", values, search_keys)
         status = values.get("status")
         if status in {"all", "personal", "shared"}:
             result.setdefault("get_spending_insights", {})["review_type"] = status
+            result.setdefault("get_lifestyle_dining_insights", {})["review_type"] = status
             result.setdefault("search_transactions", {})["review_type"] = status
         elif status == "unreviewed":
             result.setdefault("search_transactions", {})["review_type"] = status

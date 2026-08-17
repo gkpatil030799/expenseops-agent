@@ -1243,7 +1243,7 @@ def test_contextual_transaction_id_is_effective_and_persisted(agent_runtime_db):
         ]
         assert call is not None
         assert call.arguments_json["transaction_id"] == transaction_id
-        assert turn.run.prompt_version == "expenseops-readonly-v1.4"
+        assert turn.run.prompt_version == "expenseops-readonly-v1.5"
 
 
 def test_insights_change_referent_exposes_only_aggregate_tool_to_sdk(agent_runtime_db):

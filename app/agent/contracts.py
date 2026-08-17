@@ -234,6 +234,73 @@ class AgentSpendingSummaryBlock(AgentResponseBlockBase):
         return self
 
 
+class AgentLifestyleBreakdownItem(StrictAgentModel):
+    name: str = Field(min_length=1, max_length=255)
+    amount_cents: int = Field(ge=0)
+    transaction_count: int = Field(ge=0)
+    percentage: float = Field(ge=0, le=100)
+
+
+class AgentLifestyleSummaryBlock(AgentResponseBlockBase):
+    type: Literal["lifestyle_summary"] = "lifestyle_summary"
+    block_version: Literal["1.0"] = "1.0"
+    title: str = Field(min_length=1, max_length=160)
+    start_date: date
+    end_date: date
+    previous_start_date: date | None = None
+    previous_end_date: date | None = None
+    activity_type: Literal["all", "coffee", "restaurants", "delivery", "nightlife"]
+    currency_code: str = Field(min_length=3, max_length=8, pattern=r"^[A-Za-z]{3,8}$")
+    spend_basis: Literal["card", "actual_share"]
+    total_cents: int = Field(ge=0)
+    credits_cents: int = Field(ge=0)
+    transaction_count: int = Field(ge=0)
+    average_cents: int = Field(ge=0)
+    personal_cents: int = Field(ge=0)
+    shared_cents: int = Field(ge=0)
+    unreviewed_cents: int = Field(ge=0)
+    previous_total_cents: int | None = Field(default=None, ge=0)
+    previous_transaction_count: int | None = Field(default=None, ge=0)
+    unknown_share_transactions: int = Field(ge=0)
+    previous_unknown_share_transactions: int = Field(ge=0)
+    unknown_credit_share_transactions: int = Field(ge=0)
+    previous_unknown_credit_share_transactions: int = Field(ge=0)
+    weekday_cents: int = Field(ge=0)
+    weekday_count: int = Field(ge=0)
+    weekend_cents: int = Field(ge=0)
+    weekend_count: int = Field(ge=0)
+    uncertain_transaction_count: int = Field(ge=0)
+    observations: list[str] = Field(default_factory=list, max_length=6)
+    activities: list[AgentLifestyleBreakdownItem] = Field(default_factory=list, max_length=4)
+    top_merchants: list[AgentLifestyleBreakdownItem] = Field(default_factory=list, max_length=8)
+
+    @model_validator(mode="after")
+    def validate_lifestyle_summary(self) -> AgentLifestyleSummaryBlock:
+        if self.start_date > self.end_date:
+            raise ValueError("start_date must not be after end_date")
+        comparison_present = self.previous_total_cents is not None
+        if comparison_present != (self.previous_transaction_count is not None):
+            raise ValueError("previous totals and counts must appear together")
+        if comparison_present != (self.previous_start_date is not None):
+            raise ValueError("previous dates must match comparison presence")
+        if comparison_present != (self.previous_end_date is not None):
+            raise ValueError("previous dates must match comparison presence")
+        if self.total_cents != self.personal_cents + self.shared_cents + self.unreviewed_cents:
+            raise ValueError("lifestyle spend components must reconcile")
+        if self.total_cents != self.weekday_cents + self.weekend_cents:
+            raise ValueError("weekday and weekend spend must reconcile")
+        if self.transaction_count != self.weekday_count + self.weekend_count:
+            raise ValueError("weekday and weekend counts must reconcile")
+        if self.spend_basis == "card" and (
+            self.unknown_share_transactions
+            or self.previous_unknown_share_transactions
+            or self.unknown_credit_share_transactions
+            or self.previous_unknown_credit_share_transactions
+        ):
+            raise ValueError("card-basis lifestyle amounts cannot have unknown allocations")
+        return self
+
+
 class AgentReplenishmentItem(StrictAgentModel):
     public_id: str = Field(min_length=1, max_length=128)
     name: str = Field(min_length=1, max_length=255)
@@ -442,6 +509,7 @@ class AgentNavigationBlock(AgentResponseBlockBase):
 
 AgentEvidenceDomain = Literal[
     "spending",
+    "lifestyle",
     "transactions",
     "replenishment",
     "receipts",
@@ -457,6 +525,7 @@ AgentAttentionPriority = Literal[
 
 _EVIDENCE_DOMAIN_ORDER = (
     "spending",
+    "lifestyle",
     "transactions",
     "replenishment",
     "receipts",
@@ -485,8 +554,8 @@ class AgentAttentionSummaryBlock(AgentResponseBlockBase):
     block_version: Literal["1.0"] = "1.0"
     title: str = Field(min_length=1, max_length=160)
     status: Literal["complete", "partial"]
-    checked_domains: list[AgentEvidenceDomain] = Field(min_length=1, max_length=7)
-    unavailable_domains: list[AgentEvidenceDomain] = Field(default_factory=list, max_length=7)
+    checked_domains: list[AgentEvidenceDomain] = Field(min_length=1, max_length=8)
+    unavailable_domains: list[AgentEvidenceDomain] = Field(default_factory=list, max_length=8)
     items: list[AgentAttentionItem] = Field(default_factory=list, max_length=12)
     items_truncated: bool = False
 
@@ -586,6 +655,7 @@ AgentResponseBlock = Annotated[
     AgentTextBlock
     | AgentTransactionListBlock
     | AgentSpendingSummaryBlock
+    | AgentLifestyleSummaryBlock
     | AgentReplenishmentSummaryBlock
     | AgentDealListBlock
     | AgentReceiptSummaryBlock

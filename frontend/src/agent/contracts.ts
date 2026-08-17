@@ -144,6 +144,47 @@ export type AgentSpendingSummaryBlock = AgentResponseBlockBase & {
   top_merchants: AgentSpendingBreakdownItem[];
 };
 
+export type AgentLifestyleBreakdownItem = {
+  name: string;
+  amount_cents: number;
+  transaction_count: number;
+  percentage: number;
+};
+
+export type AgentLifestyleSummaryBlock = AgentResponseBlockBase & {
+  type: "lifestyle_summary";
+  block_version: "1.0";
+  title: string;
+  start_date: string;
+  end_date: string;
+  previous_start_date: string | null;
+  previous_end_date: string | null;
+  activity_type: "all" | "coffee" | "restaurants" | "delivery" | "nightlife";
+  currency_code: string;
+  spend_basis: "card" | "actual_share";
+  total_cents: number;
+  credits_cents: number;
+  transaction_count: number;
+  average_cents: number;
+  personal_cents: number;
+  shared_cents: number;
+  unreviewed_cents: number;
+  previous_total_cents: number | null;
+  previous_transaction_count: number | null;
+  unknown_share_transactions: number;
+  previous_unknown_share_transactions: number;
+  unknown_credit_share_transactions: number;
+  previous_unknown_credit_share_transactions: number;
+  weekday_cents: number;
+  weekday_count: number;
+  weekend_cents: number;
+  weekend_count: number;
+  uncertain_transaction_count: number;
+  observations: string[];
+  activities: AgentLifestyleBreakdownItem[];
+  top_merchants: AgentLifestyleBreakdownItem[];
+};
+
 export type AgentReplenishmentItem = {
   public_id: string;
   name: string;
@@ -304,6 +345,7 @@ export type AgentIntegrationStatusBlock = AgentResponseBlockBase & {
 
 export type AgentAttentionDomain =
   | "spending"
+  | "lifestyle"
   | "transactions"
   | "replenishment"
   | "receipts"
@@ -406,6 +448,7 @@ export type AgentResponseBlock =
   | AgentTextBlock
   | AgentTransactionListBlock
   | AgentSpendingSummaryBlock
+  | AgentLifestyleSummaryBlock
   | AgentReplenishmentSummaryBlock
   | AgentDealListBlock
   | AgentReceiptSummaryBlock

@@ -13,6 +13,7 @@ from app.agent.tooling import AgentTool, AgentToolContext, AgentToolRegistry, To
 from app.config import Settings
 from app.models import ExpenseTransaction, TransactionStatus
 from app.services.agent_service import transaction_display_name
+from app.services.lifestyle_dining_service import LifestyleDiningService
 from app.services.spending_insights_service import SpendingInsightsService
 
 MAX_DATE_RANGE_DAYS = 730
@@ -141,6 +142,95 @@ class SpendingInsightsOutput(ReadToolModel):
         return self
 
 
+class LifestyleDiningInput(ReadToolModel):
+    start_date: str = Field(pattern=r"^\d{4}-\d{2}-\d{2}$")
+    end_date: str = Field(pattern=r"^\d{4}-\d{2}-\d{2}$")
+    activity_type: Literal["all", "coffee", "restaurants", "delivery", "nightlife"] | None = None
+    merchant: str | None = Field(default=None, min_length=1, max_length=255)
+    account_id: str | None = Field(default=None, min_length=1, max_length=128)
+    review_type: Literal["all", "personal", "shared"] | None = None
+    spend_basis: Literal["card", "actual_share"] | None = None
+    currency_code: str | None = Field(
+        default=None,
+        min_length=3,
+        max_length=3,
+        pattern=r"^[A-Za-z]{3}$",
+    )
+    include_comparison: bool = True
+
+    @model_validator(mode="after")
+    def validate_range(self) -> LifestyleDiningInput:
+        _validate_date_range(date.fromisoformat(self.start_date), date.fromisoformat(self.end_date))
+        return self
+
+
+class LifestyleAggregate(ReadToolModel):
+    total_cents: int = Field(ge=0)
+    personal_cents: int = Field(ge=0)
+    shared_cents: int = Field(ge=0)
+    unreviewed_cents: int = Field(ge=0)
+    credits_cents: int = Field(ge=0)
+    transaction_count: int = Field(ge=0)
+    average_cents: int = Field(ge=0)
+    unknown_share_transactions: int = Field(ge=0)
+    unknown_credit_share_transactions: int = Field(ge=0)
+    weekday_cents: int = Field(ge=0)
+    weekday_count: int = Field(ge=0)
+    weekend_cents: int = Field(ge=0)
+    weekend_count: int = Field(ge=0)
+
+    @model_validator(mode="after")
+    def validate_reconciliation(self) -> LifestyleAggregate:
+        if self.total_cents != self.personal_cents + self.shared_cents + self.unreviewed_cents:
+            raise ValueError("lifestyle spend components must reconcile to total_cents")
+        if self.total_cents != self.weekday_cents + self.weekend_cents:
+            raise ValueError("weekday and weekend spend must reconcile to total_cents")
+        if self.transaction_count != self.weekday_count + self.weekend_count:
+            raise ValueError("weekday and weekend counts must reconcile")
+        return self
+
+
+class LifestyleBreakdownItem(ReadToolModel):
+    name: str = Field(min_length=1, max_length=255)
+    amount_cents: int = Field(ge=0)
+    transaction_count: int = Field(ge=0)
+    percentage: float = Field(ge=0, le=100)
+
+
+class LifestyleDiningOutput(ReadToolModel):
+    start_date: str = Field(pattern=r"^\d{4}-\d{2}-\d{2}$")
+    end_date: str = Field(pattern=r"^\d{4}-\d{2}-\d{2}$")
+    previous_start_date: str | None = Field(default=None, pattern=r"^\d{4}-\d{2}-\d{2}$")
+    previous_end_date: str | None = Field(default=None, pattern=r"^\d{4}-\d{2}-\d{2}$")
+    activity_type: Literal["all", "coffee", "restaurants", "delivery", "nightlife"]
+    currency_code: str = Field(min_length=3, max_length=8, pattern=r"^[A-Z]{3,8}$")
+    spend_basis: Literal["card", "actual_share"]
+    summary: LifestyleAggregate
+    comparison: LifestyleAggregate | None
+    activities: list[LifestyleBreakdownItem] = Field(max_length=4)
+    top_merchants: list[LifestyleBreakdownItem] = Field(max_length=8)
+    uncertain_transaction_count: int = Field(ge=0)
+    previous_uncertain_transaction_count: int = Field(ge=0)
+    observations: list[str] = Field(max_length=6)
+    available_currencies: list[str] = Field(max_length=16)
+    excluded_other_currency_transactions: int = Field(ge=0)
+    pending_transactions_excluded: bool
+
+    @model_validator(mode="after")
+    def validate_basis_quality(self) -> LifestyleDiningOutput:
+        aggregates = [self.summary, *([self.comparison] if self.comparison else [])]
+        if self.spend_basis == "card" and any(
+            value.unknown_share_transactions or value.unknown_credit_share_transactions
+            for value in aggregates
+        ):
+            raise ValueError("card-basis lifestyle amounts cannot have unknown share allocations")
+        if (self.comparison is None) != (self.previous_start_date is None):
+            raise ValueError("comparison dates must match comparison presence")
+        if (self.comparison is None) != (self.previous_end_date is None):
+            raise ValueError("comparison dates must match comparison presence")
+        return self
+
+
 class TransactionSearchInput(ReadToolModel):
     transaction_id: int | None = Field(
         default=None,
@@ -226,6 +316,21 @@ def build_read_tool_registry(settings: Settings) -> AgentToolRegistry:
     )
     registry.register(
         AgentTool(
+            name="get_lifestyle_dining_insights",
+            description=(
+                "Return canonical read-only coffee, restaurant, food-delivery, or reliably "
+                "categorized nightlife purchase frequency and spend for an explicit date range. "
+                "Use this for lifestyle/dining behavior questions, not household replenishment."
+            ),
+            effect=ToolEffect.READ,
+            input_model=LifestyleDiningInput,
+            output_model=LifestyleDiningOutput,
+            handler=_get_lifestyle_dining_insights,
+            version="1.0",
+        )
+    )
+    registry.register(
+        AgentTool(
             name="search_transactions",
             description=(
                 "Return bounded authenticated ExpenseOps transaction rows when the latest user "
@@ -279,6 +384,23 @@ def _get_spending_insights(
         "excluded_other_currency_transactions": scope["excluded_other_currency_transactions"],
         "pending_transactions_excluded": scope["pending_transactions_excluded"],
     }
+
+
+def _get_lifestyle_dining_insights(
+    context: AgentToolContext,
+    values: LifestyleDiningInput,
+) -> dict:
+    return LifestyleDiningService(context.db).build(
+        start_date=date.fromisoformat(values.start_date),
+        end_date=date.fromisoformat(values.end_date),
+        activity_type=values.activity_type or "all",
+        merchant=values.merchant,
+        account_id=values.account_id,
+        review_type=values.review_type or "all",
+        spend_basis=values.spend_basis or "card",
+        currency_code=values.currency_code,
+        include_comparison=values.include_comparison,
+    )
 
 
 def _search_transactions(

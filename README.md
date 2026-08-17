@@ -275,6 +275,7 @@ Read the deeper guides:
 - [Promotion Intelligence](docs/PROMOTION_INTELLIGENCE.md)
 - [Replenishment Learning](docs/REPLENISHMENT_LEARNING.md)
 - [Zero-Setup Receipt Learning](docs/ZERO_SETUP_RECEIPT_LEARNING.md)
+- [Lifestyle & Dining Intelligence](docs/LIFESTYLE_DINING_INTELLIGENCE.md)
 
 ### Google Maps: turn “Aldi” into the right Aldi
 
