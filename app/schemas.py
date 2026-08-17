@@ -4,7 +4,7 @@ from datetime import date, datetime
 from decimal import Decimal
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class LinkTokenResponse(BaseModel):
@@ -49,6 +49,7 @@ class TransactionOut(BaseModel):
     last_error: str | None
     classification_suggestion: Literal["likely_personal", "likely_shared", "unsure"] | None = None
     classification_reason: str | None = None
+    classification_preference_id: int | None = None
     can_undo_transaction: bool = False
     created_at: datetime
     updated_at: datetime
@@ -252,6 +253,9 @@ class WebhookAck(BaseModel):
 class AIMemoryOut(BaseModel):
     id: int
     original_message: str
+    label: str
+    rationale: str
+    source: Literal["explicit_preference", "confirmed_action", "correction"]
     failure_reason: str
     final_action: str
     final_group_name: str | None
@@ -266,3 +270,60 @@ class AIMemoryOut(BaseModel):
     usage_count: int
     last_used_at: datetime | None
     created_at: datetime
+
+
+class StructuredMemoryCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    merchant: str = Field(min_length=1, max_length=255)
+    preference: Literal["personal", "shared"]
+    participant_names: list[str] = Field(default_factory=list, max_length=8)
+    group_name: str | None = Field(default=None, min_length=1, max_length=255)
+
+    @field_validator("participant_names")
+    @classmethod
+    def validate_memory_participants(cls, values: list[str]) -> list[str]:
+        normalized = [value.strip() for value in values]
+        if any(not value or len(value) > 120 for value in normalized):
+            raise ValueError("participant names must contain 1 to 120 characters")
+        if len({value.casefold() for value in normalized}) != len(normalized):
+            raise ValueError("participant names must be unique")
+        return normalized
+
+
+class StructuredMemoryPatch(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    preference: Literal["personal", "shared"]
+    participant_names: list[str] = Field(default_factory=list, max_length=8)
+    group_name: str | None = Field(default=None, min_length=1, max_length=255)
+
+    @field_validator("participant_names")
+    @classmethod
+    def validate_memory_participants(cls, values: list[str]) -> list[str]:
+        return StructuredMemoryCreate.validate_memory_participants(values)
+
+
+class StructuredMemorySettingsPatch(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    transaction_learning_enabled: bool
+
+
+class StructuredMemoryFeedback(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    outcome: Literal["accepted", "edited", "rejected"]
+
+
+class StructuredMemorySettingsOut(BaseModel):
+    transaction_learning_enabled: bool
+
+
+class StructuredMemoryMetricsOut(BaseModel):
+    shown: int
+    accepted: int
+    edited: int
+    rejected: int
+    agreement_rate: float | None
+    correction_rate: float | None

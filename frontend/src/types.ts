@@ -23,6 +23,7 @@ export type Transaction = {
   last_error: string | null;
   classification_suggestion: "likely_personal" | "likely_shared" | "unsure" | null;
   classification_reason: string | null;
+  classification_preference_id?: number | null;
   can_undo_transaction: boolean;
   created_at: string;
   updated_at: string;
@@ -117,6 +118,9 @@ export type MemoryEntry = {
 export type AIMemory = {
   id: number;
   original_message: string;
+  label: string;
+  rationale: string;
+  source: "explicit_preference" | "confirmed_action" | "correction";
   failure_reason: string;
   final_action: string;
   final_group_name: string | null;
@@ -136,6 +140,19 @@ export type AIMemory = {
   usage_count: number;
   last_used_at: string | null;
   created_at: string;
+};
+
+export type StructuredMemorySettings = {
+  transaction_learning_enabled: boolean;
+};
+
+export type StructuredMemoryMetrics = {
+  shown: number;
+  accepted: number;
+  edited: number;
+  rejected: number;
+  agreement_rate: number | null;
+  correction_rate: number | null;
 };
 
 export type HouseholdItem = {

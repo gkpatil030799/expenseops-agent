@@ -669,6 +669,9 @@ class AIInterpretationMemory(TenantScoped, Base):
     __tablename__ = "ai_interpretation_memories"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    owner_user_id: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), nullable=True, index=True
+    )
     original_message: Mapped[str] = mapped_column(Text)
     failure_reason: Mapped[str] = mapped_column(String(64))
     final_action: Mapped[str] = mapped_column(String(64))

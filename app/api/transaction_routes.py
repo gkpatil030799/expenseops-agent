@@ -17,6 +17,7 @@ from app.schemas import (
     TransactionOut,
 )
 from app.services.agent_service import match_friends
+from app.services.ai_memory_service import AIInterpretationMemoryService
 from app.services.recommendation_service import classify_transaction_recommendation
 from app.services.share_calculator import (
     CustomSplitInput,
@@ -33,19 +34,28 @@ from app.services.transaction_service import (
 router = APIRouter(prefix="/transactions", tags=["transactions"])
 
 
-def _tx_out(tx: ExpenseTransaction) -> TransactionOut:
+def _tx_out(tx: ExpenseTransaction, db: DbSession | None = None) -> TransactionOut:
     classification = classify_transaction_recommendation(
         merchant_name=tx.merchant_name,
         name=tx.name,
         amount_cents=tx.amount_cents,
         category=tx.category,
     )
+    db_info = getattr(db, "info", {}) if db else {}
+    preference = (
+        AIInterpretationMemoryService(db).recommendation_for_transaction(tx)
+        if isinstance(db_info.get("workspace_id"), int) and isinstance(db_info.get("user_id"), int)
+        else None
+    )
     return TransactionOut.model_validate(tx).model_copy(
         update={
             "amount": cents_to_decimal_string(abs(tx.amount_cents)),
             "institution_name": tx.plaid_item.institution_name if tx.plaid_item else None,
-            "classification_suggestion": classification.suggestion,
-            "classification_reason": classification.reason,
+            "classification_suggestion": (
+                preference["suggestion"] if preference else classification.suggestion
+            ),
+            "classification_reason": preference["reason"] if preference else classification.reason,
+            "classification_preference_id": preference["memory_id"] if preference else None,
             "can_undo_transaction": can_undo_transaction(tx),
         }
     )
@@ -60,13 +70,14 @@ def list_transactions(
     stmt = select(ExpenseTransaction).order_by(desc(ExpenseTransaction.created_at)).limit(limit)
     if status:
         stmt = stmt.where(ExpenseTransaction.status == status.value)
-    return [_tx_out(tx) for tx in db.execute(stmt).scalars()]
+    transactions = list(db.execute(stmt).scalars())
+    return [_tx_out(tx, db) for tx in transactions]
 
 
 @router.get("/{tx_id}", response_model=TransactionOut)
 def get_transaction(tx_id: int, db: DbSession) -> TransactionOut:
     try:
-        return _tx_out(TransactionService(db).get_transaction(tx_id))
+        return _tx_out(TransactionService(db).get_transaction(tx_id), db)
     except TransactionError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
@@ -75,7 +86,7 @@ def get_transaction(tx_id: int, db: DbSession) -> TransactionOut:
 def mark_personal(tx_id: int, db: DbSession) -> MarkPersonalResponse:
     try:
         tx = TransactionService(db).mark_personal(tx_id)
-        return MarkPersonalResponse(transaction=_tx_out(tx), message="Marked as personal.")
+        return MarkPersonalResponse(transaction=_tx_out(tx, db), message="Marked as personal.")
     except TransactionError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -85,7 +96,7 @@ def undo_transaction(tx_id: int, db: DbSession) -> MarkPersonalResponse:
     try:
         tx = TransactionService(db).undo_transaction(tx_id)
         return MarkPersonalResponse(
-            transaction=_tx_out(tx),
+            transaction=_tx_out(tx, db),
             message="Transaction moved back to review.",
         )
     except TransactionError as exc:
@@ -103,7 +114,7 @@ def retry_financial_operation(tx_id: int, db: DbSession) -> MarkPersonalResponse
             TransactionStatus.RECONCILIATION_REQUIRED.value,
         }
         return MarkPersonalResponse(
-            transaction=_tx_out(tx),
+            transaction=_tx_out(tx, db),
             message=(
                 "Financial operation queued. ExpenseOps will verify Splitwise in the background."
                 if still_processing
@@ -129,7 +140,7 @@ def split_equal(tx_id: int, payload: EqualSplitRequest, db: DbSession) -> Splitw
             post_pending=payload.post_pending,
         )
         return SplitwisePostResponse(
-            transaction=_tx_out(tx),
+            transaction=_tx_out(tx, db),
             splitwise_expense_id=tx.splitwise_expense_id,
             splitwise_response=splitwise_response,
         )
@@ -176,7 +187,7 @@ def split_custom(tx_id: int, payload: CustomSplitRequest, db: DbSession) -> Spli
             post_pending=payload.post_pending,
         )
         return SplitwisePostResponse(
-            transaction=_tx_out(tx),
+            transaction=_tx_out(tx, db),
             splitwise_expense_id=tx.splitwise_expense_id,
             splitwise_response=splitwise_response,
         )

@@ -2170,11 +2170,25 @@ def _intent_from_matching_memory(
     for memory in memories:
         phrase = str(memory.get("original_phrase") or "")
         phrase_tokens = set(re.findall(r"[a-z0-9]+", phrase.lower()))
-        if not phrase_tokens:
-            continue
-        overlap = len(message_tokens & phrase_tokens) / len(phrase_tokens)
-        if overlap < 0.8:
-            continue
+        if phrase_tokens:
+            overlap = len(message_tokens & phrase_tokens) / len(phrase_tokens)
+            if overlap < 0.8:
+                continue
+        else:
+            # Day 12 structured memory never retains chat text. A shortcut is
+            # still safe when the latest turn explicitly names every stored
+            # group/participant and asks to split; otherwise use normal intent
+            # extraction rather than guessing from a preference.
+            entities = [memory.get("group"), *memory.get("participants", [])]
+            entity_tokens = [
+                set(re.findall(r"[a-z0-9]+", str(entity).lower()))
+                for entity in entities
+                if str(entity or "").strip()
+            ]
+            if not entity_tokens or not all(tokens <= message_tokens for tokens in entity_tokens):
+                continue
+            if not message_tokens.intersection({"split", "shared", "share"}):
+                continue
         if memory.get("correct_interpretation") not in {"split_equal", "custom_split"}:
             continue
         split_mode = str(memory.get("split_mode") or "equal")

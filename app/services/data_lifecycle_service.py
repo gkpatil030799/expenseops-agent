@@ -12,6 +12,7 @@ from app.models import (
     AgentMessage,
     AgentRun,
     AgentToolCall,
+    AIInterpretationMemory,
     AuditEvent,
     AuthIdentity,
     AuthSession,
@@ -40,6 +41,7 @@ CONSENT_PURPOSES = {
     "gmail_receipts",
     "gmail_promotions",
     "model_receipt_processing",
+    "structured_transaction_learning",
 }
 POLICY_VERSION = "2026-08-13"
 
@@ -258,6 +260,7 @@ class DataLifecycleService:
         """Delete private agent content under every supplied concrete workspace scope."""
         original_workspace_id = self.db.info.get("workspace_id")
         models = (
+            AIInterpretationMemory,
             AgentActionProposal,
             AgentToolCall,
             AgentRun,
