@@ -909,6 +909,13 @@ describe("Agent controlled-action validation", () => {
       confirm_label: "Confirm selected",
     } as const;
     expect(parseAgentActionConfirmation(receiptLearning)).toBe(receiptLearning);
+    const itemizedReceiptSplit = {
+      ...block,
+      action: "post_itemized_receipt_split",
+      title: "Split restaurant receipt by item",
+      confirm_label: "Confirm itemized split",
+    } as const;
+    expect(parseAgentActionConfirmation(itemizedReceiptSplit)).toBe(itemizedReceiptSplit);
   });
 
   it("rejects editable action parameters, missing action types, and invalid versions", () => {

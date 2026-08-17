@@ -10,12 +10,15 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.agent.action_tools import (
+    ITEMIZED_RECEIPT_SPLIT_TOOL_NAME,
     MARK_PERSONAL_TOOL_NAME,
     POST_SPLITWISE_TOOL_NAME,
     RECEIPT_LEARNING_TOOL_NAME,
+    ItemizedReceiptSplitProposal,
     MarkTransactionPersonalProposal,
     PostSplitwiseExpenseProposal,
     ReceiptLearningBatchProposal,
+    itemized_receipt_snapshot_hash,
 )
 from app.agent.contracts import (
     AgentActionConfirmationBlock,
@@ -79,6 +82,7 @@ class AgentActionExecutor:
             MARK_PERSONAL_TOOL_NAME,
             POST_SPLITWISE_TOOL_NAME,
             RECEIPT_LEARNING_TOOL_NAME,
+            ITEMIZED_RECEIPT_SPLIT_TOOL_NAME,
         }:
             raise AgentConflictError(
                 "unsupported_action",
@@ -104,7 +108,10 @@ class AgentActionExecutor:
         )
         if proposal.status == "completed":
             return proposal
-        if proposal.tool_name == POST_SPLITWISE_TOOL_NAME:
+        if proposal.tool_name in {
+            POST_SPLITWISE_TOOL_NAME,
+            ITEMIZED_RECEIPT_SPLIT_TOOL_NAME,
+        }:
             return self._execute_splitwise(
                 proposal,
                 owner_user_id=owner_user_id,
@@ -389,9 +396,13 @@ class AgentActionExecutor:
         claimed: bool,
     ) -> AgentActionProposal:
         try:
-            parameters = PostSplitwiseExpenseProposal.model_validate_json(
-                json.dumps(proposal.normalized_parameters_json),
-                strict=True,
+            proposal_model = (
+                ItemizedReceiptSplitProposal
+                if proposal.tool_name == ITEMIZED_RECEIPT_SPLIT_TOOL_NAME
+                else PostSplitwiseExpenseProposal
+            )
+            parameters = proposal_model.model_validate_json(
+                json.dumps(proposal.normalized_parameters_json), strict=True
             )
         except ValidationError as exc:
             self.service.fail_action_proposal(
@@ -421,7 +432,35 @@ class AgentActionExecutor:
             )
             if terminal is not None or existing.state in {"pending", "in_flight"}:
                 return terminal or proposal
-
+        if isinstance(parameters, ItemizedReceiptSplitProposal):
+            receipt = self.db.scalar(
+                select(PurchaseReceipt)
+                .where(
+                    PurchaseReceipt.workspace_id == workspace_id,
+                    PurchaseReceipt.id == parameters.receipt_id,
+                    PurchaseReceipt.transaction_id == parameters.transaction_id,
+                )
+                .with_for_update()
+            )
+            if (
+                receipt is None
+                or receipt.parse_status != parameters.expected_receipt_status
+                or _aware(receipt.updated_at) != _aware(parameters.expected_receipt_updated_at)
+            ):
+                return self._fail_stale(
+                    proposal.public_id,
+                    owner_user_id=owner_user_id,
+                    code="action_target_changed",
+                )
+            # The relationship is loaded after the row lock so the frozen line
+            # snapshot is checked immediately before provider execution.
+            self.db.refresh(receipt, attribute_names=["items"])
+            if itemized_receipt_snapshot_hash(receipt) != parameters.receipt_snapshot_hash:
+                return self._fail_stale(
+                    proposal.public_id,
+                    owner_user_id=owner_user_id,
+                    code="action_target_changed",
+                )
         # Provider preflight and durable operation creation belong exclusively
         # to the executor that won the proposal CAS. A concurrent confirmer may
         # only reconcile an already-recorded operation above.
@@ -706,6 +745,7 @@ def action_confirmation_block(proposal: AgentActionProposal) -> AgentActionConfi
         MARK_PERSONAL_TOOL_NAME: "mark_transaction_personal",
         POST_SPLITWISE_TOOL_NAME: "post_splitwise_expense",
         RECEIPT_LEARNING_TOOL_NAME: "apply_receipt_learning_batch",
+        ITEMIZED_RECEIPT_SPLIT_TOOL_NAME: "post_itemized_receipt_split",
     }
     action = action_by_tool.get(proposal.tool_name)
     if action is None:

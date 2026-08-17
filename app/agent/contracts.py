@@ -616,6 +616,7 @@ class AgentActionConfirmationBlock(AgentActionPreview):
         "mark_transaction_personal",
         "post_splitwise_expense",
         "apply_receipt_learning_batch",
+        "post_itemized_receipt_split",
     ]
     proposal_id: str = Field(min_length=1, max_length=128)
     proposal_version: int = Field(ge=1)

@@ -1119,6 +1119,38 @@ class TransactionService:
         _validate_splitwise_payload(payload, expected_total_cents=abs(tx.amount_cents))
         return tx, payload, shares, payer_user_id
 
+    def prepare_custom_split_expense(
+        self,
+        *,
+        tx_id: int,
+        owed_by_user_id: dict[int, int],
+        group_id: int | None,
+        description: str | None,
+        details: str | None,
+        currency_code: str | None,
+        post_pending: bool,
+    ) -> tuple[ExpenseTransaction, dict[str, Any], list[SplitShare], int]:
+        """Build one exact custom Splitwise payload without changing transaction state."""
+
+        tx = self.get_transaction(tx_id)
+        self._ensure_can_post(tx, post_pending=post_pending)
+        payer_user_id = self._verified_splitwise_payer_id(tx)
+        shares = build_custom_split_shares(
+            total_cents=abs(tx.amount_cents),
+            payer_user_id=payer_user_id,
+            owed_by_user_id=dict(owed_by_user_id),
+        )
+        payload = self._base_splitwise_payload(
+            tx=tx,
+            shares=shares,
+            group_id=group_id,
+            description=description,
+            details=details,
+            currency_code=currency_code,
+        )
+        _validate_splitwise_payload(payload, expected_total_cents=abs(tx.amount_cents))
+        return tx, payload, shares, payer_user_id
+
     def post_prepared_splitwise_expense(
         self,
         *,

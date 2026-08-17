@@ -413,6 +413,7 @@ export function parseAgentActionConfirmation(
     "mark_transaction_personal",
     "post_splitwise_expense",
     "apply_receipt_learning_batch",
+    "post_itemized_receipt_split",
   ]);
   requireString(block.title, 160);
   requireString(block.summary, 1_000);

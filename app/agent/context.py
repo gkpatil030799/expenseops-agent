@@ -158,6 +158,12 @@ _RECEIPT_ACTION_REFERENT = re.compile(
     r"(?:please\s+)?(?:learn|track|map|match|reject|don'?t\s+track)\b",
     re.IGNORECASE,
 )
+_ITEMIZED_RECEIPT_ACTION_REFERENT = re.compile(
+    r"\b(?:was|were)\s+(?:mine|ours|[A-Za-z][A-Za-z0-9'’-]{0,63}['’]s)\b|"
+    r"\b(?:split|allocate)\s+(?:the\s+)?(?:tax|tip)\b|"
+    r"\b(?:tax|tip)\b.{0,32}\b(?:equally|proportionally)\b",
+    re.IGNORECASE,
+)
 
 
 def build_contextual_tool_policy(
@@ -184,7 +190,9 @@ def build_contextual_tool_policy(
         page_context is not None
         and page_context.entity is not None
         and page_context.entity.kind == "receipt"
-        and _RECEIPT_ACTION_REFERENT.search(text)
+        and (
+            _RECEIPT_ACTION_REFERENT.search(text) or _ITEMIZED_RECEIPT_ACTION_REFERENT.search(text)
+        )
     )
     referential = _is_referential(text) or implicit_receipt_action
     if not referential:
@@ -390,10 +398,11 @@ def _merge_entity_default(
                 identifier,
             )
     elif kind == "receipt":
-        target.setdefault("propose_receipt_learning_batch", {}).setdefault(
-            "receipt_id",
-            identifier,
-        )
+        for action_tool in (
+            "propose_receipt_learning_batch",
+            "propose_itemized_receipt_split",
+        ):
+            target.setdefault(action_tool, {}).setdefault("receipt_id", identifier)
     if kind in {"receipt", "household_item"}:
         # Exact-detail input contracts prohibit their broad list filters.
         allowed = {"view", _ENTITY_ID_ARGUMENT[kind]}

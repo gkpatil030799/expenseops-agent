@@ -43,6 +43,18 @@ def equal_owed_cents(total_cents: int, participant_count: int) -> list[int]:
     return [base + (1 if index < remainder else 0) for index in range(participant_count)]
 
 
+def proportional_owed_cents(total_cents: int, weights: list[int]) -> list[int]:
+    """Allocate integer cents by non-negative integer weights with stable rounding."""
+
+    if total_cents < 0:
+        raise ValueError("total_cents cannot be negative")
+    if not weights or any(weight < 0 for weight in weights):
+        raise ValueError("weights must be a non-empty list of non-negative values")
+    if sum(weights) <= 0:
+        raise ValueError("weights must sum to a positive value")
+    return _allocate_by_weights(total_cents, [Decimal(weight) for weight in weights])
+
+
 def build_equal_split_shares(
     *, total_cents: int, payer_user_id: int, participant_user_ids: list[int]
 ) -> list[SplitShare]:

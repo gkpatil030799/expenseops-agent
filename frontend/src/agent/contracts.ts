@@ -418,7 +418,11 @@ export type AgentProposalState =
  */
 export type AgentActionConfirmationBlock = AgentResponseBlockBase & AgentActionPreview & {
   type: "action_confirmation";
-  action: "mark_transaction_personal" | "post_splitwise_expense" | "apply_receipt_learning_batch";
+  action:
+    | "mark_transaction_personal"
+    | "post_splitwise_expense"
+    | "apply_receipt_learning_batch"
+    | "post_itemized_receipt_split";
   proposal_id: string;
   proposal_version: number;
   status: AgentProposalState;

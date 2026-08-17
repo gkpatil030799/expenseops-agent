@@ -174,7 +174,9 @@ Day 8 adds no package, lockfile, database migration, new queue, or deployment co
 
 ## Current limitations and next phase
 
-- Equal splits with resolved people or a supported group are implemented; custom, percentage, itemized, and exotic Splitwise modes are deferred.
+- Day 8 implemented equal splits and deferred custom/itemized modes. Day 11 later added the
+  separately reviewed, receipt-bound itemized flow documented in
+  `ITEMIZED_RECEIPT_SPLITTING.md`; free-form percentage and exotic modes remain deferred.
 - The proposal expiry is fixed at 15 minutes.
 - Browser polling is deliberately bounded; a long-running provider operation may require a later reload.
 - A process termination in the very small interval after winning the proposal execution claim but before recording a local result or durable financial operation can leave a proposal in `executing`; safe automatic takeover is intentionally not attempted because it could duplicate an in-flight action.
