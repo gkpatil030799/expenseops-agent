@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   AgentProtocolError,
+  parseAgentActionConfirmation,
   parseAgentConversationDetail,
   parseAgentFeedback,
   parseAgentStreamEvent,
@@ -875,4 +876,43 @@ describe("Agent semantic-event validation", () => {
       expect(parseAgentStreamEvent(event)).toBe(event);
     },
   );
+});
+
+describe("Agent controlled-action validation", () => {
+  const block = {
+    type: "action_confirmation",
+    block_id: null,
+    action: "mark_transaction_personal",
+    title: "Mark transaction personal",
+    summary: "This transaction will be marked personal.",
+    details: [
+      { label: "Merchant", value: "Costco" },
+      { label: "Amount", value: "USD 84.20" },
+    ],
+    confirm_label: "Mark personal",
+    cancel_label: "Cancel",
+    proposal_id: "proposal-public-1",
+    proposal_version: 1,
+    status: "awaiting_confirmation",
+    expires_at: "2026-08-16T16:15:00Z",
+  } as const;
+
+  it("accepts the strict code-owned confirmation contract", () => {
+    expect(parseAgentActionConfirmation(block)).toBe(block);
+    expect(
+      parseAgentStructuredResponse({ schema_version: "1.0", blocks: [block] }).blocks[0],
+    ).toBe(block);
+  });
+
+  it("rejects editable action parameters, missing action types, and invalid versions", () => {
+    expect(() =>
+      parseAgentActionConfirmation({ ...block, transaction_id: 42 }),
+    ).toThrow(AgentProtocolError);
+    expect(() =>
+      parseAgentActionConfirmation({ ...block, action: undefined }),
+    ).toThrow(AgentProtocolError);
+    expect(() =>
+      parseAgentActionConfirmation({ ...block, proposal_version: 0 }),
+    ).toThrow(AgentProtocolError);
+  });
 });

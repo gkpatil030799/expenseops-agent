@@ -255,6 +255,7 @@ def test_structured_response_accepts_every_versioned_platform_neutral_block():
                 },
                 {
                     "type": "action_confirmation",
+                    "action": "mark_transaction_personal",
                     "proposal_id": "proposal-1",
                     "proposal_version": 1,
                     "status": "awaiting_confirmation",
@@ -509,6 +510,7 @@ def test_action_preview_is_strict_before_a_proposal_id_exists():
     )
     confirmation = AgentActionConfirmationBlock(
         **preview.model_dump(),
+        action="mark_transaction_personal",
         proposal_id="proposal-1",
         proposal_version=2,
         status="awaiting_confirmation",
@@ -814,6 +816,98 @@ def test_consequential_dispatch_only_returns_proposal_material_and_never_calls_h
     assert result.normalized_arguments == {"value": "normalized"}
     assert result.output is None
     assert calls == []
+
+
+def test_server_owned_proposal_may_freeze_provider_user_ids_but_never_secrets():
+    class FrozenProviderTarget(BaseModel):
+        model_config = ConfigDict(extra="forbid")
+
+        user_id: int
+        value: str
+
+    registry = _registry(writes=True)
+    registry.register(
+        AgentTool(
+            name="freeze_provider_target",
+            description="Prepare one server-resolved provider target.",
+            effect=ToolEffect.EXTERNAL_ACTION,
+            input_model=EchoInput,
+            output_model=EchoOutput,
+            handler=lambda _context, _values: {"echoed": "must-not-run"},
+            confirmation_required=True,
+            proposal_model=FrozenProviderTarget,
+            proposal_builder=lambda _context, values: {
+                "user_id": 321,
+                "value": values.value,
+            },
+            preview_builder=lambda _context, values: {
+                "title": "Review provider target",
+                "summary": f"Apply {values.value} after confirmation.",
+            },
+        )
+    )
+    prepared = registry.prepare(
+        "freeze_provider_target",
+        {"value": "safe"},
+        context=_context(),
+    )
+    assert prepared.normalized_arguments == {"user_id": 321, "value": "safe"}
+
+    class FrozenSecret(BaseModel):
+        model_config = ConfigDict(extra="forbid")
+
+        api_key: str
+
+    with pytest.raises(ValueError, match="forbidden field 'api_key'"):
+        registry.register(
+            AgentTool(
+                name="freeze_secret",
+                description="Invalid secret-bearing proposal.",
+                effect=ToolEffect.EXTERNAL_ACTION,
+                input_model=EchoInput,
+                output_model=EchoOutput,
+                handler=lambda _context, _values: {"echoed": "must-not-run"},
+                confirmation_required=True,
+                proposal_model=FrozenSecret,
+                proposal_builder=lambda _context, _values: {"api_key": "secret"},
+                preview_builder=lambda _context, _values: {
+                    "title": "Invalid",
+                    "summary": "Invalid",
+                },
+            )
+        )
+
+    class FrozenOpaquePayload(BaseModel):
+        model_config = ConfigDict(extra="forbid")
+
+        payload: dict[str, Any]
+
+    opaque_registry = _registry(writes=True)
+    opaque_registry.register(
+        AgentTool(
+            name="freeze_opaque_payload",
+            description="Invalid nested secret-bearing proposal.",
+            effect=ToolEffect.EXTERNAL_ACTION,
+            input_model=EchoInput,
+            output_model=EchoOutput,
+            handler=lambda _context, _values: {"echoed": "must-not-run"},
+            confirmation_required=True,
+            proposal_model=FrozenOpaquePayload,
+            proposal_builder=lambda _context, _values: {
+                "payload": {"oauth_token": "must-not-persist"}
+            },
+            preview_builder=lambda _context, _values: {
+                "title": "Invalid",
+                "summary": "Invalid",
+            },
+        )
+    )
+    with pytest.raises(UnsafeToolArgumentsError, match="oauth_token"):
+        opaque_registry.prepare(
+            "freeze_opaque_payload",
+            {"value": "safe"},
+            context=_context(),
+        )
 
 
 @pytest.mark.parametrize(

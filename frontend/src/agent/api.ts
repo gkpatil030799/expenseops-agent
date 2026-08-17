@@ -1,6 +1,8 @@
 import { api } from "@/lib/api";
 
 import type {
+  AgentActionConfirmationBlock,
+  AgentActionDecision,
   AgentConversation,
   AgentConversationDetail,
   AgentFeedbackCreate,
@@ -12,6 +14,7 @@ import type {
 import {
   AgentProtocolError,
   parseAgentConversation,
+  parseAgentActionConfirmation,
   parseAgentConversationDetail,
   parseAgentConversationList,
   parseAgentFeedback,
@@ -93,6 +96,34 @@ export async function submitAgentFeedback(
   );
   if (feedback.message_public_id !== messagePublicId) throw new AgentProtocolError();
   return feedback;
+}
+
+export async function confirmAgentAction(
+  proposalId: string,
+  payload: AgentActionDecision,
+): Promise<AgentActionConfirmationBlock> {
+  const block = parseAgentActionConfirmation(
+    await api<unknown>(`/api/agent/proposals/${encodeURIComponent(proposalId)}/confirm`, {
+      method: "POST",
+      body: JSON.stringify({ proposal_version: payload.proposal_version }),
+    }),
+  );
+  if (block.proposal_id !== proposalId) throw new AgentProtocolError();
+  return block;
+}
+
+export async function cancelAgentAction(
+  proposalId: string,
+  payload: AgentActionDecision,
+): Promise<AgentActionConfirmationBlock> {
+  const block = parseAgentActionConfirmation(
+    await api<unknown>(`/api/agent/proposals/${encodeURIComponent(proposalId)}/cancel`, {
+      method: "POST",
+      body: JSON.stringify({ proposal_version: payload.proposal_version }),
+    }),
+  );
+  if (block.proposal_id !== proposalId) throw new AgentProtocolError();
+  return block;
 }
 
 export async function streamAgentTurn({

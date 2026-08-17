@@ -2,6 +2,7 @@ import {
   AGENT_SCHEMA_VERSION,
   type AgentConversation,
   type AgentConversationDetail,
+  type AgentActionConfirmationBlock,
   type AgentFeedbackOut,
   type AgentMessage,
   type AgentRunOut,
@@ -364,6 +365,9 @@ function parseSupportedBlock(value: unknown): void {
     case "navigation":
       parseNavigationBlock(block);
       return;
+    case "action_confirmation":
+      parseAgentActionConfirmation(block);
+      return;
     case "error":
       requireString(block.code, 100);
       requireString(block.title, 160);
@@ -380,6 +384,56 @@ function parseSupportedBlock(value: unknown): void {
     default:
       throw new AgentProtocolError("ExpenseOps cannot safely display this response yet.");
   }
+}
+
+export function parseAgentActionConfirmation(
+  value: unknown,
+): AgentActionConfirmationBlock {
+  const block = requireRecord(value);
+  requireAllowedKeys(block, [
+    "type",
+    "block_id",
+    "action",
+    "title",
+    "summary",
+    "details",
+    "confirm_label",
+    "cancel_label",
+    "proposal_id",
+    "proposal_version",
+    "status",
+    "expires_at",
+  ]);
+  if (block.type !== "action_confirmation") throw new AgentProtocolError();
+  requireNullableString(block.block_id, 100);
+  requireOneOf(block.action, ["mark_transaction_personal", "post_splitwise_expense"]);
+  requireString(block.title, 160);
+  requireString(block.summary, 1_000);
+  if (!Array.isArray(block.details) || block.details.length > 25) {
+    throw new AgentProtocolError();
+  }
+  block.details.forEach((value) => {
+    const detail = requireRecord(value);
+    requireAllowedKeys(detail, ["label", "value"]);
+    requireString(detail.label, 100);
+    requireString(detail.value, 500);
+  });
+  requireString(block.confirm_label, 80);
+  requireString(block.cancel_label, 80);
+  requireString(block.proposal_id, 128);
+  requirePositiveInteger(block.proposal_version);
+  requireOneOf(block.status, [
+    "awaiting_confirmation",
+    "confirmed",
+    "executing",
+    "completed",
+    "cancelled",
+    "expired",
+    "failed",
+    "ambiguous",
+  ]);
+  requireString(block.expires_at, 128);
+  return value as AgentActionConfirmationBlock;
 }
 
 const ATTENTION_DOMAINS = [

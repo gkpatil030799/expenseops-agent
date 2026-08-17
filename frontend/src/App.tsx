@@ -957,6 +957,7 @@ function DashboardApp() {
         <Suspense fallback={<AgentLoadingState />}>
           <AgentExperience
             mode="page"
+            readOnly={accountContext?.features?.agent?.read_only ?? true}
             pageContext={effectiveAgentPageContext}
             contextLabel={agentSourceContext.label}
             onClearContext={clearAgentContext}
@@ -1132,6 +1133,7 @@ function DashboardApp() {
               <Suspense fallback={<AgentLoadingState />}>
                 <AgentExperience
                   mode="panel"
+                  readOnly={accountContext?.features?.agent?.read_only ?? true}
                   pageContext={effectiveAgentPageContext}
                   contextLabel={agentSourceContext.label}
                   onClearContext={clearAgentContext}
@@ -1147,6 +1149,7 @@ function DashboardApp() {
               <Suspense fallback={<AgentLoadingState />}>
                 <AgentExperience
                   mode="panel"
+                  readOnly={accountContext?.features?.agent?.read_only ?? true}
                   pageContext={effectiveAgentPageContext}
                   contextLabel={agentSourceContext.label}
                   onClearContext={clearAgentContext}

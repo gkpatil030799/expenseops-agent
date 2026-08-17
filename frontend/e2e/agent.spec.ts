@@ -418,7 +418,9 @@ test("unknown structured blocks fail closed without rendering action controls", 
   await page.getByLabel("Ask ExpenseOps Agent").fill("Do something");
   await page.getByLabel("Ask ExpenseOps Agent").press("Enter");
 
-  await expect(page.getByRole("alert")).toContainText(/cannot safely display/i);
+  await expect(page.getByRole("alert")).toContainText(
+    /unsupported Agent response|cannot safely display/i,
+  );
   await expect(page.getByRole("button", { name: "Confirm transfer" })).toHaveCount(0);
   await expect(page.getByText("Transfer money", { exact: true })).toHaveCount(0);
 });

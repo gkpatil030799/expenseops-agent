@@ -199,16 +199,9 @@ class Settings(BaseSettings):
             errors.append(
                 "ALLOW_UNVERIFIED_PLAID_WEBHOOKS_FOR_LOCAL_TEST must be false in production."
             )
-        if any(
-            (
-                self.agent_write_actions_enabled,
-                self.agent_proactive_enabled,
-                self.agent_purchasing_enabled,
-            )
-        ):
+        if self.agent_proactive_enabled or self.agent_purchasing_enabled:
             errors.append(
-                "Agent write actions, proactive behavior, and purchasing must remain disabled "
-                "for the production read-only rollout."
+                "Agent proactive behavior and purchasing must remain disabled in production."
             )
         if errors:
             raise ValueError("Unsafe production configuration: " + " ".join(errors))

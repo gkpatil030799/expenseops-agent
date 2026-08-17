@@ -53,14 +53,19 @@ def test_unified_agent_capabilities_default_safely_off():
 @pytest.mark.parametrize(
     "unsafe_flag",
     (
-        "agent_write_actions_enabled",
         "agent_proactive_enabled",
         "agent_purchasing_enabled",
     ),
 )
 def test_production_rejects_non_read_only_agent_rollout(unsafe_flag):
-    with pytest.raises(ValidationError, match="production read-only rollout"):
+    with pytest.raises(ValidationError, match="disabled in production"):
         _safe_production_settings(**{unsafe_flag: True})
+
+
+def test_production_allows_confirmation_gated_agent_write_actions():
+    settings = _safe_production_settings(agent_write_actions_enabled=True)
+
+    assert settings.agent_write_actions_enabled is True
 
 
 def test_settings_repr_redacts_credentials_and_private_identifiers():

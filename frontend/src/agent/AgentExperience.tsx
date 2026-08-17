@@ -28,7 +28,7 @@ import type {
   AgentMessage,
   AgentPageContext,
 } from "./contracts";
-import { useAgentController } from "./useAgentController";
+import { useAgentController, type AgentController } from "./useAgentController";
 
 export default function AgentExperience({
   mode,
@@ -38,6 +38,7 @@ export default function AgentExperience({
   onRestoreContext,
   onClose,
   onNavigate,
+  readOnly,
 }: {
   mode: "panel" | "page";
   pageContext: AgentPageContext | null;
@@ -46,6 +47,7 @@ export default function AgentExperience({
   onRestoreContext?: () => void;
   onClose?: () => void;
   onNavigate?: (request: AgentNavigationRequest) => void;
+  readOnly: boolean;
 }) {
   const controller = useAgentController(pageContext);
   const [draft, setDraft] = useState("");
@@ -105,7 +107,11 @@ export default function AgentExperience({
             </span>
             <div className="min-w-0">
               <h1 className="truncate text-base font-semibold">ExpenseOps Agent</h1>
-              <p className="truncate text-xs text-indigo-100">Read-only · grounded in your data</p>
+              <p className="truncate text-xs text-indigo-100">
+                {readOnly
+                  ? "Read-only · grounded in your data"
+                  : "Controlled actions · confirmation required"}
+              </p>
             </div>
           </div>
           <div className="flex shrink-0 items-center gap-1">
@@ -201,6 +207,9 @@ export default function AgentExperience({
                   message={message}
                   onNavigate={onNavigate}
                   onSubmitFeedback={controller.submitFeedback}
+                  onConfirmAction={readOnly ? undefined : controller.confirmAction}
+                  onCancelAction={readOnly ? undefined : controller.cancelAction}
+                  isActionPending={controller.isActionPending}
                 />
               </li>
             ))}
@@ -298,7 +307,9 @@ export default function AgentExperience({
           </Button>
         </div>
         <p className="mt-2 text-center text-[11px] leading-4 text-slate-500">
-          Read-only. ExpenseOps will not post, split, buy, or change anything here.
+          {readOnly
+            ? "Read-only. ExpenseOps will not post, split, buy, or change anything here."
+            : "Actions require an exact preview and a separate confirmation. Purchases remain disabled."}
         </p>
       </form>
       <p className="sr-only" aria-live="polite" aria-atomic="true">{controller.announcement}</p>
@@ -310,6 +321,9 @@ function AgentMessageView({
   message,
   onNavigate,
   onSubmitFeedback,
+  onConfirmAction,
+  onCancelAction,
+  isActionPending,
 }: {
   message: AgentMessage;
   onNavigate?: (request: AgentNavigationRequest) => void;
@@ -317,6 +331,9 @@ function AgentMessageView({
     messagePublicId: string,
     payload: AgentFeedbackCreate,
   ) => Promise<AgentFeedbackOut>;
+  onConfirmAction?: AgentController["confirmAction"];
+  onCancelAction?: AgentController["cancelAction"];
+  isActionPending: AgentController["isActionPending"];
 }) {
   if (message.role === "user") {
     return (
@@ -331,7 +348,13 @@ function AgentMessageView({
     <article className="max-w-[96%] rounded-2xl rounded-bl-md border border-slate-200 bg-white p-4 shadow-sm" aria-label="ExpenseOps Agent response">
       {message.text ? <p className="whitespace-pre-wrap text-sm leading-6 text-slate-800 [overflow-wrap:anywhere]">{message.text}</p> : null}
       {message.structured_response ? (
-        <AgentResponseRenderer response={message.structured_response} onNavigate={onNavigate} />
+        <AgentResponseRenderer
+          response={message.structured_response}
+          onNavigate={onNavigate}
+          onConfirmAction={onConfirmAction}
+          onCancelAction={onCancelAction}
+          isActionPending={isActionPending}
+        />
       ) : null}
       {message.feedback_eligible ? (
         <AgentFeedbackControls

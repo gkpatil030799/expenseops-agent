@@ -333,6 +333,15 @@ def _merge_entity_default(
     else:
         identifier = [public_id]
     values.setdefault(_ENTITY_ID_ARGUMENT[kind], identifier)
+    if kind == "transaction":
+        for action_tool in (
+            "propose_mark_transaction_personal",
+            "propose_post_splitwise_expense",
+        ):
+            target.setdefault(action_tool, {}).setdefault(
+                "transaction_id",
+                identifier,
+            )
     if kind in {"receipt", "household_item"}:
         # Exact-detail input contracts prohibit their broad list filters.
         allowed = {"view", _ENTITY_ID_ARGUMENT[kind]}
