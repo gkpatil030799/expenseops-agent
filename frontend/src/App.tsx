@@ -91,6 +91,11 @@ import {
 } from "@/agent/pageContext";
 
 const AgentExperience = lazy(() => import("@/agent/AgentExperience"));
+const AttentionCenterPage = lazy(() =>
+  import("@/components/AttentionCenterPage").then((module) => ({
+    default: module.AttentionCenterPage,
+  })),
+);
 
 type PlaidWindow = Window & {
   Plaid?: {
@@ -112,9 +117,12 @@ type TransactionActionResponse = { message: string };
 type AccountContext = {
   user: { id: number; email: string; display_name: string; avatar_url?: string | null };
   workspace: { id: number; name: string; workspace_type: string };
-  features?: { agent?: { enabled: boolean; read_only: boolean } };
+  features?: {
+    agent?: { enabled: boolean; read_only: boolean; proactive_enabled?: boolean };
+  };
 };
 type WorkspaceView = "expenses" | "household" | "promotions" | "settings" | "agent";
+type ExpenseTab = "review" | "insights" | "activity" | "attention";
 type ActionNotice = { tone: "success" | "error"; text: string; correlationId?: string };
 
 function splitResponseQueued(response: SplitResponse): boolean {
@@ -156,9 +164,11 @@ function DashboardApp() {
     dateTo: "",
   });
   const [analyticsDays, setAnalyticsDays] = useState(30);
-  const [expenseTab, setExpenseTab] = useState<"review" | "insights" | "activity">(() => {
+  const [expenseTab, setExpenseTab] = useState<ExpenseTab>(() => {
     const value = new URLSearchParams(window.location.search).get("tab");
-    return value === "insights" || value === "activity" ? value : "review";
+    return value === "insights" || value === "activity" || value === "attention"
+      ? value
+      : "review";
   });
   const [syncError, setSyncError] = useState(false);
   const [lastSyncedAt, setLastSyncedAt] = useState<Date | null>(null);
@@ -222,6 +232,9 @@ function DashboardApp() {
   );
   const memory = useMemo(() => memoryForTransactions(allTransactions), [allTransactions]);
   const agentEnabled = Boolean(accountContext?.features?.agent?.enabled);
+  const proactiveAttentionEnabled = Boolean(
+    accountContext?.features?.agent?.proactive_enabled,
+  );
   const currentAgentContextKey = useMemo(
     () => agentPageContextKey(agentSourceContext.pageContext),
     [agentSourceContext.pageContext],
@@ -304,6 +317,17 @@ function DashboardApp() {
   }, [accountContext, activeWorkspace, agentEnabled, authResolved]);
 
   useEffect(() => {
+    if (!authResolved || !accountContext || proactiveAttentionEnabled) return;
+    if (expenseTab !== "attention") return;
+    const params = new URLSearchParams(window.location.search);
+    params.set("workspace", "expenses");
+    params.set("tab", "review");
+    window.history.replaceState({}, "", `/?${params}`);
+    setExpenseTab("review");
+    setAgentSourceContext(baseContextForWorkspace("expenses", "review"));
+  }, [accountContext, authResolved, expenseTab, proactiveAttentionEnabled]);
+
+  useEffect(() => {
     const media = window.matchMedia("(min-width: 1024px)");
     const update = () => setWideAgentPanel(media.matches);
     update();
@@ -356,7 +380,12 @@ function DashboardApp() {
           ? workspace
           : "expenses";
       const tab = params.get("tab");
-      const nextTab = tab === "insights" || tab === "activity" ? tab : "review";
+      const nextTab =
+        tab === "insights" ||
+        tab === "activity" ||
+        (tab === "attention" && proactiveAttentionEnabled)
+          ? tab
+          : "review";
       if (
         nextWorkspace !== "agent"
         && (nextWorkspace !== activeWorkspace || nextTab !== expenseTab)
@@ -370,7 +399,7 @@ function DashboardApp() {
     };
     window.addEventListener("popstate", onPopState);
     return () => window.removeEventListener("popstate", onPopState);
-  }, [activeWorkspace, agentEnabled, expenseTab]);
+  }, [activeWorkspace, agentEnabled, expenseTab, proactiveAttentionEnabled]);
 
   useEffect(() => {
     if (!accountContext) return;
@@ -665,7 +694,8 @@ function DashboardApp() {
     finally { setBusy(null); }
   }
 
-  function changeExpenseTab(tab: "review" | "insights" | "activity") {
+  function changeExpenseTab(tab: ExpenseTab) {
+    if (tab === "attention" && !proactiveAttentionEnabled) return;
     if (activeWorkspace === "expenses" && expenseTab === tab) return;
     const params = new URLSearchParams(window.location.search); params.set("workspace", "expenses"); params.set("tab", tab);
     window.history.pushState({}, "", `/?${params}`);
@@ -1060,7 +1090,11 @@ function DashboardApp() {
         ) : (
           <>
         <Header active={expenseTab} onSync={syncTransactions} busy={busy} pendingCount={transactions.length} pendingTotal={pendingTotal} lastSyncLabel={lastSyncedAt ? relativeTime(lastSyncedAt) : lastSyncLabel} syncError={syncError} />
-        <ExpenseTabs active={expenseTab} onChange={changeExpenseTab}/>
+        <ExpenseTabs
+          active={expenseTab}
+          onChange={changeExpenseTab}
+          showAttention={proactiveAttentionEnabled}
+        />
 
         {expenseTab === "review" ? <div className="space-y-6">
         <ReviewFilters filters={filters} onChange={updateFilter} />
@@ -1177,7 +1211,7 @@ function DashboardApp() {
               onUndo={undoTransaction}
             />
           </section>
-        </div> : expenseTab === "insights" ? <InsightsDashboard onAgentContextChange={publishAgentContext}/> : <ActivityTimeline page={financialActivity} loading={financialActivityLoading} error={financialActivityError} onRetry={() => setFinancialActivityReload((value) => value + 1)} focusedTransactionId={focusedTransactionId} onAgentFocus={setFocusedTransactionId}/>}
+        </div> : expenseTab === "insights" ? <InsightsDashboard onAgentContextChange={publishAgentContext}/> : expenseTab === "activity" ? <ActivityTimeline page={financialActivity} loading={financialActivityLoading} error={financialActivityError} onRetry={() => setFinancialActivityReload((value) => value + 1)} focusedTransactionId={focusedTransactionId} onAgentFocus={setFocusedTransactionId}/> : proactiveAttentionEnabled ? <Suspense fallback={<div className="ui-skeleton min-h-64 rounded-2xl" aria-label="Loading Attention Center" />}><AttentionCenterPage onNavigate={navigateFromAgent}/></Suspense> : null}
           </>
         )}
           </div>
@@ -1376,13 +1410,14 @@ function AgentFullscreenDialog({
 
 function baseContextForWorkspace(
   workspace: WorkspaceView,
-  expenseTab: "review" | "insights" | "activity",
+  expenseTab: ExpenseTab,
 ): AgentContextDescriptor {
   if (workspace === "expenses") {
     const surface = {
       review: "expense_review",
       insights: "expense_insights",
       activity: "expense_activity",
+      attention: "expense_review",
     } as const;
     return baseAgentContext(surface[expenseTab]);
   }
@@ -2124,7 +2159,7 @@ function Header({
   lastSyncLabel,
   syncError,
 }: {
-  active: "review" | "insights" | "activity";
+  active: ExpenseTab;
   onSync: () => void;
   busy: string | null;
   pendingCount: number;
@@ -2145,6 +2180,10 @@ function Header({
       title: "Expense Activity",
       description: "Review recent decisions and return eligible transactions to the queue.",
     },
+    attention: {
+      title: "Attention Center",
+      description: "Review bounded, deterministic signals without starting any action.",
+    },
   }[active];
   return (
     <PageHeader
@@ -2163,8 +2202,11 @@ function Header({
   );
 }
 
-function ExpenseTabs({active,onChange}:{active:"review"|"insights"|"activity";onChange:(value:"review"|"insights"|"activity")=>void}) {
-  return <nav className="flex gap-1 rounded-xl border border-slate-200 bg-white p-1 shadow-sm" aria-label="Expense Review views">{(["review","insights","activity"] as const).map(value=><button key={value} type="button" aria-current={active===value?"page":undefined} onClick={()=>onChange(value)} className={`min-h-11 flex-1 rounded-lg px-4 py-2.5 text-sm font-semibold capitalize transition focus-visible:ring-2 focus-visible:ring-indigo-500 ${active===value?"bg-indigo-600 text-white":"text-slate-600 hover:bg-slate-50 hover:text-slate-950"}`}>{value}</button>)}</nav>
+function ExpenseTabs({active,onChange,showAttention}:{active:ExpenseTab;onChange:(value:ExpenseTab)=>void;showAttention:boolean}) {
+  const tabs: ExpenseTab[] = showAttention
+    ? ["review", "insights", "activity", "attention"]
+    : ["review", "insights", "activity"];
+  return <nav className="flex gap-1 overflow-x-auto rounded-xl border border-slate-200 bg-white p-1 shadow-sm" aria-label="Expense Review views">{tabs.map(value=><button key={value} type="button" aria-current={active===value?"page":undefined} onClick={()=>onChange(value)} className={`min-h-11 min-w-[5.5rem] flex-1 rounded-lg px-3 py-2.5 text-sm font-semibold capitalize transition focus-visible:ring-2 focus-visible:ring-indigo-500 ${active===value?"bg-indigo-600 text-white":"text-slate-600 hover:bg-slate-50 hover:text-slate-950"}`}>{value}</button>)}</nav>
 }
 
 function relativeTime(value: Date) {

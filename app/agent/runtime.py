@@ -2881,10 +2881,51 @@ def _attention_response(
     *,
     current_date: date,
 ) -> AgentStructuredResponse:
+    return compose_proactive_attention_response(
+        bundle.evidence_sets,
+        unavailable_domains=bundle.unavailable_domains,
+        current_date=current_date,
+    )
+
+
+def compose_proactive_attention_response(
+    evidence_sets: Sequence[ReadToolEvidence],
+    *,
+    unavailable_domains: Sequence[EvidenceDomain] = (),
+    current_date: date,
+) -> AgentStructuredResponse:
+    """Compose Day 6 attention semantics from deterministic validated READ evidence.
+
+    The proactive center can check more domains than one model turn without
+    increasing the Agent's three-tool budget because it performs no provider
+    turn and invokes only the existing tenant-bound READ registry.
+    """
+
+    if not evidence_sets:
+        raise AgentRuntimeError(
+            "empty_attention_scope",
+            "At least one attention domain must be checked.",
+        )
+    seen_tools: set[str] = set()
+    for evidence in evidence_sets:
+        if evidence.tool_name not in _TOOL_DOMAIN:
+            raise AgentRuntimeError("ungrounded_response", "Unsupported attention evidence.")
+        if evidence.tool_name in seen_tools:
+            raise AgentRuntimeError("duplicate_evidence_domain", "Duplicate attention evidence.")
+        seen_tools.add(evidence.tool_name)
+    unavailable = [domain for domain in _DOMAIN_ORDER if domain in set(unavailable_domains)]
+    checked = [
+        domain
+        for domain in _DOMAIN_ORDER
+        if domain in {_TOOL_DOMAIN[item.tool_name] for item in evidence_sets}
+    ]
     candidates: list[AgentAttentionItem] = []
     source_projection_truncated = False
     for tool_name in _TOOL_ORDER:
-        evidence = bundle.latest(tool_name)
+        evidence = next(
+            (item for item in reversed(evidence_sets) if item.tool_name == tool_name),
+            None,
+        )
         if evidence is None:
             continue
         source_projection_truncated = source_projection_truncated or _attention_source_truncated(
@@ -2899,9 +2940,6 @@ def _attention_response(
     domain_order = {domain: index for index, domain in enumerate(_DOMAIN_ORDER)}
     candidates.sort(key=lambda item: (priority_order[item.priority], domain_order[item.domain]))
     items = candidates[:MAX_ATTENTION_ITEMS]
-    unavailable = list(bundle.unavailable_domains)
-    checked = list(bundle.checked_domains)
-
     if not items and not unavailable and not source_projection_truncated:
         return AgentStructuredResponse(
             blocks=[
@@ -2978,7 +3016,7 @@ def _attention_items(
         }
         rows = list(output.get("transactions") or [])
         attention_scoped = (
-            evidence.arguments.get("review_type") == "unreviewed"
+            evidence.arguments.get("review_type") in {"unreviewed", "attention"}
             or evidence.arguments.get("review_status") in statuses
         )
         if attention_scoped:

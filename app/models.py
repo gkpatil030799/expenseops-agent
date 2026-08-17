@@ -693,6 +693,61 @@ class AIInterpretationMemory(TenantScoped, Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
 
+class ProactiveAttentionPreference(TenantScoped, Base):
+    __tablename__ = "proactive_attention_preferences"
+    __table_args__ = (
+        UniqueConstraint("workspace_id", "user_id", name="uq_attention_preferences_workspace_user"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    categories_json: Mapped[list] = mapped_column(JSON, default=list)
+    in_app_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    telegram_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    delivery_mode: Mapped[str] = mapped_column(String(16), default="digest")
+    quiet_start_hour: Mapped[int] = mapped_column(Integer, default=22)
+    quiet_end_hour: Mapped[int] = mapped_column(Integer, default=7)
+    timezone: Mapped[str] = mapped_column(String(64), default="UTC")
+    max_alerts_per_day: Mapped[int] = mapped_column(Integer, default=3)
+    cooldown_minutes: Mapped[int] = mapped_column(Integer, default=240)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class ProactiveAttentionDelivery(TenantScoped, Base):
+    __tablename__ = "proactive_attention_deliveries"
+    __table_args__ = (
+        UniqueConstraint(
+            "workspace_id",
+            "user_id",
+            "channel",
+            "dedupe_key",
+            name="uq_attention_delivery_dedupe",
+        ),
+        Index(
+            "ix_attention_delivery_user_delivered",
+            "workspace_id",
+            "user_id",
+            "delivered_at",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    channel: Mapped[str] = mapped_column(String(16))
+    dedupe_key: Mapped[str] = mapped_column(String(64))
+    fingerprint: Mapped[str] = mapped_column(String(64), index=True)
+    attention_count: Mapped[int] = mapped_column(Integer)
+    status: Mapped[str] = mapped_column(String(16), default="pending", index=True)
+    delivered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
 class TelegramSession(TenantScoped, Base):
     __tablename__ = "telegram_sessions"
     __table_args__ = (

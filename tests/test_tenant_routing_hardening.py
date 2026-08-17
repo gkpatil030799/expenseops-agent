@@ -59,6 +59,10 @@ EXPECTED_TENANT_TABLES = {
     "agent_tool_calls",
     "agent_action_proposals",
 }
+DAY13_TENANT_TABLES = {
+    "proactive_attention_preferences",
+    "proactive_attention_deliveries",
+}
 
 EXPECTED_ROUTING_SIGNATURES = {
     "public.expenseops_route_plaid_item(text)",
@@ -97,7 +101,13 @@ def test_tenant_routing_and_policy_hardening_are_linear_head():
         assert scripts.get_revision("20260815_0029").down_revision == "20260815_0028"
         receipt_revision = scripts.get_revision("20260817_0030")
         memory_revision = scripts.get_revision("20260817_0031")
-        if memory_revision is not None:
+        attention_revision = scripts.get_revision("20260817_0032")
+        if attention_revision is not None:
+            assert receipt_revision.down_revision == "20260815_0029"
+            assert memory_revision.down_revision == "20260817_0030"
+            assert attention_revision.down_revision == "20260817_0031"
+            assert scripts.get_current_head() == "20260817_0032"
+        elif memory_revision is not None:
             assert receipt_revision.down_revision == "20260815_0029"
             assert memory_revision.down_revision == "20260817_0030"
             assert scripts.get_current_head() == "20260817_0031"
@@ -199,7 +209,8 @@ def test_policy_hardening_covers_exact_tenant_model_set_without_escape(monkeypat
         for mapper in Base.registry.mappers
         if issubclass(mapper.class_, TenantScoped)
     }
-    assert set(migration.TENANT_TABLES) == EXPECTED_TENANT_TABLES == model_tables
+    assert set(migration.TENANT_TABLES) == EXPECTED_TENANT_TABLES
+    assert model_tables == EXPECTED_TENANT_TABLES | DAY13_TENANT_TABLES
     assert len(migration.TENANT_TABLES) == len(set(migration.TENANT_TABLES)) == 34
     protected_tables = {*migration.TENANT_TABLES, *migration.TENANT_CHILD_POLICIES}
     assert len(migration.TENANT_CHILD_POLICIES) == 7
@@ -236,6 +247,31 @@ def test_policy_hardening_covers_exact_tenant_model_set_without_escape(monkeypat
         assert expected_expression in policy
         assert "EXISTS (SELECT 1 FROM public." in policy
     assert "expenseops.bypass_rls" not in "\n".join(recorder.statements)
+
+
+def test_proactive_attention_migration_force_enables_exact_workspace_rls(monkeypatch):
+    migration = _migration("20260817_0032")
+    recorder = _RecordingOp()
+    monkeypatch.setattr(migration, "op", recorder)
+
+    migration._enable_rls()
+
+    assert set(migration.TENANT_TABLES) == DAY13_TENANT_TABLES
+    assert len(recorder.statements) == len(DAY13_TENANT_TABLES) * 3
+    for table in DAY13_TENANT_TABLES:
+        assert f'ALTER TABLE public."{table}" ENABLE ROW LEVEL SECURITY' in recorder.statements
+        assert f'ALTER TABLE public."{table}" FORCE ROW LEVEL SECURITY' in recorder.statements
+        policy = next(
+            statement
+            for statement in recorder.statements
+            if statement.startswith(
+                f'CREATE POLICY expenseops_workspace_isolation ON public."{table}"'
+            )
+        )
+        assert "USING (workspace_id =" in policy
+        assert "WITH CHECK (workspace_id =" in policy
+        assert "current_setting('expenseops.workspace_id', true)" in policy
+        assert " OR " not in policy
 
 
 @pytest.mark.skipif(

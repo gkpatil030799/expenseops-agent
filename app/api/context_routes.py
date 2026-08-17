@@ -34,6 +34,11 @@ def read_context(db: DbSession, user: CurrentUser, workspace: CurrentWorkspace) 
             "agent": {
                 "enabled": settings.agent_enabled and settings.agent_read_tools_enabled,
                 "read_only": not (settings.agent_enabled and settings.agent_write_actions_enabled),
+                "proactive_enabled": (
+                    settings.agent_enabled
+                    and settings.agent_read_tools_enabled
+                    and settings.agent_proactive_enabled
+                ),
             }
         },
     }

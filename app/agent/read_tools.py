@@ -241,7 +241,7 @@ class TransactionSearchInput(ReadToolModel):
     start_date: str | None = Field(default=None, pattern=r"^\d{4}-\d{2}-\d{2}$")
     end_date: str | None = Field(default=None, pattern=r"^\d{4}-\d{2}-\d{2}$")
     category: str | None = Field(default=None, min_length=1, max_length=100)
-    review_type: Literal["all", "personal", "shared", "unreviewed"] | None = Field(
+    review_type: Literal["all", "personal", "shared", "unreviewed", "attention"] | None = Field(
         default=None,
         description=(
             "Use null unless the user explicitly requests a review scope; the server may apply "
@@ -335,12 +335,13 @@ def build_read_tool_registry(settings: Settings) -> AgentToolRegistry:
             description=(
                 "Return bounded authenticated ExpenseOps transaction rows when the latest user "
                 "message explicitly asks to list, find, show, or identify transaction/charge "
-                "rows, or use unreviewed scope for expense attention."
+                "rows, or use the closed attention scope for review and recovery states."
             ),
             effect=ToolEffect.READ,
             input_model=TransactionSearchInput,
             output_model=TransactionSearchOutput,
             handler=_search_transactions,
+            version="1.1",
         )
     )
     register_household_receipt_tools(registry)
@@ -446,6 +447,18 @@ def _search_transactions(
         criteria.append(ExpenseTransaction.status.in_(_SHARED_TRANSACTION_STATUSES))
     elif values.review_type == "unreviewed":
         criteria.append(ExpenseTransaction.status == TransactionStatus.ASK_USER.value)
+    elif values.review_type == "attention":
+        criteria.append(
+            ExpenseTransaction.status.in_(
+                (
+                    TransactionStatus.ASK_USER.value,
+                    TransactionStatus.POST_AMBIGUOUS.value,
+                    TransactionStatus.UNDO_AMBIGUOUS.value,
+                    TransactionStatus.RECONCILIATION_REQUIRED.value,
+                    TransactionStatus.ERROR.value,
+                )
+            )
+        )
     if values.min_amount_cents is not None:
         criteria.append(ExpenseTransaction.amount_cents >= values.min_amount_cents)
     if values.max_amount_cents is not None:

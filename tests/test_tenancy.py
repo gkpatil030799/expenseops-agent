@@ -228,6 +228,7 @@ def test_context_exposes_only_the_effective_read_only_agent_feature(
     assert response.json()["features"]["agent"] == {
         "enabled": expected,
         "read_only": True,
+        "proactive_enabled": False,
     }
 
 
