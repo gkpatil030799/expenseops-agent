@@ -149,6 +149,11 @@ _STANDALONE_REFERENT = re.compile(
     r"\b(?:this|that|it)\b[?.!\s]*$|\bhere\b",
     re.IGNORECASE,
 )
+_RECEIPT_ACTION_REFERENT = re.compile(
+    r"(?:^|[.!?]\s*|\b(?:and|then|also)\s+)"
+    r"(?:please\s+)?(?:learn|track|map|match|reject|don'?t\s+track)\b",
+    re.IGNORECASE,
+)
 
 
 def build_contextual_tool_policy(
@@ -166,7 +171,13 @@ def build_contextual_tool_policy(
     current = _surface_filter_defaults(page_context)
     requested_kind = _requested_entity_kind(text)
     has_described_target = _DESCRIBED_REFERENT.search(text) is not None
-    referential = _is_referential(text)
+    implicit_receipt_action = bool(
+        page_context is not None
+        and page_context.entity is not None
+        and page_context.entity.kind == "receipt"
+        and _RECEIPT_ACTION_REFERENT.search(text)
+    )
+    referential = _is_referential(text) or implicit_receipt_action
     if not referential:
         return ContextualToolPolicy(current_defaults=current)
 
@@ -342,6 +353,11 @@ def _merge_entity_default(
                 "transaction_id",
                 identifier,
             )
+    elif kind == "receipt":
+        target.setdefault("propose_receipt_learning_batch", {}).setdefault(
+            "receipt_id",
+            identifier,
+        )
     if kind in {"receipt", "household_item"}:
         # Exact-detail input contracts prohibit their broad list filters.
         allowed = {"view", _ENTITY_ID_ARGUMENT[kind]}

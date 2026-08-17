@@ -446,6 +446,7 @@ async function mockHouseholdItem(page: Page): Promise<void> {
     preferred_place_address: null,
     replenishment_mode: "either",
     cadence_days: 30,
+    cadence_source: "configured",
     last_acquired_at: "2026-07-12T12:00:00Z",
     snoozed_until: null,
     enabled: true,

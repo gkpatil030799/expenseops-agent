@@ -13,6 +13,7 @@ from app.models import (
     ErrandSource,
     ErrandStatus,
     ErrandType,
+    HouseholdCadenceSource,
     HouseholdItem,
     ReplenishmentMode,
     utc_now,
@@ -23,11 +24,11 @@ from app.services.errand_service import ErrandService, HouseholdOpsNotFound
 
 def due_score(
     last_acquired_at: datetime | None,
-    cadence_days: int,
+    cadence_days: int | None,
     *,
     now: datetime | None = None,
 ) -> float:
-    if last_acquired_at is None:
+    if last_acquired_at is None or cadence_days is None:
         return 0.0
     if cadence_days <= 0:
         raise ValueError("cadence_days must be positive")
@@ -62,6 +63,7 @@ class ReplenishmentService:
         return item
 
     def create_item(self, values: dict) -> HouseholdItem:
+        values.setdefault("cadence_source", HouseholdCadenceSource.CONFIGURED.value)
         item = HouseholdItem(**values)
         self.db.add(item)
         self.db.commit()
@@ -70,6 +72,12 @@ class ReplenishmentService:
 
     def update_item(self, item_id: int, values: dict) -> HouseholdItem:
         item = self.get_item(item_id)
+        if "cadence_days" in values:
+            values["cadence_source"] = (
+                HouseholdCadenceSource.CONFIGURED.value
+                if values["cadence_days"] is not None
+                else HouseholdCadenceSource.LEARNING.value
+            )
         for field, value in values.items():
             setattr(item, field, value)
         item.updated_at = utc_now()
@@ -245,12 +253,16 @@ class ReplenishmentService:
             "preferred_place_address": item.preferred_place_address,
             "replenishment_mode": item.replenishment_mode,
             "cadence_days": item.cadence_days,
+            "cadence_source": item.cadence_source,
             "last_acquired_at": item.last_acquired_at,
             "snoozed_until": item.snoozed_until,
             "enabled": item.enabled,
             "notes": item.notes,
             "due_score": score,
-            "due_state": due_state(score, has_history=item.last_acquired_at is not None),
+            "due_state": due_state(
+                score,
+                has_history=item.last_acquired_at is not None and item.cadence_days is not None,
+            ),
             "should_surface": self.should_surface(item, now=now),
             "linked_errand_id": linked.id if linked else None,
             "created_at": item.created_at,

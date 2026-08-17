@@ -161,8 +161,7 @@ def list_receipts(
         stmt = stmt.where(PurchaseReceipt.parse_status.in_(["confirmed", "ignored"]))
     total = db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
     receipts = db.execute(
-        stmt
-        .options(
+        stmt.options(
             selectinload(PurchaseReceipt.items).selectinload(PurchaseReceiptItem.household_item),
             selectinload(PurchaseReceipt.items).selectinload(PurchaseReceiptItem.acquisition),
         )
@@ -411,6 +410,9 @@ def _receipt_dict(receipt: PurchaseReceipt) -> dict:
                 "acquisition_id": line.acquisition.id if line.acquisition else None,
                 "match_status": line.match_status,
                 "match_confidence": line.match_confidence,
+                "classification": line.classification,
+                "classification_confidence": line.classification_confidence,
+                "canonical_name": line.canonical_name,
             }
             for line in receipt.items
         ],

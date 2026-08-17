@@ -134,7 +134,7 @@ def test_registry_exposes_only_two_strict_read_tools_and_rejects_invalid_views(
 ):
     factory, contexts = household_receipt_database
     registry = _registry()
-    assert registry.get("get_receipts").version == "1.1"
+    assert registry.get("get_receipts").version == "1.2"
     metadata = registry.metadata()
 
     assert {item.name for item in metadata} == {
@@ -582,6 +582,7 @@ def test_receipt_views_are_bounded_parent_scoped_and_keep_hostile_text_inert(
     assert [item["public_id"] for item in literal_search["receipts"]] == [str(needs_review.id)]
 
     assert detail["receipt"]["lines"][0] == {
+        "public_id": str(lines[0].id),
         "name": hostile_line,
         "quantity": 12.0,
         "unit": "roll",
@@ -589,6 +590,9 @@ def test_receipt_views_are_bounded_parent_scoped_and_keep_hostile_text_inert(
         "match_status": "matched",
         "household_item_name": hostile_item_name,
         "household_item_public_id": str(tracked.id),
+        "classification": "uncertain",
+        "classification_confidence": 0.0,
+        "canonical_name": None,
         "confirmed_acquisition": True,
     }
     assert detail["total_count"] == MAX_RECEIPT_LINE_RESULTS + 2

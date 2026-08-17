@@ -543,7 +543,11 @@ class AgentActionPreview(StrictAgentModel):
 class AgentActionConfirmationBlock(AgentActionPreview):
     block_id: str | None = Field(default=None, min_length=1, max_length=100)
     type: Literal["action_confirmation"] = "action_confirmation"
-    action: Literal["mark_transaction_personal", "post_splitwise_expense"]
+    action: Literal[
+        "mark_transaction_personal",
+        "post_splitwise_expense",
+        "apply_receipt_learning_batch",
+    ]
     proposal_id: str = Field(min_length=1, max_length=128)
     proposal_version: int = Field(ge=1)
     status: Literal[

@@ -288,6 +288,14 @@ class WhileOutService:
                     continue
                 if item.snoozed_until and _aware(item.snoozed_until) > _aware(now):
                     continue
+                if item.cadence_days is None:
+                    excluded.append(
+                        _excluded_item(
+                            item,
+                            "Still learning its purchase interval; it is not marked due yet.",
+                        )
+                    )
+                    continue
                 if score < 0.7:
                     excluded.append(
                         _excluded_item(
@@ -757,10 +765,7 @@ def _errand_has_resolved_place(errand: Errand) -> bool:
         and errand.resolved_place_address
         and (
             errand.resolved_provider_place_id
-            or (
-                errand.resolved_latitude is not None
-                and errand.resolved_longitude is not None
-            )
+            or (errand.resolved_latitude is not None and errand.resolved_longitude is not None)
         )
     )
 

@@ -143,7 +143,7 @@ def benchmark_scenarios() -> tuple[BenchmarkScenario, ...]:
         "get_receipts",
         {"view": "needs_review", "limit": 10, "line_limit": 25},
         _receipt_output(),
-        tool_version="1.1",
+        tool_version="1.2",
     )
     errands = SeedEvidence(
         "get_errands_and_plan",

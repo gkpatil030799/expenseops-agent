@@ -406,7 +406,11 @@ export function parseAgentActionConfirmation(
   ]);
   if (block.type !== "action_confirmation") throw new AgentProtocolError();
   requireNullableString(block.block_id, 100);
-  requireOneOf(block.action, ["mark_transaction_personal", "post_splitwise_expense"]);
+  requireOneOf(block.action, [
+    "mark_transaction_personal",
+    "post_splitwise_expense",
+    "apply_receipt_learning_batch",
+  ]);
   requireString(block.title, 160);
   requireString(block.summary, 1_000);
   if (!Array.isArray(block.details) || block.details.length > 25) {

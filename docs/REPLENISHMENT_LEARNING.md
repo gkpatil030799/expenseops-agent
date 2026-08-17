@@ -7,6 +7,7 @@ The pipeline is intentionally modular:
 ```text
 Telegram attachment / Gmail message
   -> ReceiptParser (OpenAI vision/text or replaceable provider)
+  -> ReceiptLearningService (closed classification and candidate policy)
   -> ReceiptIngestionService (idempotency, Plaid reconciliation)
   -> ItemNormalizationService (raw description, canonical text, learned aliases)
   -> AcquisitionService (immutable confirmed events and feedback)
@@ -33,6 +34,10 @@ Migration `20260809_0008` creates:
 
 Existing `HouseholdItem.last_acquired_at` remains as a compatibility projection of the newest
 confirmed, non-void acquisition. Undo recomputes it; history is never overwritten.
+
+Migration `20260817_0030` adds zero-setup learning: receipt-line classification evidence and a
+truthful `configured|learning|observed|adaptive` cadence source. Newly confirmed receipt candidates
+may have `cadence_days=null`; see [Zero-Setup Receipt Learning](ZERO_SETUP_RECEIPT_LEARNING.md).
 
 ## Source flows
 
@@ -71,12 +76,13 @@ evidence.
 
 ## Prediction and model behavior
 
-Sparse history uses configured cadence. With intervals, the explainable baseline blends median and
-recency-weighted median. Still have / Skip / Too early feedback adjusts cadence by 5% of configured
-cadence per event, capped at 25% by default; real acquisitions always reset and outweigh this weak
-evidence. Known count, roll, volume, and weight units are normalized only at 0.8+ extraction
-confidence. Ambiguous packages stay unknown, and quantity enters model features only after two
-comparable observations.
+Manually configured items use configured cadence. Receipt-created items start in Learning with no
+invented cadence and do not surface as due after one purchase. The second confirmed purchase
+establishes an observed interval; subsequent intervals use the robust adaptive baseline. Still have
+/ Skip / Too early feedback adjusts a known cadence by 5% per event, capped at 25% by default; real
+acquisitions always reset and outweigh this weak evidence. Known count, roll, volume, and weight
+units are normalized only at 0.8+ extraction confidence. Ambiguous packages stay unknown, and
+quantity enters model features only after two comparable observations.
 
 The optional model is one global standardized ridge regression. Ridge was chosen because this is a
 small, correlated tabular dataset for one household: it is deterministic, fast, interpretable, stores
@@ -164,9 +170,11 @@ npm run lint
 npm run build
 ```
 
-Start the app, add a Household staple, send the bot a clear store receipt image, correct any match,
-confirm it, and verify Recent receipts and Learning from purchases. Use Refresh predictions or the
-manual job to populate This week. Gmail can be tested only after the OAuth variables above exist.
+Start the app, send the bot a clear store receipt image, review the proposed known matches/new
+Learning items/non-trackable lines as one batch, confirm it, and verify Recent receipts and Learning
+from purchases. Manual staple creation remains available but is no longer required for safe receipt
+candidates. Use Refresh predictions or the manual job to populate This week after enough evidence.
+Gmail can be tested only after the OAuth variables above exist.
 
 ## Privacy and limitations
 

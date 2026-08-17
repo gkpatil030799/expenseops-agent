@@ -5,6 +5,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from sqlalchemy import func, or_, select
+from sqlalchemy.orm import selectinload
 
 from app.agent.tooling import (
     AgentActionClarificationRequired,
@@ -13,9 +14,18 @@ from app.agent.tooling import (
     AgentToolRegistry,
     ToolEffect,
 )
-from app.models import ExpenseTransaction, SplitwiseIntegration, TransactionStatus
+from app.models import (
+    ExpenseTransaction,
+    HouseholdItem,
+    PurchaseReceipt,
+    PurchaseReceiptItem,
+    ReceiptParseStatus,
+    SplitwiseIntegration,
+    TransactionStatus,
+)
 from app.services.agent_service import friend_display_name, transaction_display_name
 from app.services.entity_resolution_service import EntityResolutionService
+from app.services.receipt_learning_service import analyze_receipt_learning
 from app.services.share_calculator import cents_to_decimal_string
 from app.services.splitwise_service import SplitwiseAPIError, SplitwiseService
 from app.services.transaction_service import TransactionError, TransactionService
@@ -23,6 +33,8 @@ from app.services.transaction_service import TransactionError, TransactionServic
 MAX_TRANSACTION_ENTITY_ID = 2_147_483_647
 MARK_PERSONAL_TOOL_NAME = "propose_mark_transaction_personal"
 POST_SPLITWISE_TOOL_NAME = "propose_post_splitwise_expense"
+RECEIPT_LEARNING_TOOL_NAME = "propose_receipt_learning_batch"
+MAX_RECEIPT_ACTION_LINES = 20
 
 
 class ActionToolModel(BaseModel):
@@ -113,6 +125,65 @@ class ActionProposalToolOutput(ActionToolModel):
     proposal_version: int | None = Field(default=None, ge=1)
 
 
+class ReceiptLearningEditInput(ActionToolModel):
+    line_id: int = Field(ge=1, le=MAX_TRANSACTION_ENTITY_ID)
+    decision: Literal[
+        "match_existing",
+        "create_tracked_item",
+        "do_not_track",
+        "leave_undecided",
+    ]
+    household_item_id: int | None = Field(default=None, ge=1, le=MAX_TRANSACTION_ENTITY_ID)
+
+
+class ReceiptLearningBatchInput(ActionToolModel):
+    receipt_id: int | None = Field(default=None, ge=1, le=MAX_TRANSACTION_ENTITY_ID)
+    edits: list[ReceiptLearningEditInput] = Field(
+        default_factory=list,
+        max_length=MAX_RECEIPT_ACTION_LINES,
+    )
+
+    @model_validator(mode="after")
+    def require_receipt(self) -> ReceiptLearningBatchInput:
+        if self.receipt_id is None:
+            raise ValueError("select exactly one receipt to review")
+        if len({edit.line_id for edit in self.edits}) != len(self.edits):
+            raise ValueError("each receipt line can be edited only once")
+        return self
+
+
+class ReceiptLearningLineProposal(ActionToolModel):
+    line_id: int = Field(ge=1, le=MAX_TRANSACTION_ENTITY_ID)
+    decision: Literal[
+        "match_existing",
+        "create_tracked_item",
+        "do_not_track",
+        "leave_undecided",
+    ]
+    household_item_id: int | None = Field(default=None, ge=1, le=MAX_TRANSACTION_ENTITY_ID)
+    canonical_name: str | None = Field(default=None, min_length=1, max_length=255)
+    classification: Literal[
+        "replenishable_household",
+        "perishable_grocery",
+        "routine_consumption",
+        "dining_or_experience",
+        "one_time_purchase",
+        "non_product_line",
+        "uncertain",
+    ]
+
+
+class ReceiptLearningBatchProposal(ActionToolModel):
+    action: Literal["apply_receipt_learning_batch"] = "apply_receipt_learning_batch"
+    receipt_id: int = Field(ge=1, le=MAX_TRANSACTION_ENTITY_ID)
+    expected_parse_status: Literal["needs_review"] = "needs_review"
+    expected_updated_at: datetime
+    decisions: list[ReceiptLearningLineProposal] = Field(
+        min_length=1,
+        max_length=MAX_RECEIPT_ACTION_LINES,
+    )
+
+
 def register_action_tools(registry: AgentToolRegistry) -> None:
     registry.register(
         AgentTool(
@@ -154,6 +225,203 @@ def register_action_tools(registry: AgentToolRegistry) -> None:
             version="1.0",
         )
     )
+    registry.register(
+        AgentTool(
+            name=RECEIPT_LEARNING_TOOL_NAME,
+            description=(
+                "Prepare, but never execute, one receipt-learning batch for an exact receipt. "
+                "Use when the user asks to learn, track, map, or reject receipt items. The "
+                "server owns classifications, canonical names, defaults, and validation."
+            ),
+            effect=ToolEffect.WRITE,
+            input_model=ReceiptLearningBatchInput,
+            output_model=ActionProposalToolOutput,
+            confirmation_required=True,
+            proposal_model=ReceiptLearningBatchProposal,
+            proposal_builder=_normalize_receipt_learning,
+            preview_builder=_preview_receipt_learning,
+            handler=_consequential_handler_must_not_run,
+            version="1.0",
+        )
+    )
+
+
+def _normalize_receipt_learning(
+    context: AgentToolContext,
+    values: ReceiptLearningBatchInput,
+) -> dict:
+    receipt = context.db.scalar(
+        select(PurchaseReceipt)
+        .options(
+            selectinload(PurchaseReceipt.items).selectinload(PurchaseReceiptItem.household_item)
+        )
+        .where(
+            PurchaseReceipt.workspace_id == context.workspace_id,
+            PurchaseReceipt.id == values.receipt_id,
+        )
+    )
+    if receipt is None:
+        raise AgentActionClarificationRequired(
+            "That receipt is not available.", code="action_target_not_found"
+        )
+    if receipt.parse_status != ReceiptParseStatus.NEEDS_REVIEW.value:
+        raise AgentActionClarificationRequired(
+            "That receipt no longer needs review.", code="action_target_changed"
+        )
+    if len(receipt.items) > MAX_RECEIPT_ACTION_LINES:
+        raise AgentActionClarificationRequired(
+            "This receipt has too many lines for a complete Agent preview. Open receipt review "
+            "to inspect and confirm every line.",
+            code="action_preview_too_large",
+        )
+    suggestions = {item.line_id: item for item in analyze_receipt_learning(receipt)}
+    edits = {edit.line_id: edit for edit in values.edits}
+    if any(line_id not in suggestions for line_id in edits):
+        raise AgentActionClarificationRequired(
+            "One edited receipt line is no longer available.", code="action_target_changed"
+        )
+    decisions = []
+    for line in receipt.items:
+        suggestion = suggestions[line.id]
+        edit = edits.get(line.id)
+        decision = edit.decision if edit else suggestion.decision
+        item_id = edit.household_item_id if edit else suggestion.household_item_id
+        if edit and decision == "create_tracked_item" and suggestion.decision != decision:
+            raise AgentActionClarificationRequired(
+                "That receipt line is not eligible to become a tracked item.",
+                code="action_not_available",
+            )
+        if (
+            edit
+            and decision == "match_existing"
+            and (suggestion.household_item_id is None or item_id != suggestion.household_item_id)
+        ):
+            raise AgentActionClarificationRequired(
+                "That receipt line does not have the requested safe item match.",
+                code="action_target_not_found",
+            )
+        if decision == "match_existing":
+            if item_id is None:
+                raise AgentActionClarificationRequired(
+                    "Choose an existing household item for that match.",
+                    code="action_target_required",
+                )
+            item = context.db.scalar(
+                select(HouseholdItem).where(
+                    HouseholdItem.workspace_id == context.workspace_id,
+                    HouseholdItem.id == item_id,
+                    HouseholdItem.enabled.is_(True),
+                )
+            )
+            if item is None:
+                raise AgentActionClarificationRequired(
+                    "That household item is not available.", code="action_target_not_found"
+                )
+        else:
+            item_id = None
+        canonical_name = suggestion.canonical_name if decision == "create_tracked_item" else None
+        if decision == "create_tracked_item" and not canonical_name:
+            raise AgentActionClarificationRequired(
+                "That line needs a safe household-item name before it can be tracked.",
+                code="canonical_name_required",
+            )
+        decisions.append(
+            {
+                "line_id": line.id,
+                "decision": decision,
+                "household_item_id": item_id,
+                "canonical_name": canonical_name,
+                "classification": suggestion.classification,
+            }
+        )
+    return {
+        "action": "apply_receipt_learning_batch",
+        "receipt_id": receipt.id,
+        "expected_parse_status": "needs_review",
+        "expected_updated_at": receipt.updated_at,
+        "decisions": decisions,
+    }
+
+
+def _preview_receipt_learning(
+    context: AgentToolContext,
+    values: ReceiptLearningBatchProposal,
+) -> dict:
+    receipt = context.db.scalar(
+        select(PurchaseReceipt)
+        .options(
+            selectinload(PurchaseReceipt.items).selectinload(PurchaseReceiptItem.household_item)
+        )
+        .where(
+            PurchaseReceipt.workspace_id == context.workspace_id,
+            PurchaseReceipt.id == values.receipt_id,
+        )
+    )
+    if (
+        receipt is None
+        or receipt.parse_status != values.expected_parse_status
+        or receipt.updated_at != values.expected_updated_at
+    ):
+        raise AgentActionClarificationRequired(
+            "That receipt changed while the review was prepared. Please try again.",
+            code="action_target_changed",
+        )
+    counts = {
+        decision: sum(item.decision == decision for item in values.decisions)
+        for decision in (
+            "match_existing",
+            "create_tracked_item",
+            "do_not_track",
+            "leave_undecided",
+        )
+    }
+    line_by_id = {line.id: line for line in receipt.items}
+    line_details = []
+    for index, decision in enumerate(values.decisions, start=1):
+        line = line_by_id.get(decision.line_id)
+        if line is None:
+            raise AgentActionClarificationRequired(
+                "A receipt line changed while the review was prepared.",
+                code="action_target_changed",
+            )
+        if decision.decision == "match_existing":
+            target_item = context.db.scalar(
+                select(HouseholdItem).where(
+                    HouseholdItem.workspace_id == context.workspace_id,
+                    HouseholdItem.id == decision.household_item_id,
+                )
+            )
+            if target_item is None:
+                raise AgentActionClarificationRequired(
+                    "A selected household item changed while the review was prepared.",
+                    code="action_target_changed",
+                )
+            target = target_item.name
+            effect = f"{line.raw_name} → {target}"
+        elif decision.decision == "create_tracked_item":
+            effect = f"{line.raw_name} → {decision.canonical_name} (Learning)"
+        elif decision.decision == "do_not_track":
+            effect = f"{line.raw_name} — do not track"
+        else:
+            effect = f"{line.raw_name} — leave undecided"
+        line_details.append({"label": f"Item {index}", "value": effect[:500]})
+    return {
+        "title": "Learn household items from this receipt",
+        "summary": (
+            "Review one frozen batch. New items start in Learning with no invented cadence; "
+            "nothing changes until you confirm."
+        ),
+        "details": [
+            {"label": "Merchant", "value": receipt.merchant_raw or "Unknown merchant"},
+            {"label": "Known matches", "value": str(counts["match_existing"])},
+            {"label": "New Learning items", "value": str(counts["create_tracked_item"])},
+            {"label": "Not tracked", "value": str(counts["do_not_track"])},
+            {"label": "Needs input", "value": str(counts["leave_undecided"])},
+            *line_details,
+        ],
+        "confirm_label": "Confirm selected",
+        "cancel_label": "Cancel",
+    }
 
 
 def _normalize_mark_personal(

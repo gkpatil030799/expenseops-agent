@@ -95,7 +95,12 @@ def test_tenant_routing_and_policy_hardening_are_linear_head():
     assert scripts.get_revision("20260815_0028").down_revision == "20260815_0027"
     if HAS_POLICY_HARDENING:
         assert scripts.get_revision("20260815_0029").down_revision == "20260815_0028"
-        assert scripts.get_current_head() == "20260815_0029"
+        next_revision = scripts.get_revision("20260817_0030")
+        if next_revision is not None:
+            assert next_revision.down_revision == "20260815_0029"
+            assert scripts.get_current_head() == "20260817_0030"
+        else:
+            assert scripts.get_current_head() == "20260815_0029"
     else:
         assert scripts.get_current_head() == "20260815_0028"
 

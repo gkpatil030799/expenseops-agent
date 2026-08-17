@@ -301,7 +301,15 @@ export function HouseholdOpsPage({
     } else if (destinationView === "staples" && entity.kind === "household_item") {
       setFocusedItemId(items.some((item) => item.id === requestedId) ? requestedId : null);
     } else if (destinationView === "receipts" && entity.kind === "receipt") {
-      setReviewingReceiptId(receiptQueue.some((receipt) => receipt.id === requestedId) ? requestedId : null);
+      const receipt = receiptQueue.find((candidate) => candidate.id === requestedId);
+      if (receipt) {
+        const defaults = defaultReceiptLearningDecisions(receipt);
+        setReceiptDecisionDrafts((current) => ({
+          ...current,
+          [receipt.id]: { ...defaults, ...(current[receipt.id] || {}) },
+        }));
+      }
+      setReviewingReceiptId(receipt ? requestedId : null);
     }
   }, [activeErrands, agentNavigationRequest, busy, items, receiptQueue]);
 
@@ -318,6 +326,14 @@ export function HouseholdOpsPage({
   }
 
   function reviewReceipt(receiptId: number) {
+    const receipt = receiptQueue.find((candidate) => candidate.id === receiptId);
+    if (receipt) {
+      const defaults = defaultReceiptLearningDecisions(receipt);
+      setReceiptDecisionDrafts((current) => ({
+        ...current,
+        [receipt.id]: { ...defaults, ...(current[receipt.id] || {}) },
+      }));
+    }
     setReviewingReceiptId(receiptId);
     setFocusedErrandId(null);
     setFocusedItemId(null);
@@ -438,7 +454,7 @@ export function HouseholdOpsPage({
         preferred_place_name: nullable(itemForm.preferred_place_name),
         preferred_place_address: nullable(itemForm.preferred_place_address),
         replenishment_mode: itemForm.replenishment_mode,
-        cadence_days: Number(itemForm.cadence_days),
+        cadence_days: itemForm.cadence_days ? Number(itemForm.cadence_days) : null,
         last_acquired_at: toIso(itemForm.last_acquired_at),
         notes: nullable(itemForm.notes),
       };
@@ -549,7 +565,7 @@ export function HouseholdOpsPage({
         receiptId: receipt.id,
         lineId: line.id,
         name: line.raw_name,
-        cadence_days: "30",
+        cadence_days: "",
         replenishment_mode: "either",
       });
       return;
@@ -579,7 +595,7 @@ export function HouseholdOpsPage({
         receiptId: receipt.id,
         lineId: line.id,
         name: line.raw_name,
-        cadence_days: "30",
+        cadence_days: "",
         replenishment_mode: "either",
       });
       return;
@@ -605,7 +621,6 @@ export function HouseholdOpsPage({
         line_id: receiptItemDraft.lineId,
         decision: "create",
         name: receiptItemDraft.name.trim(),
-        cadence_days: Number(receiptItemDraft.cadence_days),
         replenishment_mode: receiptItemDraft.replenishment_mode,
       };
       setReceiptDecisionDrafts((current) => ({
@@ -623,7 +638,6 @@ export function HouseholdOpsPage({
           method: "POST",
           body: JSON.stringify({
             name: receiptItemDraft.name.trim(),
-            cadence_days: Number(receiptItemDraft.cadence_days),
             replenishment_mode: receiptItemDraft.replenishment_mode,
           }),
         },
@@ -986,7 +1000,7 @@ export function HouseholdOpsPage({
       preferred_place_name: item.preferred_place_name || "",
       preferred_place_address: item.preferred_place_address || "",
       replenishment_mode: item.replenishment_mode,
-      cadence_days: item.cadence_days.toString(),
+      cadence_days: item.cadence_days?.toString() || "",
       last_acquired_at: toLocalInput(item.last_acquired_at),
       notes: item.notes || "",
     });
@@ -1328,7 +1342,7 @@ export function HouseholdOpsPage({
                         <span className="truncate text-sm font-semibold text-slate-900">{item.name}</span>
                         {!item.enabled ? <Badge variant="secondary">Disabled</Badge> : null}
                       </div>
-                      <p className="mt-1 truncate text-xs text-slate-600">Every {item.cadence_days} days · {item.preferred_place_name || "No preferred store"}</p>
+                      <p className="mt-1 truncate text-xs text-slate-600">{item.cadence_days ? `${item.cadence_source === "configured" ? "Every" : "Observed about every"} ${item.cadence_days} days` : "Learning — not enough purchase history yet"} · {item.preferred_place_name || "No preferred store"}</p>
                     </div>
                     <div className="flex shrink-0 gap-1">
                       <button type="button" onClick={() => focusItemForAgent(item.id)} aria-pressed={focusedItemId === item.id} aria-label={`Use ${item.name} as Agent context`} data-testid={`agent-context-household-item-${item.id}`} className={`inline-flex h-11 w-11 items-center justify-center rounded-lg transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500 ${focusedItemId === item.id ? "bg-indigo-100 text-indigo-700" : "text-slate-500 hover:bg-slate-100 hover:text-slate-900"}`}><Bot className="h-4 w-4" aria-hidden="true" /></button>
@@ -1741,6 +1755,9 @@ function ReceiptItemsEditor({ receipt, items, draft, decisions, busy, onDraft, o
   return <div className="grid gap-3 sm:grid-cols-2">{receipt.items.map((line) => {
     const creatingThisItem = draft?.lineId === line.id;
     const staged = decisions?.[line.id];
+    const stagedItem = staged?.decision === "match"
+      ? items.find((item) => item.id === staged.household_item_id)
+      : null;
     const selectedValue = creatingThisItem || staged?.decision === "create"
       ? "create"
       : staged?.decision === "reject"
@@ -1754,7 +1771,12 @@ function ReceiptItemsEditor({ receipt, items, draft, decisions, busy, onDraft, o
               : line.household_item_id?.toString() || "";
     return <div key={line.id} className={`grid gap-1 rounded-lg ${creatingThisItem ? "border border-indigo-200 bg-indigo-50/50 p-3" : staged ? "border border-indigo-100 bg-indigo-50/30 p-3" : ""}`}>
       <label className="grid gap-1 text-xs font-medium text-slate-700"><span className="truncate">{line.raw_name}</span><select className={controlClass} value={selectedValue} onChange={(event) => onMatch(receipt, line, event.target.value)} disabled={["ignored", "failed"].includes(receipt.parse_status) || busy} aria-label={`Match ${line.raw_name}`}><option value="">Unmatched — decide later</option>{items.map((item) => <option key={item.id} value={item.id}>Match to: {item.name}</option>)}<option value="create">＋ Track as a new household item…</option><option value="reject">Not a household item</option></select></label>
-      {creatingThisItem && draft ? <div className="mt-2 grid gap-2"><p className="text-xs leading-5 text-slate-600">Give this staple a reusable name and starting cadence.</p><Input value={draft.name} onChange={(event) => onDraft((current) => current ? { ...current, name: event.target.value } : current)} placeholder="Household item name" /><div className="grid gap-2 sm:grid-cols-2"><label className="grid gap-1 text-xs font-medium text-slate-700">Starting cadence (days)<Input type="number" min="1" max="3650" value={draft.cadence_days} onChange={(event) => onDraft((current) => current ? { ...current, cadence_days: event.target.value } : current)} /></label><label className="grid gap-1 text-xs font-medium text-slate-700">How to replenish<select className={controlClass} value={draft.replenishment_mode} onChange={(event) => onDraft((current) => current ? { ...current, replenishment_mode: event.target.value as HouseholdItem["replenishment_mode"] } : current)}><option value="either">Errand or delivery</option><option value="errand">Errand</option><option value="delivery">Delivery</option></select></label></div><div className="flex justify-end gap-2"><Button size="sm" variant="outline" onClick={() => onDraft(null)}>Cancel</Button><Button size="sm" onClick={onTrack} disabled={!draft.name.trim() || !Number(draft.cadence_days) || busy}><Plus className="h-3.5 w-3.5" />Create & match</Button></div></div> : null}
+      {staged?.decision === "create" ? <p className="text-xs leading-5 text-indigo-700">Recommended: track as <strong>{staged.name}</strong>. It starts in Learning with no guessed cadence.</p> : null}
+      {staged?.decision === "match" ? <p className="text-xs leading-5 text-amber-700">Suggested match to <strong>{stagedItem?.name || "the selected item"}</strong>—included only if you confirm this batch.</p> : null}
+      {!staged && line.match_status === "matched" ? <p className="text-xs leading-5 text-emerald-700">Matched automatically to {line.household_item_name}.</p> : null}
+      {!staged && line.match_status === "possible" ? <p className="text-xs leading-5 text-amber-700">Suggested match—please verify before confirming.</p> : null}
+      {!staged && line.match_status === "irrelevant" ? <p className="text-xs leading-5 text-slate-500">Not tracked · {receiptClassificationLabel(line.classification)}</p> : null}
+      {creatingThisItem && draft ? <div className="mt-2 grid gap-2"><p className="text-xs leading-5 text-slate-600">Confirm a reusable staple name. ExpenseOps will learn timing from future purchases—no cadence guess required.</p><Input value={draft.name} onChange={(event) => onDraft((current) => current ? { ...current, name: event.target.value } : current)} placeholder="Household item name" /><label className="grid gap-1 text-xs font-medium text-slate-700">How to replenish<select className={controlClass} value={draft.replenishment_mode} onChange={(event) => onDraft((current) => current ? { ...current, replenishment_mode: event.target.value as HouseholdItem["replenishment_mode"] } : current)}><option value="either">Errand or delivery</option><option value="errand">Errand</option><option value="delivery">Delivery</option></select></label><div className="flex justify-end gap-2"><Button size="sm" variant="outline" onClick={() => onDraft(null)}>Cancel</Button><Button size="sm" onClick={onTrack} disabled={!draft.name.trim() || busy}><Plus className="h-3.5 w-3.5" />Track in Learning</Button></div></div> : null}
       {line.acquisition_id ? <button type="button" className="justify-self-start rounded text-xs font-semibold text-rose-700 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500" onClick={() => onUndo(receipt, line.acquisition_id!)}>Undo learned purchase</button> : null}
     </div>;
   })}</div>;
@@ -1779,15 +1801,55 @@ function receiptDecisionSummary(
   return { tracked, ignored, undecided, total: receipt.items.length };
 }
 
+function defaultReceiptLearningDecisions(
+  receipt: PurchaseReceipt,
+): Record<number, ReceiptLineDecisionDraft> {
+  const defaults: Record<number, ReceiptLineDecisionDraft> = {};
+  for (const line of receipt.items) {
+    if (line.match_status === "possible" && line.household_item_id !== null) {
+      defaults[line.id] = {
+        line_id: line.id,
+        decision: "match",
+        household_item_id: line.household_item_id,
+      };
+    } else if (
+      line.match_status === "unmatched"
+      && ["replenishable_household", "perishable_grocery"].includes(line.classification || "")
+      && (line.classification_confidence || 0) >= 0.75
+      && line.canonical_name
+    ) {
+      defaults[line.id] = {
+        line_id: line.id,
+        decision: "create",
+        name: line.canonical_name,
+        replenishment_mode: "either",
+      };
+    }
+  }
+  return defaults;
+}
+
+function receiptClassificationLabel(classification: PurchaseReceipt["items"][number]["classification"]) {
+  return {
+    replenishable_household: "replenishable household item",
+    perishable_grocery: "perishable grocery",
+    routine_consumption: "routine consumption",
+    dining_or_experience: "dining or experience",
+    one_time_purchase: "one-time purchase",
+    non_product_line: "non-product line",
+    uncertain: "uncertain line",
+  }[classification || "uncertain"];
+}
+
 function ItemEditor({ form, setForm, editing, busy, onSave, onCancel }: { form: ItemForm; setForm: React.Dispatch<React.SetStateAction<ItemForm>>; editing: boolean; busy: boolean; onSave: () => void; onCancel: () => void }) {
   return (
     <div className="space-y-3 rounded-xl border border-indigo-200 bg-indigo-50/40 p-4">
       <div className="flex items-center justify-between"><h3 className="text-sm font-semibold text-slate-900">{editing ? "Edit household item" : "Add a household staple"}</h3><IconButton label="Close household item form" onClick={onCancel}><X className="h-4 w-4" /></IconButton></div>
-      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4"><Field label="Item"><Input autoFocus value={form.name} onChange={(event) => setForm((current) => ({ ...current, name: event.target.value }))} placeholder="Paper towels" /></Field><Field label="Quantity"><Input value={form.quantity} onChange={(event) => setForm((current) => ({ ...current, quantity: event.target.value }))} placeholder="1" /></Field><Field label="Unit"><Input value={form.unit} onChange={(event) => setForm((current) => ({ ...current, unit: event.target.value }))} placeholder="pack" /></Field><Field label="Cadence days"><Input type="number" min="1" max="3650" value={form.cadence_days} onChange={(event) => setForm((current) => ({ ...current, cadence_days: event.target.value }))} placeholder="35" /></Field></div>
+      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4"><Field label="Item"><Input autoFocus value={form.name} onChange={(event) => setForm((current) => ({ ...current, name: event.target.value }))} placeholder="Paper towels" /></Field><Field label="Quantity"><Input value={form.quantity} onChange={(event) => setForm((current) => ({ ...current, quantity: event.target.value }))} placeholder="1" /></Field><Field label="Unit"><Input value={form.unit} onChange={(event) => setForm((current) => ({ ...current, unit: event.target.value }))} placeholder="pack" /></Field><Field label={editing ? "Cadence days (optional)" : "Cadence days"}><Input type="number" min="1" max="3650" value={form.cadence_days} onChange={(event) => setForm((current) => ({ ...current, cadence_days: event.target.value }))} placeholder={editing ? "Learning" : "35"} /></Field></div>
       <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4"><Field label="Preferred store"><Input value={form.preferred_place_name} onChange={(event) => setForm((current) => ({ ...current, preferred_place_name: event.target.value }))} placeholder="Costco" /></Field><Field label="Store address"><Input value={form.preferred_place_address} onChange={(event) => setForm((current) => ({ ...current, preferred_place_address: event.target.value }))} placeholder="Optional" /></Field><Field label="Mode"><select className={controlClass} value={form.replenishment_mode} onChange={(event) => setForm((current) => ({ ...current, replenishment_mode: event.target.value as HouseholdItem["replenishment_mode"] }))}><option value="errand">Errand</option><option value="delivery">Delivery</option><option value="either">Either</option></select></Field><Field label="Last bought"><Input type="datetime-local" value={form.last_acquired_at} onChange={(event) => setForm((current) => ({ ...current, last_acquired_at: event.target.value }))} /></Field></div>
       <Field label="Notes"><Input value={form.notes} onChange={(event) => setForm((current) => ({ ...current, notes: event.target.value }))} placeholder="Optional details" /></Field>
       <p className="text-xs leading-5 text-slate-600">Items without a last-bought date remain “unknown” and are not surfaced as due.</p>
-      <div className="flex justify-end gap-2"><Button variant="outline" onClick={onCancel}>Cancel</Button><Button onClick={onSave} disabled={busy || !form.name.trim() || !Number(form.cadence_days)}>{editing ? "Save changes" : "Add staple"}</Button></div>
+      <div className="flex justify-end gap-2"><Button variant="outline" onClick={onCancel}>Cancel</Button><Button onClick={onSave} disabled={busy || !form.name.trim() || (!editing && !Number(form.cadence_days))}>{editing ? "Save changes" : "Add staple"}</Button></div>
     </div>
   );
 }

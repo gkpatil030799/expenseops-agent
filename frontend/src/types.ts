@@ -146,7 +146,8 @@ export type HouseholdItem = {
   preferred_place_name: string | null;
   preferred_place_address: string | null;
   replenishment_mode: "errand" | "delivery" | "either";
-  cadence_days: number;
+  cadence_days: number | null;
+  cadence_source: "configured" | "learning" | "observed" | "adaptive";
   last_acquired_at: string | null;
   snoozed_until: string | null;
   enabled: boolean;
@@ -233,6 +234,17 @@ export type ReceiptLine = {
   acquisition_id: number | null;
   match_status: string;
   match_confidence: number | null;
+  classification:
+    | "replenishable_household"
+    | "perishable_grocery"
+    | "routine_consumption"
+    | "dining_or_experience"
+    | "one_time_purchase"
+    | "non_product_line"
+    | "uncertain"
+    | null;
+  classification_confidence: number | null;
+  canonical_name: string | null;
 };
 
 export type PurchaseReceipt = {

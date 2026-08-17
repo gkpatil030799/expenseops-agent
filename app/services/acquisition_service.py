@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import statistics
 from datetime import UTC, datetime
 
 from sqlalchemy import func, select
@@ -7,6 +8,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.models import (
+    HouseholdCadenceSource,
     HouseholdItem,
     HouseholdItemAcquisition,
     ReplenishmentFeedback,
@@ -115,7 +117,15 @@ class AcquisitionService:
             normalized_unit=normalized_unit,
             package_size=package_size,
             quantity_confidence=quantity_confidence,
-            configured_cadence_days=configured_cadence_days or item.cadence_days,
+            configured_cadence_days=(
+                configured_cadence_days
+                if configured_cadence_days is not None
+                else (
+                    item.cadence_days
+                    if item.cadence_source == HouseholdCadenceSource.CONFIGURED.value
+                    else None
+                )
+            ),
             merchant_normalized=merchant,
             logical_purchase_key=logical_purchase_key,
             receipt_item_id=receipt_item_id,
@@ -147,6 +157,8 @@ class AcquisitionService:
             item.last_acquired_at = when
             item.snoozed_until = None
             item.updated_at = utc_now()
+        if confirmed:
+            self._sync_learning_cadence(item.id)
         if commit:
             self.db.commit()
             self.db.refresh(acquisition)
@@ -182,6 +194,7 @@ class AcquisitionService:
         acquisition.voided_at = utc_now()
         self._release_logical_key(acquisition)
         self._sync_item_last_acquired(acquisition.household_item_id)
+        self._sync_learning_cadence(acquisition.household_item_id)
         self.rebuild_prediction_outcomes(acquisition.household_item_id)
         self.feedback(
             acquisition.household_item,
@@ -250,6 +263,9 @@ class AcquisitionService:
         )
         self._sync_item_last_acquired(old_item_id)
         self._sync_item_last_acquired(replacement.household_item_id)
+        self._sync_learning_cadence(old_item_id)
+        if replacement.household_item_id != old_item_id:
+            self._sync_learning_cadence(replacement.household_item_id)
         self.rebuild_prediction_outcomes(old_item_id)
         if replacement.household_item_id != old_item_id:
             self.rebuild_prediction_outcomes(replacement.household_item_id)
@@ -276,6 +292,47 @@ class AcquisitionService:
             .first()
         )
         item.last_acquired_at = latest.acquired_at if latest else None
+        item.updated_at = utc_now()
+
+    def _sync_learning_cadence(self, item_id: int) -> None:
+        item = self.db.get(HouseholdItem, item_id)
+        if item is None or item.cadence_source == HouseholdCadenceSource.CONFIGURED.value:
+            return
+        acquisitions = list(
+            self.db.execute(
+                select(HouseholdItemAcquisition)
+                .where(
+                    HouseholdItemAcquisition.household_item_id == item_id,
+                    HouseholdItemAcquisition.confirmed.is_(True),
+                    HouseholdItemAcquisition.voided_at.is_(None),
+                )
+                .order_by(
+                    HouseholdItemAcquisition.acquired_at,
+                    HouseholdItemAcquisition.id,
+                )
+            ).scalars()
+        )
+        if len(acquisitions) < 2:
+            item.cadence_days = None
+            item.cadence_source = HouseholdCadenceSource.LEARNING.value
+        else:
+            intervals = [
+                max(
+                    1.0,
+                    (
+                        _aware(acquisitions[index].acquired_at)
+                        - _aware(acquisitions[index - 1].acquired_at)
+                    ).total_seconds()
+                    / 86_400,
+                )
+                for index in range(1, len(acquisitions))
+            ]
+            item.cadence_days = max(1, round(statistics.median(intervals[-8:])))
+            item.cadence_source = (
+                HouseholdCadenceSource.OBSERVED.value
+                if len(acquisitions) == 2
+                else HouseholdCadenceSource.ADAPTIVE.value
+            )
         item.updated_at = utc_now()
 
     def rebuild_prediction_outcomes(self, item_id: int) -> None:

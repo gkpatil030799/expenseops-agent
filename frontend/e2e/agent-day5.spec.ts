@@ -268,6 +268,7 @@ async function mockHousehold(page: Page): Promise<void> {
     preferred_place_address: null,
     replenishment_mode: "either",
     cadence_days: 30,
+    cadence_source: "configured",
     last_acquired_at: "2026-07-12T12:00:00Z",
     snoozed_until: null,
     enabled: true,
@@ -332,6 +333,9 @@ async function mockHousehold(page: Page): Promise<void> {
         acquisition_id: null,
         match_status: "unmatched",
         match_confidence: 0.4,
+        classification: "uncertain",
+        classification_confidence: 0.4,
+        canonical_name: null,
       },
     ],
   };

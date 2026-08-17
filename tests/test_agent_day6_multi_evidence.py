@@ -56,7 +56,7 @@ _OUTPUT_MODELS = {
 }
 _TOOL_VERSIONS = {
     "get_spending_insights": "1.2",
-    "get_receipts": "1.1",
+    "get_receipts": "1.2",
     "get_errands_and_plan": "1.1",
 }
 
@@ -567,6 +567,7 @@ def test_receipt_replenishment_relationship_requires_both_confirmed_evidence_sid
             "transaction_linked": True,
             "lines": [
                 {
+                    "public_id": "601",
                     "name": "Detergent",
                     "quantity": 1.0,
                     "unit": "package",
@@ -574,6 +575,9 @@ def test_receipt_replenishment_relationship_requires_both_confirmed_evidence_sid
                     "match_status": "matched",
                     "household_item_name": "Laundry detergent",
                     "household_item_public_id": "101",
+                    "classification": "replenishable_household",
+                    "classification_confidence": 0.99,
+                    "canonical_name": "Laundry detergent",
                     "confirmed_acquisition": True,
                 }
             ],

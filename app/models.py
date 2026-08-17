@@ -382,6 +382,23 @@ class ReceiptItemMatchStatus(StrEnum):
     REJECTED = "rejected"
 
 
+class ReceiptLineClassification(StrEnum):
+    REPLENISHABLE_HOUSEHOLD = "replenishable_household"
+    PERISHABLE_GROCERY = "perishable_grocery"
+    ROUTINE_CONSUMPTION = "routine_consumption"
+    DINING_OR_EXPERIENCE = "dining_or_experience"
+    ONE_TIME_PURCHASE = "one_time_purchase"
+    NON_PRODUCT_LINE = "non_product_line"
+    UNCERTAIN = "uncertain"
+
+
+class HouseholdCadenceSource(StrEnum):
+    CONFIGURED = "configured"
+    LEARNING = "learning"
+    OBSERVED = "observed"
+    ADAPTIVE = "adaptive"
+
+
 class ErrandPlanStatus(StrEnum):
     PLANNED = "planned"
     STARTED = "started"
@@ -583,9 +600,7 @@ class FinancialOperation(TenantScoped, Base):
 class OutboxEvent(TenantScoped, Base):
     __tablename__ = "outbox_events"
     __table_args__ = (
-        UniqueConstraint(
-            "workspace_id", "dedupe_key", name="uq_outbox_events_workspace_dedupe"
-        ),
+        UniqueConstraint("workspace_id", "dedupe_key", name="uq_outbox_events_workspace_dedupe"),
         Index(
             "ix_outbox_events_workspace_delivery",
             "workspace_id",
@@ -636,9 +651,7 @@ class RateLimitEvent(Base):
 class ScheduledJobLease(TenantScoped, Base):
     __tablename__ = "scheduled_job_leases"
     __table_args__ = (
-        UniqueConstraint(
-            "workspace_id", "job_name", name="uq_scheduled_job_lease_workspace_job"
-        ),
+        UniqueConstraint("workspace_id", "job_name", name="uq_scheduled_job_lease_workspace_job"),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
@@ -695,6 +708,14 @@ class TelegramSession(TenantScoped, Base):
 
 class HouseholdItem(TenantScoped, Base):
     __tablename__ = "household_items"
+    __table_args__ = (
+        CheckConstraint(
+            "(cadence_source = 'learning' AND cadence_days IS NULL) OR "
+            "(cadence_source IN ('configured', 'observed', 'adaptive') "
+            "AND cadence_days IS NOT NULL AND cadence_days > 0)",
+            name="ck_household_items_cadence_state",
+        ),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     name: Mapped[str] = mapped_column(String(255), index=True)
@@ -705,7 +726,10 @@ class HouseholdItem(TenantScoped, Base):
     replenishment_mode: Mapped[str] = mapped_column(
         String(32), default=ReplenishmentMode.EITHER.value, index=True
     )
-    cadence_days: Mapped[int] = mapped_column(Integer)
+    cadence_days: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    cadence_source: Mapped[str] = mapped_column(
+        String(32), default=HouseholdCadenceSource.CONFIGURED.value, nullable=False
+    )
     last_acquired_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
@@ -768,6 +792,19 @@ class PurchaseReceipt(TenantScoped, Base):
 
 class PurchaseReceiptItem(Base):
     __tablename__ = "purchase_receipt_items"
+    __table_args__ = (
+        CheckConstraint(
+            "classification IS NULL OR classification IN ("
+            "'replenishable_household', 'perishable_grocery', 'routine_consumption', "
+            "'dining_or_experience', 'one_time_purchase', 'non_product_line', 'uncertain')",
+            name="ck_purchase_receipt_items_classification",
+        ),
+        CheckConstraint(
+            "classification_confidence IS NULL OR "
+            "(classification_confidence >= 0 AND classification_confidence <= 1)",
+            name="ck_purchase_receipt_items_classification_confidence",
+        ),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     receipt_id: Mapped[int] = mapped_column(
@@ -785,6 +822,9 @@ class PurchaseReceiptItem(Base):
     line_total_cents: Mapped[int | None] = mapped_column(Integer, nullable=True)
     brand: Mapped[str | None] = mapped_column(String(255), nullable=True)
     category: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    classification: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
+    classification_confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
+    canonical_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
     household_item_id: Mapped[int | None] = mapped_column(
         ForeignKey("household_items.id", ondelete="SET NULL"), nullable=True, index=True
     )
@@ -1612,12 +1652,8 @@ class AgentActionProposal(TenantScoped, Base):
             "owner_user_id",
             "action_fingerprint",
             unique=True,
-            postgresql_where=text(
-                "status IN ('awaiting_confirmation', 'confirmed', 'executing')"
-            ),
-            sqlite_where=text(
-                "status IN ('awaiting_confirmation', 'confirmed', 'executing')"
-            ),
+            postgresql_where=text("status IN ('awaiting_confirmation', 'confirmed', 'executing')"),
+            sqlite_where=text("status IN ('awaiting_confirmation', 'confirmed', 'executing')"),
         ),
         Index(
             "ix_agent_action_proposals_workspace_owner_status_expires",

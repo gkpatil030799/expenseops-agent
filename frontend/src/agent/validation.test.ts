@@ -902,6 +902,13 @@ describe("Agent controlled-action validation", () => {
     expect(
       parseAgentStructuredResponse({ schema_version: "1.0", blocks: [block] }).blocks[0],
     ).toBe(block);
+    const receiptLearning = {
+      ...block,
+      action: "apply_receipt_learning_batch",
+      title: "Learn household items from this receipt",
+      confirm_label: "Confirm selected",
+    } as const;
+    expect(parseAgentActionConfirmation(receiptLearning)).toBe(receiptLearning);
   });
 
   it("rejects editable action parameters, missing action types, and invalid versions", () => {
@@ -913,6 +920,9 @@ describe("Agent controlled-action validation", () => {
     ).toThrow(AgentProtocolError);
     expect(() =>
       parseAgentActionConfirmation({ ...block, proposal_version: 0 }),
+    ).toThrow(AgentProtocolError);
+    expect(() =>
+      parseAgentActionConfirmation({ ...block, action: "create_household_item_directly" }),
     ).toThrow(AgentProtocolError);
   });
 });

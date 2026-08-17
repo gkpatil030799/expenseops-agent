@@ -158,12 +158,16 @@ def test_receipt_parser_uses_structured_vision_output():
             '"currency":"USD","confidence":0.98,"items":[{"name":"Eggs",'
             '"quantity":12,"unit":"count","unit_price_cents":null,'
             '"line_total_cents":1080,"brand":null,"category":"grocery",'
-            '"confidence":0.99,"is_household_purchase":true}]}'
+            '"confidence":0.99,"is_household_purchase":true,'
+            '"classification":"perishable_grocery",'
+            '"classification_confidence":0.99,"canonical_name":"Eggs"}]}'
         )
     }
 
     def handler(request: httpx.Request) -> httpx.Response:
         assert b"input_image" in request.content
+        assert b"classification_confidence" in request.content
+        assert b"canonical_name" in request.content
         return httpx.Response(200, json=response_body)
 
     client = httpx.Client(transport=httpx.MockTransport(handler))
@@ -173,6 +177,8 @@ def test_receipt_parser_uses_structured_vision_output():
     result = parser.parse_attachment(b"private image", "image/jpeg", "receipt.jpg")
     assert result.items[0].name == "Eggs"
     assert result.items[0].quantity == 12
+    assert result.items[0].classification == "perishable_grocery"
+    assert result.items[0].canonical_name == "Eggs"
 
 
 def test_line_item_normalization_and_saved_alias_are_reused(db):
