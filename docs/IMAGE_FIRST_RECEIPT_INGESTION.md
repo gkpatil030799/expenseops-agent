@@ -63,7 +63,9 @@ ExpenseOps continues to use the existing OpenAI Responses API. Current official 
 - [GPT-4.1 mini model](https://developers.openai.com/api/docs/models/gpt-4.1-mini)
 - [GPT-5.6 luna model](https://developers.openai.com/api/docs/models/gpt-5.6-luna)
 
-The parser default is now `gpt-5.6-luna` with image detail `auto`. It is the cost-conscious GPT-5.6 choice evaluated for preserving receipt text resolution. The receipt model remains independently configurable. A deployment with an existing `RECEIPT_PARSER_MODEL` environment override will continue to use that override until an operator intentionally changes it.
+The parser default is now `gpt-5.6-luna` with image detail `auto`. It is the cost-conscious GPT-5.6 choice evaluated for preserving receipt text resolution. Custom/local deployments may choose another evaluated model, while ExpenseOps' protected production release currently requires the reviewed `gpt-5.6-luna` configuration on every receipt-processing runtime.
+
+Production Telegram photos are processed by the outbox worker, not the web process. Web, outbox, and Gmail-receipt runtimes must therefore all resolve `RECEIPT_PARSER_PROVIDER=openai`, the reviewed receipt model, and `OPENAI_API_KEY`. The protected release fails before upload when those runtimes drift. A new provider message may reprocess the same image after a transient parser/configuration failure, while replaying the same webhook remains idempotent and permanently unreadable bytes remain deduplicated.
 
 ### Direct image rather than OCR-first
 
@@ -244,10 +246,10 @@ The browser gate initially caught the visually hidden file input as a phantom 1Ã
 - One upload represents one image/PDF. There is no 2â€“3-photo grouping or stitching system. A future bounded design should create a single explicit multi-artifact draft before parsing so separate photos never silently become separate purchases.
 - Long images use original-preserving model detail. Automatic tiling is not enabled because the four-image live smoke and deterministic long-receipt gate did not justify an extra call policy. Add deterministic vertical segments only after a measured long-receipt miss set.
 - Original photos are not persisted, which minimizes privacy exposure but means the current dashboard cannot redisplay the photo during correction.
-- Telegram parsing remains synchronous after the immediate acknowledgment because this repository has no durable receipt-processing queue suitable for reuse. Update and receipt idempotency make retries safe; a future queue is justified only if measured webhook/provider latency causes delivery issues.
+- Production Telegram webhooks hand receipt work to the existing durable outbox queue. The outbox worker performs one bounded parse at a time for each claimed update; webhook and receipt idempotency protect replays.
 - Fingerprints deduplicate exact bytes, not perceptually equivalent recompressions.
 - Model quality can change behind an alias. Operators may pin a dated snapshot when available and should rerun the synthetic live gate before rollout changes.
-- Production environments with an existing `RECEIPT_PARSER_MODEL=gpt-4.1-mini` override will not adopt the new model merely from the code default. Changing that variable is a separate reviewed deployment action.
+- Custom deployments with an old model override must still change it intentionally. ExpenseOps' protected production workflow fails closed if web, outbox, or Gmail receipt processing drifts from the reviewed parser configuration.
 
 ## Day 16 recommendation
 

@@ -6,7 +6,7 @@ import time
 from datetime import UTC, datetime, timedelta
 from difflib import SequenceMatcher
 
-from sqlalchemy import select
+from sqlalchemy import case, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, selectinload
 
@@ -48,6 +48,19 @@ from app.services.receipt_parser_service import (
 
 logger = logging.getLogger(__name__)
 
+_REPROCESSABLE_RECEIPT_FAILURE_CODES = frozenset(
+    {
+        "receipt_parser_not_configured",
+        "receipt_provider_timeout",
+        "receipt_provider_rate_limited",
+        "receipt_provider_unavailable",
+        "receipt_provider_rejected",
+        "receipt_parse_failed",
+        "receipt_parse_empty_response",
+        "receipt_schema_invalid",
+    }
+)
+
 
 class ReceiptIngestionService:
     def __init__(
@@ -72,7 +85,12 @@ class ReceiptIngestionService:
     ) -> PurchaseReceipt:
         started = time.monotonic()
         fingerprint = hashlib.sha256(content).hexdigest()
-        existing = self._existing(source, source_external_id, fingerprint)
+        existing = self._existing(
+            source,
+            source_external_id,
+            fingerprint,
+            reprocess_transient_failure=True,
+        )
         if existing:
             return existing
         try:
@@ -175,7 +193,12 @@ class ReceiptIngestionService:
         auto_confirm_high_confidence: bool = False,
     ) -> PurchaseReceipt:
         fingerprint = hashlib.sha256(text.encode("utf-8")).hexdigest()
-        existing = self._existing(source, source_external_id, fingerprint)
+        existing = self._existing(
+            source,
+            source_external_id,
+            fingerprint,
+            reprocess_transient_failure=True,
+        )
         if existing:
             return existing
         try:
@@ -703,7 +726,17 @@ class ReceiptIngestionService:
             return self.confirm(receipt.id, user_confirmed=False)
         return receipt
 
-    def _existing(self, source: str, external_id: str, fingerprint: str) -> PurchaseReceipt | None:
+    def _existing(
+        self,
+        source: str,
+        external_id: str,
+        fingerprint: str,
+        *,
+        reprocess_transient_failure: bool = False,
+    ) -> PurchaseReceipt | None:
+        # Replaying the same provider event is always idempotent, including a
+        # failed event. A new Telegram message/Gmail message/web upload gets a
+        # new external ID and may safely retry a transient parser failure.
         receipt = self.db.execute(
             select(PurchaseReceipt)
             .options(selectinload(PurchaseReceipt.items))
@@ -713,16 +746,41 @@ class ReceiptIngestionService:
         ).scalar_one_or_none()
         if receipt:
             return receipt
-        return (
+        receipt = (
             self.db.execute(
                 select(PurchaseReceipt)
                 .options(selectinload(PurchaseReceipt.items))
                 .where(PurchaseReceipt.content_sha256 == fingerprint)
-                .order_by(PurchaseReceipt.id)
+                # Once a later attempt recovers, it becomes the canonical
+                # fingerprint result instead of the older transient failure.
+                .order_by(
+                    case(
+                        (
+                            PurchaseReceipt.parse_status == ReceiptParseStatus.FAILED.value,
+                            1,
+                        ),
+                        else_=0,
+                    ),
+                    PurchaseReceipt.id,
+                )
             )
             .scalars()
             .first()
         )
+        if (
+            receipt is not None
+            and reprocess_transient_failure
+            and receipt.parse_status == ReceiptParseStatus.FAILED.value
+            and receipt.failure_code in _REPROCESSABLE_RECEIPT_FAILURE_CODES
+        ):
+            log_event(
+                logger,
+                "receipt_transient_failure_reprocessing",
+                source=source,
+                prior_failure_code=receipt.failure_code,
+            )
+            return None
+        return receipt
 
     def _failed_receipt(
         self, source: str, external_id: str, fingerprint: str, code: str

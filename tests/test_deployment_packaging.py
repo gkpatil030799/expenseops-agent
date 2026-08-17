@@ -227,6 +227,20 @@ def test_production_release_is_manual_and_all_runtimes_precede_web():
     assert "${EXPECTED_WEB_AGENT_WRITE_ACTIONS_ENABLED}" in workflow
     assert "${EXPECTED_WEB_AGENT_PROACTIVE_ENABLED}" in workflow
     assert "Expected Agent rollout inputs must be true or false." in workflow
+    receipt_configuration = workflow[
+        workflow.index("Verify receipt processing configuration") : workflow.index(
+            "Verify database credentials are isolated by service"
+        )
+    ]
+    assert 'provider="$(jq -r \'.RECEIPT_PARSER_PROVIDER // ""\'' in receipt_configuration
+    assert 'model="$(jq -r \'.RECEIPT_PARSER_MODEL // ""\'' in receipt_configuration
+    assert 'openai_key="$(jq -r \'.OPENAI_API_KEY // ""\'' in receipt_configuration
+    assert '[[ "${provider}" != "openai" ]]' in receipt_configuration
+    assert '[[ "${model}" != "gpt-5.6-luna" ]]' in receipt_configuration
+    assert receipt_configuration.count("verify_receipt_runtime") == 4
+    assert 'verify_receipt_runtime "${RAILWAY_OUTBOX_SERVICE_ID}"' in receipt_configuration
+    assert 'verify_receipt_runtime "${RAILWAY_GMAIL_RECEIPTS_SERVICE_ID}"' in receipt_configuration
+    assert 'verify_receipt_runtime "${RAILWAY_WEB_SERVICE_ID}"' in receipt_configuration
     assert "REQUESTED_RELEASE_SHA: ${{ inputs.release_sha }}" in workflow
     assert "RELEASE_PHASE: ${{ inputs.release_phase }}" in workflow
     assert "COMPATIBILITY_SHA_INPUT: ${{ inputs.compatibility_sha }}" in workflow

@@ -203,6 +203,59 @@ def test_readiness_reports_database_and_optional_configuration_without_secrets()
     assert "api_key" not in str(payload).casefold()
 
 
+def test_readiness_reports_receipt_parser_state_without_secrets(monkeypatch):
+    import app.main as main
+
+    monkeypatch.setattr(
+        main,
+        "settings",
+        Settings(
+            receipt_parser_provider="openai",
+            openai_api_key="configured-secret-key",
+            telegram_bot_token="configured-telegram-bot",
+            _env_file=None,
+        ),
+    )
+
+    response = TestClient(app).get("/readiness")
+
+    assert response.status_code == 200
+    checks = response.json()["checks"]
+    assert checks["receipt_parser_provider"] == "openai"
+    assert checks["receipt_parser_configured"] is True
+    assert "configured-secret-key" not in str(response.json())
+
+
+def test_production_readiness_fails_closed_when_active_receipt_parser_is_unavailable(
+    monkeypatch,
+):
+    import app.main as main
+
+    monkeypatch.setattr(
+        main,
+        "settings",
+        _safe_production_settings(
+            telegram_bot_token="configured-telegram-bot",
+            receipt_parser_provider="fallback",
+            openai_api_key="configured-key",
+            auth_mode="oidc",
+            oidc_issuer="https://identity.example",
+            oidc_audience="expenseops",
+            oidc_client_id="client-id",
+            oidc_redirect_uri="https://expenseops.example/auth/callback",
+            trusted_hosts=["testserver"],
+        ),
+    )
+
+    response = TestClient(app).get("/readiness", headers={"host": "testserver"})
+
+    assert response.status_code == 503
+    assert response.json()["status"] == "not_ready"
+    checks = response.json()["checks"]
+    assert checks["receipt_intake_active"] is True
+    assert checks["receipt_parser_configured"] is False
+
+
 def test_production_readiness_returns_503_when_schema_is_stale(monkeypatch):
     import app.main as main
 
@@ -313,9 +366,7 @@ def test_dashboard_api_allows_basic_auth():
 def test_dashboard_api_allows_bearer_auth():
     import app.auth as auth
 
-    settings = _safe_production_settings(
-        environment="local", dashboard_api_token="token-123"
-    )
+    settings = _safe_production_settings(environment="local", dashboard_api_token="token-123")
 
     assert auth._is_authorized(
         type("Request", (), {"headers": {"Authorization": "Bearer token-123"}})(),
