@@ -780,6 +780,8 @@ def test_gmail_receipt_job_reports_bounded_sync_counts(db, monkeypatch):
             return None
 
     class FakeService:
+        configured = True
+
         def __init__(self, _db, _settings):
             pass
 
