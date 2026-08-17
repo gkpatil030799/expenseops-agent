@@ -237,8 +237,16 @@ def build_receipt_review_keyboard(receipt_id: int, dashboard_url: str = "") -> d
 def format_receipt_review_message(receipt) -> str:
     merchant = receipt.merchant_raw or "Unknown merchant"
     matched = [line for line in receipt.items if line.household_item_id is not None]
+    partial = receipt.failure_code in {
+        "receipt_partial_extraction",
+        "receipt_total_uncertain",
+        "receipt_arithmetic_mismatch",
+        "receipt_transaction_match_ambiguous",
+    }
     lines = [
-        "🧾 <b>Receipt ready to review</b>",
+        "🧾 <b>Receipt partly read — review needed</b>"
+        if partial
+        else "🧾 <b>Receipt processed</b>",
         f"🏪 <b>{html(merchant)}</b>",
         f"Found {len(receipt.items)} line items; {len(matched)} matched to household staples.",
         "",
@@ -248,6 +256,12 @@ def format_receipt_review_message(receipt) -> str:
         lines.append(f"• {html(line.raw_name)} → {html(target)}")
     if len(receipt.items) > 8:
         lines.append(f"…and {len(receipt.items) - 8} more")
+    if receipt.failure_code == "receipt_total_uncertain":
+        lines.append("⚠️ I couldn't reliably read the total.")
+    elif receipt.failure_code == "receipt_arithmetic_mismatch":
+        lines.append("⚠️ The visible amounts do not fully reconcile.")
+    elif partial:
+        lines.append("⚠️ Some receipt details may be incomplete.")
     lines.extend(["", "Confirm, edit matches in the dashboard, or ignore this receipt."])
     return "\n".join(lines)
 

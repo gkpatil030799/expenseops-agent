@@ -72,9 +72,11 @@ test("structured memory is explicit, correctable, explainable, and user-controll
   await mockAgentApp(page);
   const writes = await installMemoryApi(page);
   await page.goto("/?workspace=settings");
+  await expect(page.getByRole("heading", { name: "Settings", exact: true })).toBeVisible();
   const mobileSection = page.getByLabel("Settings section");
+  const desktopSection = page.getByRole("button", { name: /Learned behavior/ });
   if (await mobileSection.isVisible()) await mobileSection.selectOption("learning");
-  else await page.getByRole("button", { name: /Learned behavior/ }).click();
+  else await desktopSection.click();
 
   const learning = page.getByRole("checkbox", { name: /Learn from confirmed/ });
   await expect(learning).toBeChecked();

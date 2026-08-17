@@ -9,6 +9,7 @@ import {
   Clock3,
   Brain,
   Bot,
+  Camera,
   ExternalLink,
   House,
   ListChecks,
@@ -204,6 +205,7 @@ export function HouseholdOpsPage({
   const [focusedItemId, setFocusedItemId] = useState<number | null>(null);
   const [plannedTripSignature, setPlannedTripSignature] = useState<string | null>(null);
   const handledNavigationRequest = useRef<AgentNavigationRequest | null>(null);
+  const receiptUploadInput = useRef<HTMLInputElement | null>(null);
 
   const tripInputSignature = useMemo(
     () => JSON.stringify({
@@ -325,8 +327,8 @@ export function HouseholdOpsPage({
     setReviewingReceiptId(null);
   }
 
-  function reviewReceipt(receiptId: number) {
-    const receipt = receiptQueue.find((candidate) => candidate.id === receiptId);
+  function reviewReceipt(receiptId: number, uploadedReceipt?: PurchaseReceipt) {
+    const receipt = uploadedReceipt || receiptQueue.find((candidate) => candidate.id === receiptId);
     if (receipt) {
       const defaults = defaultReceiptLearningDecisions(receipt);
       setReceiptDecisionDrafts((current) => ({
@@ -807,6 +809,32 @@ export function HouseholdOpsPage({
     });
   }
 
+  async function uploadReceiptPhoto(file: File | null) {
+    if (!file) return;
+    await run("upload-receipt", async () => {
+      const form = new FormData();
+      form.append("file", file, file.name || "receipt-photo.jpg");
+      const receipt = await api<PurchaseReceipt>("/api/replenishment/receipts/upload", {
+        method: "POST",
+        body: form,
+      });
+      await loadHouseholdOps();
+      if (receipt.parse_quality === "failed") {
+        setError(receipt.quality_message || "I couldn't reliably read that receipt photo.");
+        return;
+      }
+      setHouseholdView("receipts");
+      // The refresh state update is asynchronous; use the upload response so
+      // recommended Day 9 decisions are staged on the very first review.
+      reviewReceipt(receipt.id, receipt);
+      setNotice(
+        receipt.parse_quality === "partial"
+          ? receipt.quality_message || "Receipt partly read. Check the extracted details."
+          : `Receipt processed${receipt.merchant ? ` from ${receipt.merchant}` : ""}.`,
+      );
+    });
+  }
+
   async function findUsefulErrands() {
     const origin = selectedLocation(originChoice, locations, currentLocation, manualOrigin);
     if (!origin) {
@@ -1091,6 +1119,26 @@ export function HouseholdOpsPage({
             <CardDescription>Receipt matches and your feedback improve estimates; every purchase remains correctable.</CardDescription>
           </div>
           <div className="flex w-full flex-wrap gap-2 sm:w-auto sm:justify-end">
+            <input
+              ref={receiptUploadInput}
+              type="file"
+              hidden
+              accept="image/jpeg,image/png,image/webp,application/pdf"
+              capture="environment"
+              aria-label="Take or upload a receipt photo"
+              onChange={(event) => {
+                const file = event.target.files?.[0] || null;
+                event.target.value = "";
+                void uploadReceiptPhoto(file);
+              }}
+            />
+            <Button
+              onClick={() => receiptUploadInput.current?.click()}
+              disabled={busy !== null}
+            >
+              <Camera className="h-4 w-4" />
+              {busy === "upload-receipt" ? "Reading receipt…" : "Take or upload receipt photo"}
+            </Button>
             <Button variant="outline" onClick={syncGmailReceipts} disabled={busy !== null}>
               <ReceiptText className="h-4 w-4" /> {busy === "gmail-receipts" ? "Syncing Gmail…" : "Sync Gmail receipts"}
             </Button>
@@ -1701,15 +1749,20 @@ function ErrandEditor({ form, setForm, editing, busy, onSave, onCancel }: { form
 
 function ReceiptQueueRow({ receipt, selected, busy, onReview, onIgnore }: { receipt: PurchaseReceipt; selected: boolean; busy: boolean; onReview: () => void; onIgnore: () => void }) {
   const unresolved = receipt.decision_summary.undecided;
+  const badgeLabel = receipt.parse_quality === "failed"
+    ? "Processing failed"
+    : receipt.parse_quality === "partial"
+      ? "Partly read"
+      : "Needs review";
   return (
     <div className={`flex flex-col gap-3 p-4 transition sm:flex-row sm:items-center sm:justify-between ${selected ? "bg-indigo-50/60" : "bg-white hover:bg-slate-50/70"}`}>
       <div className="min-w-0">
         <div className="flex flex-wrap items-center gap-2">
           <p className="font-semibold text-slate-950">{receipt.merchant || "Unknown merchant"}</p>
-          <Badge className={receipt.parse_status === "failed" ? "bg-rose-50 text-rose-700" : "bg-amber-50 text-amber-700"}>{receipt.parse_status === "failed" ? "Processing failed" : "Needs review"}</Badge>
+          <Badge className={receipt.parse_status === "failed" ? "bg-rose-50 text-rose-700" : "bg-amber-50 text-amber-700"}>{badgeLabel}</Badge>
         </div>
         <p className="mt-1 text-xs text-slate-600">{receiptDate(receipt)} · {receipt.items.length} items{receipt.parse_status === "needs_review" ? ` · ${unresolved} still unmatched` : ""}{receiptTotal(receipt)}</p>
-        {receipt.parse_status === "failed" ? <p className="mt-1 text-xs text-rose-700">The receipt could not be parsed. You can ignore it and upload a clearer copy.</p> : null}
+        {receipt.quality_message ? <p className={`mt-1 text-xs ${receipt.parse_quality === "failed" ? "text-rose-700" : "text-amber-700"}`}>{receipt.quality_message}</p> : null}
       </div>
       <div className="flex shrink-0 gap-2">
         {receipt.parse_status === "needs_review" ? <Button size="sm" variant={selected ? "secondary" : "outline"} onClick={onReview} disabled={busy}>{selected ? "Reviewing" : "Review receipt"}</Button> : null}
@@ -1729,6 +1782,7 @@ function ReceiptReviewCard({ receipt, items, draft, decisions, busy, onDraft, on
         <IconButton label="Close receipt review" onClick={onClose}><X className="h-4 w-4" /></IconButton>
       </div>
       <div className="p-4"><ReceiptItemsEditor receipt={receipt} items={items} draft={draft} decisions={decisions} busy={busy} onDraft={onDraft} onMatch={onMatch} onTrack={onTrack} onUndo={onUndo} /></div>
+      {receipt.quality_message ? <p className="px-4 pb-3 text-sm font-medium text-amber-800">{receipt.quality_message}</p> : null}
       <div className="sticky bottom-0 flex flex-wrap justify-end gap-2 border-t border-slate-200 bg-white/95 p-4 backdrop-blur">
         <Button variant="ghost" onClick={() => onIgnore(receipt)} disabled={busy}>Ignore receipt</Button>
         <Button variant="outline" onClick={() => onSave(receipt)} disabled={busy || !changed}>Save {changed || ""} decision{changed === 1 ? "" : "s"}</Button>

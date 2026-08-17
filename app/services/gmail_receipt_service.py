@@ -25,6 +25,16 @@ class GmailSyncResult:
     receipts: list[PurchaseReceipt]
 
 
+@dataclass(frozen=True)
+class GmailReceiptAttachment:
+    part_id: str
+    filename: str
+    mime_type: str
+    size: int
+    attachment_id: str | None
+    inline_data: str | None
+
+
 class GmailReceiptService:
     def __init__(
         self,
@@ -95,12 +105,26 @@ class GmailReceiptService:
             if not _looks_like_receipt(subject, sender, body):
                 skipped += 1
                 continue
-            receipt = ReceiptIngestionService(self.db, self.settings).ingest_text(
-                source="gmail",
-                source_external_id=message_id,
-                text=f"Subject: {subject}\nFrom: {sender}\n\n{body}",
-                auto_confirm_high_confidence=True,
-            )
+            attachments = _message_receipt_attachments(message)
+            selected = attachments[0] if attachments else None
+            ingestion = ReceiptIngestionService(self.db, self.settings)
+            if selected is not None and not _looks_like_structured_receipt(body):
+                content = _attachment_content(selected, message_id, token, self.gmail)
+                receipt = ingestion.ingest_attachment(
+                    source="gmail",
+                    source_external_id=message_id,
+                    content=content,
+                    mime_type=selected.mime_type,
+                    filename=selected.filename,
+                    auto_confirm_high_confidence=True,
+                )
+            else:
+                receipt = ingestion.ingest_text(
+                    source="gmail",
+                    source_external_id=message_id,
+                    text=f"Subject: {subject}\nFrom: {sender}\n\n{body}",
+                    auto_confirm_high_confidence=True,
+                )
             ingested.append(receipt)
         checkpoint.backfill_page_token = response.get("nextPageToken")
         checkpoint.initial_backfill_complete = checkpoint.backfill_page_token is None
@@ -179,3 +203,83 @@ def _looks_like_receipt(subject: str, sender: str, body: str) -> bool:
         signal in combined for signal in ("order number", "total", "payment")
     )
     return bool(sender.strip() and has_purchase and not only_marketing)
+
+
+def _looks_like_structured_receipt(body: str) -> bool:
+    compact = re.sub(r"\s+", " ", body).casefold()
+    has_total_label = bool(re.search(r"\b(?:order total|grand total|subtotal|total)\b", compact))
+    has_money = bool(re.search(r"(?:\$|usd\s*)\d{1,7}(?:[.,]\d{2})", compact))
+    return len(compact) >= 80 and has_total_label and has_money
+
+
+def _message_receipt_attachments(message: dict) -> list[GmailReceiptAttachment]:
+    attachments: list[GmailReceiptAttachment] = []
+
+    def visit(part: dict) -> None:
+        mime_type = str(part.get("mimeType") or "").casefold()
+        filename = str(part.get("filename") or "").strip()
+        body = part.get("body") or {}
+        attachment_id = str(body.get("attachmentId") or "").strip() or None
+        inline_data = str(body.get("data") or "").strip() or None
+        supported = mime_type in {
+            "application/pdf",
+            "image/jpeg",
+            "image/png",
+            "image/webp",
+            "application/octet-stream",
+        }
+        if supported and (attachment_id or inline_data):
+            attachments.append(
+                GmailReceiptAttachment(
+                    part_id=str(part.get("partId") or ""),
+                    filename=filename or _attachment_filename(mime_type),
+                    mime_type=mime_type,
+                    size=max(0, int(body.get("size") or 0)),
+                    attachment_id=attachment_id,
+                    inline_data=inline_data,
+                )
+            )
+        for child in part.get("parts", []):
+            if isinstance(child, dict):
+                visit(child)
+
+    payload = message.get("payload") or {}
+    if isinstance(payload, dict):
+        visit(payload)
+    return sorted(
+        attachments,
+        key=lambda item: (
+            item.mime_type.startswith("image/"),
+            item.size,
+            item.part_id,
+        ),
+        reverse=True,
+    )
+
+
+def _attachment_content(
+    attachment: GmailReceiptAttachment,
+    message_id: str,
+    token: str,
+    gmail: GmailClient,
+) -> bytes:
+    if attachment.inline_data:
+        try:
+            return base64.urlsafe_b64decode(
+                attachment.inline_data + "=" * (-len(attachment.inline_data) % 4)
+            )
+        except ValueError as exc:
+            raise ValueError("gmail_attachment_invalid") from exc
+    if attachment.attachment_id:
+        return gmail.get_attachment(message_id, attachment.attachment_id, token)
+    raise ValueError("gmail_attachment_empty")
+
+
+def _attachment_filename(mime_type: str) -> str:
+    extension = {
+        "application/pdf": "pdf",
+        "image/jpeg": "jpg",
+        "image/png": "png",
+        "image/webp": "webp",
+    }.get(mime_type, "bin")
+    return f"gmail-receipt.{extension}"

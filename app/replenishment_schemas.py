@@ -48,6 +48,8 @@ class ReceiptOut(BaseModel):
     total_cents: int | None
     currency: str
     parse_status: str
+    parse_quality: Literal["complete", "partial", "failed"]
+    quality_message: str | None
     parse_confidence: float | None
     failure_code: str | None
     transaction_id: int | None
