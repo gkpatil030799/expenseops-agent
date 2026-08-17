@@ -23,6 +23,7 @@ export type Transaction = {
   last_error: string | null;
   classification_suggestion: "likely_personal" | "likely_shared" | "unsure" | null;
   classification_reason: string | null;
+  classification_preference_id?: number | null;
   can_undo_transaction: boolean;
   created_at: string;
   updated_at: string;
@@ -117,6 +118,9 @@ export type MemoryEntry = {
 export type AIMemory = {
   id: number;
   original_message: string;
+  label: string;
+  rationale: string;
+  source: "explicit_preference" | "confirmed_action" | "correction";
   failure_reason: string;
   final_action: string;
   final_group_name: string | null;
@@ -138,6 +142,19 @@ export type AIMemory = {
   created_at: string;
 };
 
+export type StructuredMemorySettings = {
+  transaction_learning_enabled: boolean;
+};
+
+export type StructuredMemoryMetrics = {
+  shown: number;
+  accepted: number;
+  edited: number;
+  rejected: number;
+  agreement_rate: number | null;
+  correction_rate: number | null;
+};
+
 export type HouseholdItem = {
   id: number;
   name: string;
@@ -146,7 +163,8 @@ export type HouseholdItem = {
   preferred_place_name: string | null;
   preferred_place_address: string | null;
   replenishment_mode: "errand" | "delivery" | "either";
-  cadence_days: number;
+  cadence_days: number | null;
+  cadence_source: "configured" | "learning" | "observed" | "adaptive";
   last_acquired_at: string | null;
   snoozed_until: string | null;
   enabled: boolean;
@@ -233,6 +251,17 @@ export type ReceiptLine = {
   acquisition_id: number | null;
   match_status: string;
   match_confidence: number | null;
+  classification:
+    | "replenishable_household"
+    | "perishable_grocery"
+    | "routine_consumption"
+    | "dining_or_experience"
+    | "one_time_purchase"
+    | "non_product_line"
+    | "uncertain"
+    | null;
+  classification_confidence: number | null;
+  canonical_name: string | null;
 };
 
 export type PurchaseReceipt = {

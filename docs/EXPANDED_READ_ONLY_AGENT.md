@@ -9,7 +9,7 @@ second assistant, a second policy layer, or parallel domain logic.
 
 The shipped authority remains deliberately narrow:
 
-- seven registered tools are all classified as `READ`;
+- eight registered tools are all classified as `READ`;
 - user and workspace identity are derived from the authenticated server session;
 - account facts are rebuilt from validated same-run tool evidence;
 - domain mutations, provider actions, proactive behavior, and purchasing remain unavailable;

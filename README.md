@@ -274,6 +274,8 @@ Read the deeper guides:
 
 - [Promotion Intelligence](docs/PROMOTION_INTELLIGENCE.md)
 - [Replenishment Learning](docs/REPLENISHMENT_LEARNING.md)
+- [Zero-Setup Receipt Learning](docs/ZERO_SETUP_RECEIPT_LEARNING.md)
+- [Lifestyle & Dining Intelligence](docs/LIFESTYLE_DINING_INTELLIGENCE.md)
 
 ### Google Maps: turn “Aldi” into the right Aldi
 
@@ -643,6 +645,7 @@ limited to an explicitly local environment with the local-test flag enabled.
 - [Consolidated Launch-Remediation Strategy](docs/CONSOLIDATED_LAUNCH_REMEDIATION_STRATEGY_2026-08-14.md)
 - [Promotion Intelligence](docs/PROMOTION_INTELLIGENCE.md)
 - [Replenishment Learning](docs/REPLENISHMENT_LEARNING.md)
+- [Zero-Setup Receipt Learning](docs/ZERO_SETUP_RECEIPT_LEARNING.md)
 - [Sandbox Lab](sandbox/README.md)
 
 ## License

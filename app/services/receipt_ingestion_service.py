@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 from datetime import UTC, datetime, timedelta
 from difflib import SequenceMatcher
 
@@ -10,6 +11,7 @@ from sqlalchemy.orm import Session, selectinload
 from app.config import Settings, get_settings
 from app.models import (
     ExpenseTransaction,
+    HouseholdCadenceSource,
     HouseholdItem,
     PurchaseReceipt,
     PurchaseReceiptItem,
@@ -25,12 +27,19 @@ from app.services.item_normalization_service import (
 )
 from app.services.managed_auth_service import record_audit_once
 from app.services.quantity_normalization_service import normalize_quantity
+from app.services.receipt_learning_service import (
+    TRACKABLE_CLASSIFICATIONS,
+    classify_receipt_line,
+    safe_learning_metrics,
+)
 from app.services.receipt_parser_service import (
     ParsedReceipt,
     ReceiptParser,
     ReceiptParserError,
     build_receipt_parser,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class ReceiptIngestionService:
@@ -111,18 +120,38 @@ class ReceiptIngestionService:
         receipt_id: int,
         *,
         user_confirmed: bool = True,
+        acknowledge_undecided: bool = False,
         commit: bool = True,
     ) -> PurchaseReceipt:
         receipt = self.get(receipt_id)
         if receipt.parse_status == ReceiptParseStatus.IGNORED.value:
             raise ValueError("Ignored receipt cannot be confirmed.")
+        undecided = sum(
+            line.match_status
+            not in {
+                ReceiptItemMatchStatus.MATCHED.value,
+                ReceiptItemMatchStatus.REJECTED.value,
+                ReceiptItemMatchStatus.IRRELEVANT.value,
+            }
+            for line in receipt.items
+        )
+        if undecided and not acknowledge_undecided:
+            raise ValueError("Acknowledge undecided receipt lines before confirming.")
         for line in receipt.items:
             if (
-                line.household_item is not None
+                line.household_item_id is not None
                 and line.match_status == ReceiptItemMatchStatus.MATCHED.value
             ):
+                household_item = self.db.scalar(
+                    select(HouseholdItem).where(
+                        HouseholdItem.workspace_id == receipt.workspace_id,
+                        HouseholdItem.id == line.household_item_id,
+                    )
+                )
+                if household_item is None:
+                    raise ValueError("Matched household item no longer exists.")
                 AcquisitionService(self.db).record(
-                    line.household_item,
+                    household_item,
                     acquired_at=receipt.purchased_at or receipt.created_at,
                     quantity=line.quantity,
                     unit=line.unit,
@@ -146,7 +175,7 @@ class ReceiptIngestionService:
                     commit=False,
                 )
                 ItemNormalizationService(self.db).learn_alias(
-                    line.household_item,
+                    household_item,
                     line.raw_name,
                     merchant=receipt.merchant_normalized,
                     source="confirmed_receipt",
@@ -210,7 +239,11 @@ class ReceiptIngestionService:
                         receipt_id,
                         line_id,
                         name=str(decision.get("name") or ""),
-                        cadence_days=int(decision.get("cadence_days") or 30),
+                        cadence_days=(
+                            int(decision["cadence_days"])
+                            if decision.get("cadence_days") is not None
+                            else None
+                        ),
                         replenishment_mode=str(decision.get("replenishment_mode") or "either"),
                         commit=False,
                     )
@@ -220,23 +253,46 @@ class ReceiptIngestionService:
             receipt.updated_at = utc_now()
             if confirm:
                 undecided = sum(
-                    1
-                    for line in receipt.items
-                    if line.household_item_id is None
-                    and line.match_status
+                    line.match_status
                     not in {
+                        ReceiptItemMatchStatus.MATCHED.value,
                         ReceiptItemMatchStatus.REJECTED.value,
                         ReceiptItemMatchStatus.IRRELEVANT.value,
                     }
+                    for line in receipt.items
                 )
                 if undecided and not acknowledge_undecided:
                     raise ValueError("Acknowledge undecided receipt lines before confirming.")
-                self.confirm(receipt.id, commit=False)
+                self.confirm(
+                    receipt.id,
+                    acknowledge_undecided=acknowledge_undecided,
+                    commit=False,
+                )
             self.db.commit()
         except Exception:
             self.db.rollback()
             raise
-        return self.get(receipt.id)
+        applied = self.get(receipt.id)
+        from app.logging_config import log_event
+
+        log_event(
+            logger,
+            "receipt_learning_batch_applied",
+            receipt_lines_processed=len(applied.items),
+            candidates_accepted=sum(
+                str(decision.get("decision")) == "create" for decision in decisions
+            ),
+            accepted_existing_matches=sum(
+                str(decision.get("decision")) == "match" for decision in decisions
+            ),
+            candidates_rejected=sum(
+                str(decision.get("decision")) == "reject" for decision in decisions
+            ),
+            manual_corrections=sum(
+                str(decision.get("decision")) in {"match", "unmatched"} for decision in decisions
+            ),
+        )
+        return applied
 
     def ignore(self, receipt_id: int) -> PurchaseReceipt:
         receipt = self.get(receipt_id)
@@ -289,7 +345,12 @@ class ReceiptIngestionService:
             line.match_status = ReceiptItemMatchStatus.UNMATCHED.value
             line.match_confidence = None
         else:
-            item = self.db.get(HouseholdItem, household_item_id)
+            item = self.db.scalar(
+                select(HouseholdItem).where(
+                    HouseholdItem.workspace_id == receipt.workspace_id,
+                    HouseholdItem.id == household_item_id,
+                )
+            )
             if item is None:
                 raise ValueError("Household item not found.")
             if active_acquisition and active_acquisition.voided_at is None:
@@ -349,7 +410,7 @@ class ReceiptIngestionService:
         line_id: int,
         *,
         name: str,
-        cadence_days: int,
+        cadence_days: int | None,
         replenishment_mode: str = "either",
         commit: bool = True,
     ) -> tuple[HouseholdItem, PurchaseReceiptItem]:
@@ -365,6 +426,11 @@ class ReceiptIngestionService:
             quantity=f"{line.quantity:g}" if line.quantity is not None else None,
             unit=line.unit,
             cadence_days=cadence_days,
+            cadence_source=(
+                HouseholdCadenceSource.CONFIGURED.value
+                if cadence_days is not None
+                else HouseholdCadenceSource.LEARNING.value
+            ),
             replenishment_mode=replenishment_mode,
             enabled=True,
         )
@@ -407,27 +473,56 @@ class ReceiptIngestionService:
         self.db.add(receipt)
         self.db.flush()
         normalizer = ItemNormalizationService(self.db)
+        automatic_alias_hits = 0
         for parsed_item in parsed.items:
             normalized = normalize_item_name(parsed_item.name)
+            classification = classify_receipt_line(
+                raw_name=parsed_item.name,
+                category=parsed_item.category,
+                model_classification=parsed_item.classification,
+                model_confidence=(
+                    parsed_item.classification_confidence
+                    if parsed_item.classification_confidence is not None
+                    else parsed_item.confidence
+                ),
+                model_canonical_name=parsed_item.canonical_name,
+                is_household_purchase=parsed_item.is_household_purchase,
+            )
             normalized_quantity = normalize_quantity(
                 parsed_item.quantity,
                 parsed_item.unit,
                 source_confidence=parsed_item.confidence,
             )
-            if not parsed_item.is_household_purchase or not normalized:
+            if classification.classification == "uncertain" and normalized:
+                status = ReceiptItemMatchStatus.UNMATCHED.value
+                match = None
+            elif classification.classification not in TRACKABLE_CLASSIFICATIONS or not normalized:
                 status = ReceiptItemMatchStatus.IRRELEVANT.value
                 match = None
             else:
                 match = normalizer.match(parsed_item.name, merchant_key)
+                canonical_match = (
+                    normalizer.match(classification.canonical_name)
+                    if classification.canonical_name
+                    else None
+                )
                 if (
                     match.household_item
                     and match.confidence >= self.settings.receipt_auto_match_confidence
+                    and not match.ambiguous
                 ):
                     status = ReceiptItemMatchStatus.MATCHED.value
+                    if match.source == "alias":
+                        automatic_alias_hits += 1
                 elif (
                     match.household_item
                     and match.confidence >= self.settings.receipt_possible_match_confidence
                 ):
+                    status = ReceiptItemMatchStatus.POSSIBLE.value
+                elif canonical_match and canonical_match.household_item:
+                    # A canonical-name match is useful cross-merchant evidence, but it is
+                    # never strong enough to teach a raw alias without confirmation.
+                    match = canonical_match
                     status = ReceiptItemMatchStatus.POSSIBLE.value
                 else:
                     status = ReceiptItemMatchStatus.UNMATCHED.value
@@ -446,6 +541,9 @@ class ReceiptIngestionService:
                     line_total_cents=parsed_item.line_total_cents,
                     brand=parsed_item.brand,
                     category=parsed_item.category,
+                    classification=classification.classification,
+                    classification_confidence=classification.confidence,
+                    canonical_name=classification.canonical_name,
                     household_item_id=match.household_item.id
                     if match and match.household_item
                     else None,
@@ -465,6 +563,11 @@ class ReceiptIngestionService:
         )
         self.db.commit()
         receipt = self.get(receipt.id)
+        metrics = safe_learning_metrics(receipt)
+        metrics["automatic_alias_hits"] = automatic_alias_hits
+        from app.logging_config import log_event
+
+        log_event(logger, "receipt_learning_analyzed", **metrics)
         matched = [
             line
             for line in receipt.items
@@ -478,6 +581,15 @@ class ReceiptIngestionService:
             auto_confirm_high_confidence
             and parsed.confidence >= self.settings.receipt_auto_match_confidence
             and all_confident
+            and all(
+                line.match_status
+                in {
+                    ReceiptItemMatchStatus.MATCHED.value,
+                    ReceiptItemMatchStatus.IRRELEVANT.value,
+                    ReceiptItemMatchStatus.REJECTED.value,
+                }
+                for line in receipt.items
+            )
         ):
             return self.confirm(receipt.id, user_confirmed=False)
         return receipt

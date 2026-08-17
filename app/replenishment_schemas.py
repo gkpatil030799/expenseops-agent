@@ -5,6 +5,16 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
+ReceiptLineClassificationValue = Literal[
+    "replenishable_household",
+    "perishable_grocery",
+    "routine_consumption",
+    "dining_or_experience",
+    "one_time_purchase",
+    "non_product_line",
+    "uncertain",
+]
+
 
 class ReceiptLineOut(BaseModel):
     id: int
@@ -18,6 +28,9 @@ class ReceiptLineOut(BaseModel):
     acquisition_id: int | None
     match_status: str
     match_confidence: float | None
+    classification: ReceiptLineClassificationValue | None
+    classification_confidence: float | None = Field(default=None, ge=0, le=1)
+    canonical_name: str | None
 
 
 class ReceiptDecisionSummary(BaseModel):
@@ -51,7 +64,7 @@ class ReceiptLineMatchRequest(BaseModel):
 
 class ReceiptLineNewHouseholdItemRequest(BaseModel):
     name: str = Field(..., min_length=1, max_length=255)
-    cadence_days: int = Field(default=30, ge=1, le=3650)
+    cadence_days: int | None = Field(default=None, ge=1, le=3650)
     replenishment_mode: Literal["errand", "delivery", "either"] = "either"
 
 
@@ -60,7 +73,7 @@ class ReceiptLineDecisionRequest(BaseModel):
     decision: Literal["match", "unmatched", "reject", "create"]
     household_item_id: int | None = Field(default=None, ge=1)
     name: str | None = Field(default=None, min_length=1, max_length=255)
-    cadence_days: int = Field(default=30, ge=1, le=3650)
+    cadence_days: int | None = Field(default=None, ge=1, le=3650)
     replenishment_mode: Literal["errand", "delivery", "either"] = "either"
 
 

@@ -10,17 +10,26 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.agent.action_tools import (
+    ITEMIZED_RECEIPT_SPLIT_TOOL_NAME,
     MARK_PERSONAL_TOOL_NAME,
     POST_SPLITWISE_TOOL_NAME,
+    RECEIPT_LEARNING_TOOL_NAME,
+    ItemizedReceiptSplitProposal,
     MarkTransactionPersonalProposal,
     PostSplitwiseExpenseProposal,
+    ReceiptLearningBatchProposal,
+    itemized_receipt_snapshot_hash,
 )
 from app.agent.contracts import (
     AgentActionConfirmationBlock,
     AgentActionPreview,
     AgentStructuredResponse,
 )
-from app.agent.service import AgentConflictError, UnifiedAgentService
+from app.agent.service import (
+    AgentConflictError,
+    AgentFeatureDisabledError,
+    UnifiedAgentService,
+)
 from app.agent.tooling import AgentToolRegistry
 from app.config import Settings, get_settings
 from app.models import (
@@ -28,9 +37,13 @@ from app.models import (
     AuditEvent,
     ExpenseTransaction,
     FinancialOperation,
+    PurchaseReceipt,
+    ReceiptItemMatchStatus,
+    ReceiptParseStatus,
     SplitwiseIntegration,
     TransactionStatus,
 )
+from app.services.receipt_ingestion_service import ReceiptIngestionService
 from app.services.splitwise_service import SplitwiseAPIError
 from app.services.transaction_service import TransactionError, TransactionService
 
@@ -56,11 +69,21 @@ class AgentActionExecutor:
         owner_user_id: int,
         expected_version: int,
     ) -> AgentActionProposal:
+        if not self.settings.agent_enabled or not self.settings.agent_write_actions_enabled:
+            raise AgentFeatureDisabledError(
+                "write_actions_disabled",
+                "Agent write actions are disabled",
+            )
         proposal = self.service.get_action_proposal(
             proposal_public_id,
             owner_user_id=owner_user_id,
         )
-        if proposal.tool_name not in {MARK_PERSONAL_TOOL_NAME, POST_SPLITWISE_TOOL_NAME}:
+        if proposal.tool_name not in {
+            MARK_PERSONAL_TOOL_NAME,
+            POST_SPLITWISE_TOOL_NAME,
+            RECEIPT_LEARNING_TOOL_NAME,
+            ITEMIZED_RECEIPT_SPLIT_TOOL_NAME,
+        }:
             raise AgentConflictError(
                 "unsupported_action",
                 "This Agent action is not supported by the local executor",
@@ -85,8 +108,17 @@ class AgentActionExecutor:
         )
         if proposal.status == "completed":
             return proposal
-        if proposal.tool_name == POST_SPLITWISE_TOOL_NAME:
+        if proposal.tool_name in {
+            POST_SPLITWISE_TOOL_NAME,
+            ITEMIZED_RECEIPT_SPLIT_TOOL_NAME,
+        }:
             return self._execute_splitwise(
+                proposal,
+                owner_user_id=owner_user_id,
+                claimed=claimed,
+            )
+        if proposal.tool_name == RECEIPT_LEARNING_TOOL_NAME:
+            return self._execute_receipt_learning(
                 proposal,
                 owner_user_id=owner_user_id,
                 claimed=claimed,
@@ -211,6 +243,151 @@ class AgentActionExecutor:
             result_metadata=_personal_result(transaction),
         )
 
+    def _execute_receipt_learning(
+        self,
+        proposal: AgentActionProposal,
+        *,
+        owner_user_id: int,
+        claimed: bool,
+    ) -> AgentActionProposal:
+        try:
+            parameters = ReceiptLearningBatchProposal.model_validate_json(
+                json.dumps(proposal.normalized_parameters_json), strict=True
+            )
+        except ValidationError as exc:
+            self.service.fail_action_proposal(
+                proposal.public_id,
+                owner_user_id=owner_user_id,
+                error_code="proposal_parameters_invalid",
+                ambiguous=True,
+            )
+            raise AgentConflictError(
+                "proposal_parameters_invalid",
+                "Receipt-learning proposal parameters are invalid",
+            ) from exc
+
+        workspace_id = self.db.info.get("workspace_id")
+        receipt = self.db.scalar(
+            select(PurchaseReceipt)
+            .where(
+                PurchaseReceipt.workspace_id == workspace_id,
+                PurchaseReceipt.id == parameters.receipt_id,
+            )
+            .with_for_update()
+        )
+        if receipt is None:
+            return self._fail_stale(
+                proposal.public_id,
+                owner_user_id=owner_user_id,
+                code="action_target_not_found",
+            )
+        if receipt.parse_status == ReceiptParseStatus.CONFIRMED.value:
+            if self._receipt_learning_result_matches(parameters):
+                return self.service.complete_action_proposal(
+                    proposal.public_id,
+                    owner_user_id=owner_user_id,
+                    result_metadata=_receipt_learning_result(parameters),
+                )
+            return self._fail_stale(
+                proposal.public_id,
+                owner_user_id=owner_user_id,
+                code="action_target_changed",
+            )
+        if not claimed:
+            return self.service.get_action_proposal(proposal.public_id, owner_user_id=owner_user_id)
+        if receipt.parse_status != parameters.expected_parse_status or _aware(
+            receipt.updated_at
+        ) != _aware(parameters.expected_updated_at):
+            return self._fail_stale(
+                proposal.public_id,
+                owner_user_id=owner_user_id,
+                code="action_target_changed",
+            )
+
+        domain_decisions: list[dict[str, Any]] = []
+        undecided = 0
+        for decision in parameters.decisions:
+            if decision.decision == "match_existing":
+                domain_decisions.append(
+                    {
+                        "line_id": decision.line_id,
+                        "decision": "match",
+                        "household_item_id": decision.household_item_id,
+                    }
+                )
+            elif decision.decision == "create_tracked_item":
+                domain_decisions.append(
+                    {
+                        "line_id": decision.line_id,
+                        "decision": "create",
+                        "name": decision.canonical_name,
+                        "cadence_days": None,
+                        "replenishment_mode": "either",
+                    }
+                )
+            elif decision.decision == "do_not_track":
+                domain_decisions.append({"line_id": decision.line_id, "decision": "reject"})
+            else:
+                undecided += 1
+        try:
+            ReceiptIngestionService(self.db, self.settings).apply_decisions(
+                parameters.receipt_id,
+                decisions=domain_decisions,
+                expected_updated_at=parameters.expected_updated_at,
+                confirm=True,
+                acknowledge_undecided=undecided > 0,
+            )
+        except ValueError as exc:
+            self.service.fail_action_proposal(
+                proposal.public_id,
+                owner_user_id=owner_user_id,
+                error_code=(
+                    "action_target_changed"
+                    if str(exc) == "receipt_changed_refresh_required"
+                    else "action_execution_failed"
+                ),
+            )
+            raise AgentConflictError(
+                "receipt_learning_failed",
+                "The receipt-learning batch could not be applied safely",
+            ) from exc
+        except Exception:
+            self.db.rollback()
+            self.service.fail_action_proposal(
+                proposal.public_id,
+                owner_user_id=owner_user_id,
+                error_code="action_execution_failed",
+            )
+            raise
+        return self.service.complete_action_proposal(
+            proposal.public_id,
+            owner_user_id=owner_user_id,
+            result_metadata=_receipt_learning_result(parameters),
+        )
+
+    def _receipt_learning_result_matches(self, parameters: ReceiptLearningBatchProposal) -> bool:
+        receipt = ReceiptIngestionService(self.db, self.settings).get(parameters.receipt_id)
+        lines = {line.id: line for line in receipt.items}
+        for decision in parameters.decisions:
+            line = lines.get(decision.line_id)
+            if line is None:
+                return False
+            if decision.decision == "match_existing" and (
+                line.household_item_id != decision.household_item_id or line.acquisition is None
+            ):
+                return False
+            if decision.decision == "create_tracked_item" and (
+                line.household_item is None
+                or line.household_item.name != decision.canonical_name
+                or line.acquisition is None
+            ):
+                return False
+            if decision.decision == "do_not_track" and (
+                line.match_status != ReceiptItemMatchStatus.REJECTED.value
+            ):
+                return False
+        return True
+
     def _execute_splitwise(
         self,
         proposal: AgentActionProposal,
@@ -219,9 +396,13 @@ class AgentActionExecutor:
         claimed: bool,
     ) -> AgentActionProposal:
         try:
-            parameters = PostSplitwiseExpenseProposal.model_validate_json(
-                json.dumps(proposal.normalized_parameters_json),
-                strict=True,
+            proposal_model = (
+                ItemizedReceiptSplitProposal
+                if proposal.tool_name == ITEMIZED_RECEIPT_SPLIT_TOOL_NAME
+                else PostSplitwiseExpenseProposal
+            )
+            parameters = proposal_model.model_validate_json(
+                json.dumps(proposal.normalized_parameters_json), strict=True
             )
         except ValidationError as exc:
             self.service.fail_action_proposal(
@@ -251,7 +432,35 @@ class AgentActionExecutor:
             )
             if terminal is not None or existing.state in {"pending", "in_flight"}:
                 return terminal or proposal
-
+        if isinstance(parameters, ItemizedReceiptSplitProposal):
+            receipt = self.db.scalar(
+                select(PurchaseReceipt)
+                .where(
+                    PurchaseReceipt.workspace_id == workspace_id,
+                    PurchaseReceipt.id == parameters.receipt_id,
+                    PurchaseReceipt.transaction_id == parameters.transaction_id,
+                )
+                .with_for_update()
+            )
+            if (
+                receipt is None
+                or receipt.parse_status != parameters.expected_receipt_status
+                or _aware(receipt.updated_at) != _aware(parameters.expected_receipt_updated_at)
+            ):
+                return self._fail_stale(
+                    proposal.public_id,
+                    owner_user_id=owner_user_id,
+                    code="action_target_changed",
+                )
+            # The relationship is loaded after the row lock so the frozen line
+            # snapshot is checked immediately before provider execution.
+            self.db.refresh(receipt, attribute_names=["items"])
+            if itemized_receipt_snapshot_hash(receipt) != parameters.receipt_snapshot_hash:
+                return self._fail_stale(
+                    proposal.public_id,
+                    owner_user_id=owner_user_id,
+                    code="action_target_changed",
+                )
         # Provider preflight and durable operation creation belong exclusively
         # to the executor that won the proposal CAS. A concurrent confirmer may
         # only reconcile an already-recorded operation above.
@@ -507,8 +716,27 @@ class AgentActionExecutor:
         )
         raise AgentConflictError(
             code,
-            "The transaction changed after this action was proposed. Nothing was changed.",
+            "The action target changed after this proposal was prepared. Nothing was changed.",
         )
+
+
+def _receipt_learning_result(parameters: ReceiptLearningBatchProposal) -> dict[str, Any]:
+    return {
+        "receipt_id": parameters.receipt_id,
+        "line_count": len(parameters.decisions),
+        "matched_count": sum(
+            decision.decision == "match_existing" for decision in parameters.decisions
+        ),
+        "created_count": sum(
+            decision.decision == "create_tracked_item" for decision in parameters.decisions
+        ),
+        "not_tracked_count": sum(
+            decision.decision == "do_not_track" for decision in parameters.decisions
+        ),
+        "undecided_count": sum(
+            decision.decision == "leave_undecided" for decision in parameters.decisions
+        ),
+    }
 
 
 def action_confirmation_block(proposal: AgentActionProposal) -> AgentActionConfirmationBlock:
@@ -516,6 +744,8 @@ def action_confirmation_block(proposal: AgentActionProposal) -> AgentActionConfi
     action_by_tool = {
         MARK_PERSONAL_TOOL_NAME: "mark_transaction_personal",
         POST_SPLITWISE_TOOL_NAME: "post_splitwise_expense",
+        RECEIPT_LEARNING_TOOL_NAME: "apply_receipt_learning_batch",
+        ITEMIZED_RECEIPT_SPLIT_TOOL_NAME: "post_itemized_receipt_split",
     }
     action = action_by_tool.get(proposal.tool_name)
     if action is None:

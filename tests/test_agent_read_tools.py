@@ -462,6 +462,68 @@ def test_spending_tool_category_scope_returns_only_requested_category(read_tool_
     assert [row["name"] for row in output["merchants"]] == ["Category Store"]
 
 
+def test_lifestyle_tool_is_tenant_scoped_and_keeps_credits_separate(read_tool_database):
+    factory, contexts, item_ids = read_tool_database
+    owner = contexts["owner"]
+    outsider = contexts["outsider"]
+    with _scoped(factory, outsider) as db:
+        db.add(
+            _transaction(
+                workspace_id=outsider.workspace_id,
+                item_id=item_ids["other"],
+                provider_id="lifestyle-outsider-coffee",
+                merchant="Secret Coffee",
+                amount_cents=99_900,
+                occurred_on=date(2026, 8, 11),
+                category="FOOD_AND_DRINK / COFFEE",
+            )
+        )
+        db.commit()
+    with _scoped(factory, owner) as db:
+        db.add_all(
+            [
+                _transaction(
+                    workspace_id=owner.workspace_id,
+                    item_id=item_ids["shared"],
+                    provider_id="lifestyle-owner-coffee",
+                    merchant="Local Coffee",
+                    amount_cents=1_200,
+                    occurred_on=date(2026, 8, 11),
+                    category="FOOD_AND_DRINK / COFFEE",
+                ),
+                _transaction(
+                    workspace_id=owner.workspace_id,
+                    item_id=item_ids["shared"],
+                    provider_id="lifestyle-owner-credit",
+                    merchant="Local Coffee",
+                    amount_cents=-300,
+                    occurred_on=date(2026, 8, 12),
+                    category="FOOD_AND_DRINK / COFFEE",
+                ),
+            ]
+        )
+        db.commit()
+
+        registry = build_read_tool_registry(_settings())
+        output = _execute(
+            registry,
+            db,
+            "get_lifestyle_dining_insights",
+            {
+                "start_date": "2026-08-01",
+                "end_date": "2026-08-16",
+                "activity_type": "coffee",
+                "spend_basis": "card",
+            },
+        )
+
+    assert output["summary"]["total_cents"] == 1_200
+    assert output["summary"]["credits_cents"] == 300
+    assert output["summary"]["transaction_count"] == 1
+    assert [row["name"] for row in output["top_merchants"]] == ["Local Coffee"]
+    assert registry.get("get_lifestyle_dining_insights").version == "1.0"
+
+
 def test_read_tool_outputs_and_transaction_search_are_hard_bounded(read_tool_database):
     factory, contexts, item_ids = read_tool_database
     context = contexts["owner"]
@@ -756,6 +818,7 @@ def test_prompt_injection_merchant_is_inert_data_and_provider_fields_are_omitted
         "get_errands_and_plan",
         "get_household_replenishment",
         "get_integration_status",
+        "get_lifestyle_dining_insights",
         "get_receipts",
         "get_relevant_deals",
         "get_spending_insights",

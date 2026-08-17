@@ -902,6 +902,20 @@ describe("Agent controlled-action validation", () => {
     expect(
       parseAgentStructuredResponse({ schema_version: "1.0", blocks: [block] }).blocks[0],
     ).toBe(block);
+    const receiptLearning = {
+      ...block,
+      action: "apply_receipt_learning_batch",
+      title: "Learn household items from this receipt",
+      confirm_label: "Confirm selected",
+    } as const;
+    expect(parseAgentActionConfirmation(receiptLearning)).toBe(receiptLearning);
+    const itemizedReceiptSplit = {
+      ...block,
+      action: "post_itemized_receipt_split",
+      title: "Split restaurant receipt by item",
+      confirm_label: "Confirm itemized split",
+    } as const;
+    expect(parseAgentActionConfirmation(itemizedReceiptSplit)).toBe(itemizedReceiptSplit);
   });
 
   it("rejects editable action parameters, missing action types, and invalid versions", () => {
@@ -914,5 +928,55 @@ describe("Agent controlled-action validation", () => {
     expect(() =>
       parseAgentActionConfirmation({ ...block, proposal_version: 0 }),
     ).toThrow(AgentProtocolError);
+    expect(() =>
+      parseAgentActionConfirmation({ ...block, action: "create_household_item_directly" }),
+    ).toThrow(AgentProtocolError);
+  });
+});
+
+describe("Day 10 lifestyle summary validation", () => {
+  const block = {
+    type: "lifestyle_summary",
+    block_version: "1.0",
+    title: "Restaurant summary",
+    start_date: "2026-08-01",
+    end_date: "2026-08-16",
+    previous_start_date: "2026-07-16",
+    previous_end_date: "2026-07-31",
+    activity_type: "restaurants",
+    currency_code: "USD",
+    spend_basis: "card",
+    total_cents: 12_000,
+    credits_cents: 500,
+    transaction_count: 4,
+    average_cents: 3_000,
+    personal_cents: 4_000,
+    shared_cents: 8_000,
+    unreviewed_cents: 0,
+    previous_total_cents: 9_000,
+    previous_transaction_count: 3,
+    unknown_share_transactions: 0,
+    previous_unknown_share_transactions: 0,
+    unknown_credit_share_transactions: 0,
+    previous_unknown_credit_share_transactions: 0,
+    weekday_cents: 8_000,
+    weekday_count: 3,
+    weekend_cents: 4_000,
+    weekend_count: 1,
+    uncertain_transaction_count: 1,
+    observations: ["Restaurant purchases increased from 3 to 4."],
+    activities: [{ name: "restaurants", amount_cents: 12_000, transaction_count: 4, percentage: 100 }],
+    top_merchants: [{ name: "Local Bistro", amount_cents: 8_000, transaction_count: 2, percentage: 66.7 }],
+  } as const;
+
+  it("accepts the strict reconciled code-owned lifestyle card", () => {
+    expect(parseAgentStructuredResponse({ schema_version: "1.0", blocks: [block] }).blocks[0]).toBe(block);
+  });
+
+  it("fails closed on negative, unreconciled, unknown card-basis, or extra data", () => {
+    expect(() => parseAgentStructuredResponse({ schema_version: "1.0", blocks: [{ ...block, total_cents: -1 }] })).toThrow(AgentProtocolError);
+    expect(() => parseAgentStructuredResponse({ schema_version: "1.0", blocks: [{ ...block, personal_cents: 3_999 }] })).toThrow(AgentProtocolError);
+    expect(() => parseAgentStructuredResponse({ schema_version: "1.0", blocks: [{ ...block, unknown_share_transactions: 1 }] })).toThrow(AgentProtocolError);
+    expect(() => parseAgentStructuredResponse({ schema_version: "1.0", blocks: [{ ...block, model_commentary: "buy more" }] })).toThrow(AgentProtocolError);
   });
 });

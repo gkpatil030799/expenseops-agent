@@ -20,7 +20,12 @@ router = APIRouter(prefix="/api/privacy", tags=["privacy"])
 
 
 class ConsentRequest(BaseModel):
-    purpose: Literal["gmail_receipts", "gmail_promotions", "model_receipt_processing"]
+    purpose: Literal[
+        "gmail_receipts",
+        "gmail_promotions",
+        "model_receipt_processing",
+        "structured_transaction_learning",
+    ]
     granted: bool
 
 

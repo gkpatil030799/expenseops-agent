@@ -4,6 +4,7 @@ import {
   BarChart3,
   CheckCircle2,
   ClipboardList,
+  Coffee,
   Clock3,
   Inbox,
   Info,
@@ -28,6 +29,7 @@ import type {
   AgentEmptyStateBlock,
   AgentErrandSummaryBlock,
   AgentIntegrationStatusBlock,
+  AgentLifestyleSummaryBlock,
   AgentNavigationBlock,
   AgentReceiptSummaryBlock,
   AgentReplenishmentSummaryBlock,
@@ -93,6 +95,8 @@ export function AgentResponseRenderer({
                 onOpenInsights={onNavigate ? () => onNavigate({ target_surface: "expense_insights", entity: null }) : undefined}
               />
             );
+          case "lifestyle_summary":
+            return <LifestyleSummaryCard key={key} block={block} />;
           case "transaction_list":
             return <TransactionListCard key={key} block={block} onNavigate={onNavigate} />;
           case "replenishment_summary":
@@ -677,6 +681,70 @@ function CardHeading({ icon, title, subtitle }: { icon: ReactNode; title: string
       <span className="flex size-10 shrink-0 items-center justify-center rounded-control bg-indigo-100 text-indigo-700">{icon}</span>
     </div>
   );
+}
+
+function LifestyleSummaryCard({ block }: { block: AgentLifestyleSummaryBlock }) {
+  const basisLabel = block.spend_basis === "actual_share" ? "My actual share" : "Card spend";
+  return (
+    <Card className="overflow-hidden border-amber-200 bg-gradient-to-br from-white to-amber-50/60">
+      <CardHeader className="pb-3">
+        <div className="flex items-start justify-between gap-3">
+          <div className="min-w-0">
+            <p className="text-xs font-semibold uppercase tracking-[0.16em] text-amber-800">
+              {formatDateRange(block.start_date, block.end_date)}
+            </p>
+            <CardTitle className="mt-1 text-base [overflow-wrap:anywhere]">{block.title}</CardTitle>
+          </div>
+          <span className="flex size-10 shrink-0 items-center justify-center rounded-control bg-amber-100 text-amber-800">
+            <Coffee className="size-5" aria-hidden="true" />
+          </span>
+        </div>
+      </CardHeader>
+      <CardContent className="space-y-4 pt-0">
+        <div className="grid gap-2 sm:grid-cols-3">
+          <LifestyleMetric label={basisLabel} value={formatMinor(block.total_cents, block.currency_code)} />
+          <LifestyleMetric label="Purchases" value={String(block.transaction_count)} />
+          <LifestyleMetric label="Typical check" value={formatMinor(block.average_cents, block.currency_code)} />
+        </div>
+        {block.previous_total_cents !== null && block.previous_transaction_count !== null ? (
+          <p className="text-xs text-slate-600">
+            Prior comparable period: {formatMinor(block.previous_total_cents, block.currency_code)} across {block.previous_transaction_count} purchase{block.previous_transaction_count === 1 ? "" : "s"}.
+          </p>
+        ) : null}
+        <p className="text-xs text-slate-600">
+          Personal {formatMinor(block.personal_cents, block.currency_code)} · Shared {formatMinor(block.shared_cents, block.currency_code)} · Unreviewed {formatMinor(block.unreviewed_cents, block.currency_code)}
+        </p>
+        <p className="text-xs text-slate-600">
+          Weekdays {block.weekday_count} · Weekends {block.weekend_count}
+        </p>
+        {block.credits_cents ? (
+          <p className="text-xs font-medium text-emerald-700">Credits reported separately {formatMinor(block.credits_cents, block.currency_code)}</p>
+        ) : null}
+        {block.unknown_share_transactions || block.previous_unknown_share_transactions || block.unknown_credit_share_transactions || block.previous_unknown_credit_share_transactions ? (
+          <p className="text-xs font-medium text-amber-900">Actual-share figures use confirmed allocations only; some shared purchases or credits were omitted.</p>
+        ) : null}
+        {block.uncertain_transaction_count ? (
+          <p className="text-xs font-medium text-slate-700">{block.uncertain_transaction_count} Food & Dining transaction{block.uncertain_transaction_count === 1 ? " was" : "s were"} left unclassified rather than guessed.</p>
+        ) : null}
+        {block.observations.length ? (
+          <ul className="space-y-1.5 text-sm text-slate-700">
+            {block.observations.map((observation) => <li key={observation} className="[overflow-wrap:anywhere]">• {observation}</li>)}
+          </ul>
+        ) : null}
+        <LifestyleBreakdown title="Activity mix" rows={block.activities} currency={block.currency_code} />
+        <LifestyleBreakdown title="Top merchants" rows={block.top_merchants} currency={block.currency_code} />
+      </CardContent>
+    </Card>
+  );
+}
+
+function LifestyleMetric({ label, value }: { label: string; value: string }) {
+  return <div className="min-w-0 rounded-control bg-white/80 p-3"><p className="text-xs font-medium text-slate-600">{label}</p><p className="mt-1 truncate text-xl font-semibold text-slate-950">{value}</p></div>;
+}
+
+function LifestyleBreakdown({ title, rows, currency }: { title: string; rows: AgentLifestyleSummaryBlock["top_merchants"]; currency: string }) {
+  if (!rows.length) return null;
+  return <section aria-label={title}><h4 className="text-xs font-semibold uppercase tracking-wide text-slate-500">{title}</h4><div className="mt-2 divide-y divide-slate-200 rounded-control border border-slate-200 bg-white/80">{rows.map((row) => <div key={row.name} className="flex min-h-11 items-center justify-between gap-3 px-3 py-2 text-sm"><span className="min-w-0 truncate font-medium text-slate-800">{humanize(row.name)} · {row.transaction_count}</span><span className="shrink-0 tabular-nums text-slate-600">{formatMinor(row.amount_cents, currency)}</span></div>)}</div></section>;
 }
 
 function SpendingSummaryCard({

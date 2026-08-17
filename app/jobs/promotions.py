@@ -48,9 +48,16 @@ def run(command: str) -> dict:
                     continue
                 try:
                     if command == "sync":
-                        value = GmailPromotionIngestionService(
-                            db, context.settings
-                        ).sync().__dict__
+                        service = GmailPromotionIngestionService(db, context.settings)
+                        if not service.configured:
+                            log_event(
+                                logger,
+                                "promotion_workspace_job_skipped_not_configured",
+                                workspace_id=context.workspace_id,
+                                command=command,
+                            )
+                            continue
+                        value = service.sync().__dict__
                     elif command == "rescore":
                         value = {"rescored": PromotionRankingService(db).rescore_all()}
                     elif command == "digest":

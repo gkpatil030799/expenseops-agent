@@ -74,6 +74,8 @@ import type {
   Group,
   MemoryEntry,
   SplitwiseUser,
+  StructuredMemoryMetrics,
+  StructuredMemorySettings,
   Transaction,
 } from "@/types";
 import {
@@ -89,6 +91,11 @@ import {
 } from "@/agent/pageContext";
 
 const AgentExperience = lazy(() => import("@/agent/AgentExperience"));
+const AttentionCenterPage = lazy(() =>
+  import("@/components/AttentionCenterPage").then((module) => ({
+    default: module.AttentionCenterPage,
+  })),
+);
 
 type PlaidWindow = Window & {
   Plaid?: {
@@ -110,9 +117,12 @@ type TransactionActionResponse = { message: string };
 type AccountContext = {
   user: { id: number; email: string; display_name: string; avatar_url?: string | null };
   workspace: { id: number; name: string; workspace_type: string };
-  features?: { agent?: { enabled: boolean; read_only: boolean } };
+  features?: {
+    agent?: { enabled: boolean; read_only: boolean; proactive_enabled?: boolean };
+  };
 };
 type WorkspaceView = "expenses" | "household" | "promotions" | "settings" | "agent";
+type ExpenseTab = "review" | "insights" | "activity" | "attention";
 type ActionNotice = { tone: "success" | "error"; text: string; correlationId?: string };
 
 function splitResponseQueued(response: SplitResponse): boolean {
@@ -142,6 +152,10 @@ function DashboardApp() {
   const [financialActivityError, setFinancialActivityError] = useState("");
   const [financialActivityReload, setFinancialActivityReload] = useState(0);
   const [aiMemories, setAiMemories] = useState<AIMemory[]>([]);
+  const [memorySettings, setMemorySettings] = useState<StructuredMemorySettings>({
+    transaction_learning_enabled: true,
+  });
+  const [memoryMetrics, setMemoryMetrics] = useState<StructuredMemoryMetrics | null>(null);
   const [filters, setFilters] = useState<DashboardFilters>({
     merchant: "",
     group: "",
@@ -150,9 +164,11 @@ function DashboardApp() {
     dateTo: "",
   });
   const [analyticsDays, setAnalyticsDays] = useState(30);
-  const [expenseTab, setExpenseTab] = useState<"review" | "insights" | "activity">(() => {
+  const [expenseTab, setExpenseTab] = useState<ExpenseTab>(() => {
     const value = new URLSearchParams(window.location.search).get("tab");
-    return value === "insights" || value === "activity" ? value : "review";
+    return value === "insights" || value === "activity" || value === "attention"
+      ? value
+      : "review";
   });
   const [syncError, setSyncError] = useState(false);
   const [lastSyncedAt, setLastSyncedAt] = useState<Date | null>(null);
@@ -216,6 +232,9 @@ function DashboardApp() {
   );
   const memory = useMemo(() => memoryForTransactions(allTransactions), [allTransactions]);
   const agentEnabled = Boolean(accountContext?.features?.agent?.enabled);
+  const proactiveAttentionEnabled = Boolean(
+    accountContext?.features?.agent?.proactive_enabled,
+  );
   const currentAgentContextKey = useMemo(
     () => agentPageContextKey(agentSourceContext.pageContext),
     [agentSourceContext.pageContext],
@@ -298,6 +317,17 @@ function DashboardApp() {
   }, [accountContext, activeWorkspace, agentEnabled, authResolved]);
 
   useEffect(() => {
+    if (!authResolved || !accountContext || proactiveAttentionEnabled) return;
+    if (expenseTab !== "attention") return;
+    const params = new URLSearchParams(window.location.search);
+    params.set("workspace", "expenses");
+    params.set("tab", "review");
+    window.history.replaceState({}, "", `/?${params}`);
+    setExpenseTab("review");
+    setAgentSourceContext(baseContextForWorkspace("expenses", "review"));
+  }, [accountContext, authResolved, expenseTab, proactiveAttentionEnabled]);
+
+  useEffect(() => {
     const media = window.matchMedia("(min-width: 1024px)");
     const update = () => setWideAgentPanel(media.matches);
     update();
@@ -350,7 +380,12 @@ function DashboardApp() {
           ? workspace
           : "expenses";
       const tab = params.get("tab");
-      const nextTab = tab === "insights" || tab === "activity" ? tab : "review";
+      const nextTab =
+        tab === "insights" ||
+        tab === "activity" ||
+        (tab === "attention" && proactiveAttentionEnabled)
+          ? tab
+          : "review";
       if (
         nextWorkspace !== "agent"
         && (nextWorkspace !== activeWorkspace || nextTab !== expenseTab)
@@ -364,7 +399,7 @@ function DashboardApp() {
     };
     window.addEventListener("popstate", onPopState);
     return () => window.removeEventListener("popstate", onPopState);
-  }, [activeWorkspace, agentEnabled, expenseTab]);
+  }, [activeWorkspace, agentEnabled, expenseTab, proactiveAttentionEnabled]);
 
   useEffect(() => {
     if (!accountContext) return;
@@ -546,10 +581,61 @@ function DashboardApp() {
 
   async function loadAIMemories() {
     try {
-      setAiMemories(await api<AIMemory[]>("/ai/memory"));
+      const [memories, settings, metrics] = await Promise.all([
+        api<AIMemory[]>("/ai/memory"),
+        api<StructuredMemorySettings>("/ai/memory/settings"),
+        api<StructuredMemoryMetrics>("/ai/memory/metrics"),
+      ]);
+      setAiMemories(memories);
+      setMemorySettings(settings);
+      setMemoryMetrics(metrics);
     } catch {
       setAiMemories([]);
     }
+  }
+
+  async function setMemoryLearning(enabled: boolean) {
+    const settings = await api<StructuredMemorySettings>("/ai/memory/settings", {
+      method: "PATCH",
+      body: JSON.stringify({ transaction_learning_enabled: enabled }),
+    });
+    setMemorySettings(settings);
+  }
+
+  async function createMemoryPreference(payload: {
+    merchant: string;
+    preference: "personal" | "shared";
+    participant_names: string[];
+    group_name: string | null;
+  }) {
+    await api<AIMemory>("/ai/memory/preferences", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+    await loadAIMemories();
+  }
+
+  async function updateMemoryPreference(
+    id: number,
+    payload: {
+      preference: "personal" | "shared";
+      participant_names: string[];
+      group_name: string | null;
+    },
+  ) {
+    await api<AIMemory>(`/ai/memory/${id}`, {
+      method: "PATCH",
+      body: JSON.stringify(payload),
+    });
+    await loadAIMemories();
+  }
+
+  async function sendMemoryFeedback(id: number, outcome: "accepted" | "rejected") {
+    await api(`/ai/memory/${id}/feedback`, {
+      method: "POST",
+      body: JSON.stringify({ outcome }),
+    });
+    await loadAIMemories();
   }
 
   async function deleteAIMemory(id: number) {
@@ -608,7 +694,8 @@ function DashboardApp() {
     finally { setBusy(null); }
   }
 
-  function changeExpenseTab(tab: "review" | "insights" | "activity") {
+  function changeExpenseTab(tab: ExpenseTab) {
+    if (tab === "attention" && !proactiveAttentionEnabled) return;
     if (activeWorkspace === "expenses" && expenseTab === tab) return;
     const params = new URLSearchParams(window.location.search); params.set("workspace", "expenses"); params.set("tab", tab);
     window.history.pushState({}, "", `/?${params}`);
@@ -988,7 +1075,7 @@ function DashboardApp() {
             onAgentContextChange={publishAgentContext}
             agentNavigationRequest={agentNavigationRequest}
             splitwiseTools={<GroupManagementPanel currentUserId={currentSplitwiseUser?.id ?? null} />}
-            learnedBehaviorTools={<div className="space-y-5"><AgentMemoryPanel friends={memory.friends} groups={memory.groups} onSelectFriend={selectMemoryFriend} onSelectGroup={selectMemoryGroup} loading={busy !== null && allTransactions.length === 0}/><AIFallbackMemoryPanel memories={aiMemories} onDelete={deleteAIMemory} loading={busy !== null && aiMemories.length === 0}/></div>}
+            learnedBehaviorTools={<div className="space-y-5"><AgentMemoryPanel friends={memory.friends} groups={memory.groups} onSelectFriend={selectMemoryFriend} onSelectGroup={selectMemoryGroup} loading={busy !== null && allTransactions.length === 0}/><AIFallbackMemoryPanel memories={aiMemories} settings={memorySettings} metrics={memoryMetrics} onSetLearning={setMemoryLearning} onCreate={createMemoryPreference} onUpdate={updateMemoryPreference} onFeedback={sendMemoryFeedback} onDelete={deleteAIMemory} loading={busy !== null && aiMemories.length === 0}/></div>}
           />
         ) : activeWorkspace === "household" ? (
           <HouseholdOpsPage
@@ -1003,7 +1090,11 @@ function DashboardApp() {
         ) : (
           <>
         <Header active={expenseTab} onSync={syncTransactions} busy={busy} pendingCount={transactions.length} pendingTotal={pendingTotal} lastSyncLabel={lastSyncedAt ? relativeTime(lastSyncedAt) : lastSyncLabel} syncError={syncError} />
-        <ExpenseTabs active={expenseTab} onChange={changeExpenseTab}/>
+        <ExpenseTabs
+          active={expenseTab}
+          onChange={changeExpenseTab}
+          showAttention={proactiveAttentionEnabled}
+        />
 
         {expenseTab === "review" ? <div className="space-y-6">
         <ReviewFilters filters={filters} onChange={updateFilter} />
@@ -1120,7 +1211,7 @@ function DashboardApp() {
               onUndo={undoTransaction}
             />
           </section>
-        </div> : expenseTab === "insights" ? <InsightsDashboard onAgentContextChange={publishAgentContext}/> : <ActivityTimeline page={financialActivity} loading={financialActivityLoading} error={financialActivityError} onRetry={() => setFinancialActivityReload((value) => value + 1)} focusedTransactionId={focusedTransactionId} onAgentFocus={setFocusedTransactionId}/>}
+        </div> : expenseTab === "insights" ? <InsightsDashboard onAgentContextChange={publishAgentContext}/> : expenseTab === "activity" ? <ActivityTimeline page={financialActivity} loading={financialActivityLoading} error={financialActivityError} onRetry={() => setFinancialActivityReload((value) => value + 1)} focusedTransactionId={focusedTransactionId} onAgentFocus={setFocusedTransactionId}/> : proactiveAttentionEnabled ? <Suspense fallback={<div className="ui-skeleton min-h-64 rounded-2xl" aria-label="Loading Attention Center" />}><AttentionCenterPage onNavigate={navigateFromAgent}/></Suspense> : null}
           </>
         )}
           </div>
@@ -1319,13 +1410,14 @@ function AgentFullscreenDialog({
 
 function baseContextForWorkspace(
   workspace: WorkspaceView,
-  expenseTab: "review" | "insights" | "activity",
+  expenseTab: ExpenseTab,
 ): AgentContextDescriptor {
   if (workspace === "expenses") {
     const surface = {
       review: "expense_review",
       insights: "expense_insights",
       activity: "expense_activity",
+      attention: "expense_review",
     } as const;
     return baseAgentContext(surface[expenseTab]);
   }
@@ -1776,23 +1868,155 @@ function AgentMemoryPanel({
 
 function AIFallbackMemoryPanel({
   memories,
+  settings,
+  metrics,
+  onSetLearning,
+  onCreate,
+  onUpdate,
+  onFeedback,
   onDelete,
   loading,
 }: {
   memories: AIMemory[];
+  settings: StructuredMemorySettings;
+  metrics: StructuredMemoryMetrics | null;
+  onSetLearning: (enabled: boolean) => Promise<void>;
+  onCreate: (payload: {
+    merchant: string;
+    preference: "personal" | "shared";
+    participant_names: string[];
+    group_name: string | null;
+  }) => Promise<void>;
+  onUpdate: (
+    id: number,
+    payload: {
+      preference: "personal" | "shared";
+      participant_names: string[];
+      group_name: string | null;
+    },
+  ) => Promise<void>;
+  onFeedback: (id: number, outcome: "accepted" | "rejected") => Promise<void>;
   onDelete: (id: number) => void;
   loading: boolean;
 }) {
+  const [merchant, setMerchant] = useState("");
+  const [preference, setPreference] = useState<"personal" | "shared">("personal");
+  const [participants, setParticipants] = useState("");
+  const [groupName, setGroupName] = useState("");
+  const [memoryBusy, setMemoryBusy] = useState(false);
+  const [memoryError, setMemoryError] = useState("");
+
+  const act = async (action: () => Promise<void>) => {
+    setMemoryBusy(true);
+    setMemoryError("");
+    try {
+      await action();
+    } catch (error) {
+      setMemoryError(apiErrorMessage(error, "The preference could not be saved."));
+    } finally {
+      setMemoryBusy(false);
+    }
+  };
+
+  const parsedParticipants = participants
+    .split(",")
+    .map((value) => value.trim())
+    .filter(Boolean);
+
   return (
     <Card>
       <CardHeader className="pb-4">
         <div className="flex items-center gap-2">
           <Sparkles className="h-4 w-4 text-indigo-600" />
-          <CardTitle>AI learned corrections</CardTitle>
+          <CardTitle>Structured preferences</CardTitle>
         </div>
-        <CardDescription>Fallback examples learned from Button mode completions</CardDescription>
+        <CardDescription>
+          Explainable transaction suggestions from your preferences and confirmed corrections
+        </CardDescription>
       </CardHeader>
       <CardContent className="space-y-3">
+        <label className="flex min-h-11 items-center justify-between gap-3 rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm font-medium text-slate-800">
+          <span>
+            Learn from confirmed transaction actions
+            <span className="block text-xs font-normal text-slate-500">
+              Chat transcripts are never stored as memory.
+            </span>
+          </span>
+          <input
+            type="checkbox"
+            checked={settings.transaction_learning_enabled}
+            disabled={memoryBusy}
+            onChange={(event) => void act(() => onSetLearning(event.target.checked))}
+            className="h-5 w-5 accent-indigo-600"
+          />
+        </label>
+
+        <form
+          className="grid gap-3 rounded-lg border border-slate-200 bg-slate-50/60 p-3"
+          onSubmit={(event) => {
+            event.preventDefault();
+            void act(async () => {
+              await onCreate({
+                merchant: merchant.trim(),
+                preference,
+                participant_names: preference === "shared" ? parsedParticipants : [],
+                group_name: preference === "shared" && groupName.trim() ? groupName.trim() : null,
+              });
+              setMerchant("");
+              setParticipants("");
+              setGroupName("");
+            });
+          }}
+        >
+          <p className="text-sm font-semibold text-slate-900">Add an explicit preference</p>
+          <label className="grid gap-1 text-xs font-medium text-slate-700">
+            Merchant
+            <Input
+              value={merchant}
+              onChange={(event) => setMerchant(event.target.value)}
+              maxLength={255}
+              required
+              placeholder="Costco"
+            />
+          </label>
+          <label className="grid gap-1 text-xs font-medium text-slate-700">
+            Usual treatment
+            <select
+              className="min-h-11 rounded-md border border-slate-300 bg-white px-3 text-sm"
+              value={preference}
+              onChange={(event) => setPreference(event.target.value as "personal" | "shared")}
+            >
+              <option value="personal">Personal</option>
+              <option value="shared">Shared</option>
+            </select>
+          </label>
+          {preference === "shared" ? (
+            <div className="grid gap-3 sm:grid-cols-2">
+              <label className="grid gap-1 text-xs font-medium text-slate-700">
+                People, comma-separated
+                <Input value={participants} onChange={(event) => setParticipants(event.target.value)} maxLength={500} placeholder="Gunjan" />
+              </label>
+              <label className="grid gap-1 text-xs font-medium text-slate-700">
+                Splitwise group (optional)
+                <Input value={groupName} onChange={(event) => setGroupName(event.target.value)} maxLength={255} placeholder="Apartment" />
+              </label>
+            </div>
+          ) : null}
+          <Button
+            type="submit"
+            className="min-h-11 w-fit"
+            disabled={memoryBusy || !merchant.trim() || (preference === "shared" && !parsedParticipants.length && !groupName.trim())}
+          >
+            Save preference
+          </Button>
+        </form>
+
+        {metrics ? (
+          <p className="text-xs text-slate-500">
+            Suggestions shown {metrics.shown} · accepted {metrics.accepted} · corrected {metrics.edited} · rejected {metrics.rejected}
+          </p>
+        ) : null}
+        {memoryError ? <p role="alert" className="text-sm text-rose-700">{memoryError}</p> : null}
         {loading ? (
           <SkeletonRows rows={3} />
         ) : memories.length ? (
@@ -1804,12 +2028,10 @@ function AIFallbackMemoryPanel({
               <div className="flex items-start justify-between gap-2">
                 <div className="min-w-0">
                   <p className="truncate text-sm font-medium text-slate-900">
-                    “{memory.original_message}”
+                    {memory.label}
                   </p>
                   <p className="mt-1 text-xs text-slate-500">
-                    {memory.final_action}
-                    {memory.final_split_mode ? ` · ${memory.final_split_mode}` : ""}
-                    {memory.final_group_name ? ` · ${memory.final_group_name}` : ""}
+                    {memory.rationale}
                   </p>
                 </div>
                 <Button
@@ -1817,8 +2039,8 @@ function AIFallbackMemoryPanel({
                   variant="ghost"
                   className="h-7 w-7 shrink-0 text-slate-400 hover:text-red-600"
                   onClick={() => onDelete(memory.id)}
-                  aria-label={`Delete learned correction ${memory.original_message}`}
-                  title="Delete learned correction"
+                  aria-label={`Delete preference ${memory.label}`}
+                  title="Delete preference"
                 >
                   <X className="h-3.5 w-3.5" />
                 </Button>
@@ -1841,13 +2063,48 @@ function AIFallbackMemoryPanel({
                   ? ` · last used ${new Date(memory.last_used_at).toLocaleDateString()}`
                   : ""}
               </p>
+              <div className="mt-3 flex flex-wrap gap-2">
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  className="min-h-11"
+                  disabled={memoryBusy}
+                  onClick={() => {
+                    setMerchant(memory.merchant || "");
+                    setPreference(memory.final_action === "personal" ? "personal" : "shared");
+                    setParticipants(memory.final_participants.join(", "));
+                    setGroupName(memory.final_group_name || "");
+                  }}
+                >
+                  Edit preference
+                </Button>
+                {memory.final_action !== "personal" ? (
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="outline"
+                    className="min-h-11"
+                    disabled={memoryBusy}
+                    onClick={() => void act(() => onUpdate(memory.id, {
+                      preference: "personal",
+                      participant_names: [],
+                      group_name: null,
+                    }))}
+                  >
+                    Change to personal
+                  </Button>
+                ) : null}
+                <Button type="button" size="sm" variant="ghost" className="min-h-11" disabled={memoryBusy} onClick={() => void act(() => onFeedback(memory.id, "accepted"))}>Helpful</Button>
+                <Button type="button" size="sm" variant="ghost" className="min-h-11" disabled={memoryBusy} onClick={() => void act(() => onFeedback(memory.id, "rejected"))}>Not helpful</Button>
+              </div>
             </div>
           ))
         ) : (
           <PanelEmptyState
             icon={Sparkles}
-            title="No learned corrections yet"
-            description="Corrections saved from Button mode will appear here."
+            title="No structured preferences yet"
+            description="Add one explicitly or confirm a transaction action to build explainable suggestions."
             compact
           />
         )}
@@ -1902,7 +2159,7 @@ function Header({
   lastSyncLabel,
   syncError,
 }: {
-  active: "review" | "insights" | "activity";
+  active: ExpenseTab;
   onSync: () => void;
   busy: string | null;
   pendingCount: number;
@@ -1923,6 +2180,10 @@ function Header({
       title: "Expense Activity",
       description: "Review recent decisions and return eligible transactions to the queue.",
     },
+    attention: {
+      title: "Attention Center",
+      description: "Review bounded, deterministic signals without starting any action.",
+    },
   }[active];
   return (
     <PageHeader
@@ -1941,8 +2202,11 @@ function Header({
   );
 }
 
-function ExpenseTabs({active,onChange}:{active:"review"|"insights"|"activity";onChange:(value:"review"|"insights"|"activity")=>void}) {
-  return <nav className="flex gap-1 rounded-xl border border-slate-200 bg-white p-1 shadow-sm" aria-label="Expense Review views">{(["review","insights","activity"] as const).map(value=><button key={value} type="button" aria-current={active===value?"page":undefined} onClick={()=>onChange(value)} className={`min-h-11 flex-1 rounded-lg px-4 py-2.5 text-sm font-semibold capitalize transition focus-visible:ring-2 focus-visible:ring-indigo-500 ${active===value?"bg-indigo-600 text-white":"text-slate-600 hover:bg-slate-50 hover:text-slate-950"}`}>{value}</button>)}</nav>
+function ExpenseTabs({active,onChange,showAttention}:{active:ExpenseTab;onChange:(value:ExpenseTab)=>void;showAttention:boolean}) {
+  const tabs: ExpenseTab[] = showAttention
+    ? ["review", "insights", "activity", "attention"]
+    : ["review", "insights", "activity"];
+  return <nav className="flex gap-1 overflow-x-auto rounded-xl border border-slate-200 bg-white p-1 shadow-sm" aria-label="Expense Review views">{tabs.map(value=><button key={value} type="button" aria-current={active===value?"page":undefined} onClick={()=>onChange(value)} className={`min-h-11 min-w-[5.5rem] flex-1 rounded-lg px-3 py-2.5 text-sm font-semibold capitalize transition focus-visible:ring-2 focus-visible:ring-indigo-500 ${active===value?"bg-indigo-600 text-white":"text-slate-600 hover:bg-slate-50 hover:text-slate-950"}`}>{value}</button>)}</nav>
 }
 
 function relativeTime(value: Date) {
@@ -2398,9 +2662,16 @@ function ClassificationBadge({ transaction }: { transaction: Transaction }) {
   };
 
   return (
-    <Badge className={classes[suggestion]} title={transaction.classification_reason || undefined}>
-      {labels[suggestion]}
-    </Badge>
+    <span className="grid justify-items-start gap-1 sm:justify-items-end">
+      <Badge className={classes[suggestion]} title={transaction.classification_reason || undefined}>
+        {labels[suggestion]}
+      </Badge>
+      {transaction.classification_preference_id && transaction.classification_reason ? (
+        <span className="max-w-64 text-xs leading-4 text-slate-500">
+          Why: {transaction.classification_reason}
+        </span>
+      ) : null}
+    </span>
   );
 }
 

@@ -50,16 +50,25 @@ def test_unified_agent_capabilities_default_safely_off():
     assert settings.agent_purchasing_enabled is False
 
 
-@pytest.mark.parametrize(
-    "unsafe_flag",
-    (
-        "agent_proactive_enabled",
-        "agent_purchasing_enabled",
-    ),
-)
-def test_production_rejects_non_read_only_agent_rollout(unsafe_flag):
+def test_production_rejects_agent_purchasing_rollout():
     with pytest.raises(ValidationError, match="disabled in production"):
-        _safe_production_settings(**{unsafe_flag: True})
+        _safe_production_settings(agent_purchasing_enabled=True)
+
+
+def test_proactive_attention_requires_the_read_agent_in_every_environment():
+    with pytest.raises(ValidationError, match="requires Agent and read tools"):
+        Settings(_env_file=None, agent_proactive_enabled=True)
+
+
+def test_production_may_prepare_proactive_read_only_attention_behind_its_flag():
+    settings = _safe_production_settings(
+        agent_enabled=True,
+        agent_read_tools_enabled=True,
+        agent_proactive_enabled=True,
+    )
+
+    assert settings.agent_proactive_enabled is True
+    assert settings.agent_purchasing_enabled is False
 
 
 def test_production_allows_confirmation_gated_agent_write_actions():

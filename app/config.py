@@ -191,6 +191,12 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def validate_production_safety(self) -> Settings:
+        if self.agent_proactive_enabled and not (
+            self.agent_enabled and self.agent_read_tools_enabled
+        ):
+            raise ValueError(
+                "Agent proactive behavior requires Agent and read tools to be enabled."
+            )
         if not self.is_production_mode:
             return self
 
@@ -199,10 +205,8 @@ class Settings(BaseSettings):
             errors.append(
                 "ALLOW_UNVERIFIED_PLAID_WEBHOOKS_FOR_LOCAL_TEST must be false in production."
             )
-        if self.agent_proactive_enabled or self.agent_purchasing_enabled:
-            errors.append(
-                "Agent proactive behavior and purchasing must remain disabled in production."
-            )
+        if self.agent_purchasing_enabled:
+            errors.append("Agent purchasing must remain disabled in production.")
         if errors:
             raise ValueError("Unsafe production configuration: " + " ".join(errors))
         return self

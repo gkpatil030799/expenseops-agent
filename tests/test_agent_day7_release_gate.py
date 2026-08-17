@@ -151,6 +151,7 @@ def test_registry_exposes_no_secret_or_arbitrary_execution_capability():
 
     assert names == {
         "get_spending_insights",
+        "get_lifestyle_dining_insights",
         "search_transactions",
         "get_household_replenishment",
         "get_receipts",

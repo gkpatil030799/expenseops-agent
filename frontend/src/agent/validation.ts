@@ -222,6 +222,9 @@ function parseSupportedBlock(value: unknown): void {
       parseBreakdowns(block.top_categories);
       parseBreakdowns(block.top_merchants);
       return;
+    case "lifestyle_summary":
+      parseLifestyleSummaryBlock(block);
+      return;
     case "transaction_list":
       requireString(block.title, 160);
       requireNonNegativeInteger(block.total_count);
@@ -406,7 +409,12 @@ export function parseAgentActionConfirmation(
   ]);
   if (block.type !== "action_confirmation") throw new AgentProtocolError();
   requireNullableString(block.block_id, 100);
-  requireOneOf(block.action, ["mark_transaction_personal", "post_splitwise_expense"]);
+  requireOneOf(block.action, [
+    "mark_transaction_personal",
+    "post_splitwise_expense",
+    "apply_receipt_learning_batch",
+    "post_itemized_receipt_split",
+  ]);
   requireString(block.title, 160);
   requireString(block.summary, 1_000);
   if (!Array.isArray(block.details) || block.details.length > 25) {
@@ -438,6 +446,7 @@ export function parseAgentActionConfirmation(
 
 const ATTENTION_DOMAINS = [
   "spending",
+  "lifestyle",
   "transactions",
   "replenishment",
   "receipts",
@@ -551,6 +560,75 @@ function requireAllowedKeys(record: Record<string, unknown>, allowed: string[]):
   if (Object.keys(record).some((key) => !allowed.includes(key))) {
     throw new AgentProtocolError();
   }
+}
+
+function requireKeys(record: Record<string, unknown>, required: string[]): void {
+  if (required.some((key) => !Object.prototype.hasOwnProperty.call(record, key))) {
+    throw new AgentProtocolError();
+  }
+}
+
+function parseLifestyleSummaryBlock(block: Record<string, unknown>): void {
+  const keys = [
+    "type", "block_id", "block_version", "title", "start_date", "end_date",
+    "previous_start_date", "previous_end_date", "activity_type", "currency_code",
+    "spend_basis", "total_cents", "credits_cents", "transaction_count", "average_cents",
+    "personal_cents", "shared_cents", "unreviewed_cents", "previous_total_cents",
+    "previous_transaction_count", "unknown_share_transactions",
+    "previous_unknown_share_transactions", "unknown_credit_share_transactions",
+    "previous_unknown_credit_share_transactions", "weekday_cents", "weekday_count",
+    "weekend_cents", "weekend_count", "uncertain_transaction_count", "observations",
+    "activities", "top_merchants",
+  ];
+  requireAllowedKeys(block, keys);
+  requireKeys(block, keys.filter((key) => key !== "block_id"));
+  if (block.block_version !== "1.0") throw new AgentProtocolError();
+  requireString(block.title, 160);
+  requireString(block.start_date, 32);
+  requireString(block.end_date, 32);
+  requireNullableString(block.previous_start_date, 32);
+  requireNullableString(block.previous_end_date, 32);
+  requireOneOf(block.activity_type, ["all", "coffee", "restaurants", "delivery", "nightlife"]);
+  requireString(block.currency_code, 8);
+  requireOneOf(block.spend_basis, ["card", "actual_share"]);
+  [
+    "total_cents", "credits_cents", "transaction_count", "average_cents", "personal_cents",
+    "shared_cents", "unreviewed_cents", "unknown_share_transactions",
+    "previous_unknown_share_transactions", "unknown_credit_share_transactions",
+    "previous_unknown_credit_share_transactions", "weekday_cents", "weekday_count",
+    "weekend_cents", "weekend_count", "uncertain_transaction_count",
+  ].forEach((key) => requireNonNegativeInteger(block[key]));
+  requireNullableInteger(block.previous_total_cents);
+  requireNullableInteger(block.previous_transaction_count);
+  const comparisonPresent = block.previous_total_cents !== null;
+  if (
+    comparisonPresent !== (block.previous_transaction_count !== null) ||
+    comparisonPresent !== (block.previous_start_date !== null) ||
+    comparisonPresent !== (block.previous_end_date !== null)
+  ) throw new AgentProtocolError();
+  if (block.total_cents !== (block.personal_cents as number) + (block.shared_cents as number) + (block.unreviewed_cents as number)) throw new AgentProtocolError();
+  if (block.total_cents !== (block.weekday_cents as number) + (block.weekend_cents as number)) throw new AgentProtocolError();
+  if (block.transaction_count !== (block.weekday_count as number) + (block.weekend_count as number)) throw new AgentProtocolError();
+  if (block.spend_basis === "card" && (
+    block.unknown_share_transactions !== 0 || block.previous_unknown_share_transactions !== 0 ||
+    block.unknown_credit_share_transactions !== 0 || block.previous_unknown_credit_share_transactions !== 0
+  )) throw new AgentProtocolError();
+  requireStringArray(block.observations, 6, 500);
+  parseLifestyleBreakdowns(block.activities, 4);
+  parseLifestyleBreakdowns(block.top_merchants, 8);
+}
+
+function parseLifestyleBreakdowns(value: unknown, maximum: number): void {
+  if (!Array.isArray(value) || value.length > maximum) throw new AgentProtocolError();
+  value.forEach((item) => {
+    const row = requireRecord(item);
+    requireAllowedKeys(row, ["name", "amount_cents", "transaction_count", "percentage"]);
+    requireString(row.name, 255);
+    requireNonNegativeInteger(row.amount_cents);
+    requireNonNegativeInteger(row.transaction_count);
+    requireFiniteNumber(row.percentage);
+    if ((row.percentage as number) < 0 || (row.percentage as number) > 100) throw new AgentProtocolError();
+  });
 }
 
 function parseBreakdowns(value: unknown): void {

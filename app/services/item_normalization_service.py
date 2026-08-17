@@ -50,31 +50,50 @@ class ItemMatch:
     household_item: HouseholdItem | None
     confidence: float
     source: str
+    ambiguous: bool = False
+    runner_up_confidence: float = 0.0
 
 
 class ItemNormalizationService:
     def __init__(self, db: Session):
         self.db = db
+        self.workspace_id = db.info.get("workspace_id")
 
     def match(self, raw_name: str, merchant: str | None = None) -> ItemMatch:
         normalized = normalize_item_name(raw_name)
         if not normalized:
             return ItemMatch(None, 0.0, "empty")
         merchant_key = normalize_merchant(merchant)
-        aliases = list(
-            self.db.execute(
-                select(HouseholdItemAlias).where(HouseholdItemAlias.voided_at.is_(None))
-            ).scalars()
+        alias_query = (
+            select(HouseholdItemAlias)
+            .join(HouseholdItem, HouseholdItem.id == HouseholdItemAlias.household_item_id)
+            .where(HouseholdItemAlias.voided_at.is_(None))
         )
-        for alias in aliases:
-            if alias.normalized_alias == normalized and (
-                not alias.merchant_normalized or alias.merchant_normalized == merchant_key
-            ):
-                return ItemMatch(alias.household_item, min(1.0, alias.confidence), "alias")
+        if self.workspace_id is not None:
+            alias_query = alias_query.where(HouseholdItem.workspace_id == self.workspace_id)
+        aliases = list(self.db.scalars(alias_query))
+        matching_aliases = [
+            alias
+            for alias in aliases
+            if alias.normalized_alias == normalized
+            and (not alias.merchant_normalized or alias.merchant_normalized == merchant_key)
+        ]
+        alias_item_ids = {alias.household_item_id for alias in matching_aliases}
+        if len(alias_item_ids) == 1:
+            alias = max(matching_aliases, key=lambda candidate: candidate.confidence)
+            return ItemMatch(alias.household_item, min(1.0, alias.confidence), "alias")
+        if len(alias_item_ids) > 1:
+            return ItemMatch(
+                None,
+                max(min(1.0, alias.confidence) for alias in matching_aliases),
+                "alias_conflict",
+                ambiguous=True,
+            )
 
-        items = list(
-            self.db.execute(select(HouseholdItem).where(HouseholdItem.enabled.is_(True))).scalars()
-        )
+        item_query = select(HouseholdItem).where(HouseholdItem.enabled.is_(True))
+        if self.workspace_id is not None:
+            item_query = item_query.where(HouseholdItem.workspace_id == self.workspace_id)
+        items = list(self.db.scalars(item_query))
         scored = []
         normalized_tokens = set(normalized.split())
         for item in items:
@@ -86,8 +105,17 @@ class ItemNormalizationService:
             scored.append((similarity, item))
         if not scored:
             return ItemMatch(None, 0.0, "none")
-        score, item = max(scored, key=lambda pair: pair[0])
-        return ItemMatch(item if score >= 0.65 else None, round(score, 4), "name_similarity")
+        scored.sort(key=lambda pair: (-pair[0], pair[1].id))
+        score, item = scored[0]
+        runner_up = scored[1][0] if len(scored) > 1 else 0.0
+        ambiguous = runner_up >= 0.65 and score - runner_up < 0.12
+        return ItemMatch(
+            item if score >= 0.65 and not ambiguous else None,
+            round(score, 4),
+            "name_similarity",
+            ambiguous=ambiguous,
+            runner_up_confidence=round(runner_up, 4),
+        )
 
     def learn_alias(
         self,
@@ -98,6 +126,8 @@ class ItemNormalizationService:
         source: str = "user",
         confidence: float = 1.0,
     ) -> HouseholdItemAlias:
+        if self.workspace_id is not None and household_item.workspace_id != self.workspace_id:
+            raise ValueError("Household item not found.")
         normalized = normalize_item_name(raw_pattern)
         merchant_key = normalize_merchant(merchant)
         existing = self.db.execute(
@@ -130,6 +160,8 @@ class ItemNormalizationService:
         *,
         merchant: str | None = None,
     ) -> None:
+        if self.workspace_id is not None and household_item.workspace_id != self.workspace_id:
+            raise ValueError("Household item not found.")
         normalized = normalize_item_name(raw_pattern)
         merchant_key = normalize_merchant(merchant)
         aliases = self.db.execute(

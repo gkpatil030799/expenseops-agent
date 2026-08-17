@@ -280,12 +280,14 @@ export async function mockAgentApp(
   {
     agentEnabled = true,
     agentReadOnly = true,
+    agentProactive = false,
     initialConversation = false,
     messages = [],
     holdArchiveRequest = false,
   }: {
     agentEnabled?: boolean;
     agentReadOnly?: boolean;
+    agentProactive?: boolean;
     initialConversation?: boolean;
     messages?:
       | AgentMessage[]
@@ -325,7 +327,13 @@ export async function mockAgentApp(
             name: "Patil household",
             workspace_type: "household",
           },
-          features: { agent: { enabled: agentFeatureEnabled, read_only: agentReadOnly } },
+          features: {
+            agent: {
+              enabled: agentFeatureEnabled,
+              read_only: agentReadOnly,
+              proactive_enabled: agentProactive,
+            },
+          },
         },
       });
     }
@@ -401,6 +409,14 @@ export async function mockAgentApp(
     }),
   );
   await page.route("**/ai/memory", (route) => route.fulfill({ json: [] }));
+  await page.route("**/ai/memory/settings", (route) =>
+    route.fulfill({ json: { transaction_learning_enabled: true } }),
+  );
+  await page.route("**/ai/memory/metrics", (route) =>
+    route.fulfill({
+      json: { shown: 0, accepted: 0, edited: 0, rejected: 0, agreement_rate: null, correction_rate: null },
+    }),
+  );
   return {
     conversation: agentConversation,
     requests,

@@ -20,6 +20,7 @@ from app.api import (
     admin_routes,
     agent_routes,
     ai_memory_routes,
+    attention_routes,
     auth_routes,
     context_routes,
     household_routes,
@@ -252,6 +253,7 @@ app.include_router(splitwise_routes.router)
 app.include_router(telegram_routes.router)
 app.include_router(transaction_routes.router)
 app.include_router(ai_memory_routes.router)
+app.include_router(attention_routes.router)
 app.include_router(household_routes.router)
 app.include_router(insights_routes.router)
 app.include_router(replenishment_routes.router)

@@ -644,6 +644,44 @@ def test_replenishment_confidence_is_applied_to_existing_store_trip(db):
     assert any(item["title"] == "Toothpaste" for item in summary["excluded"])
 
 
+def test_cadence_free_learning_item_is_not_presented_as_due(db) -> None:
+    now = datetime(2026, 8, 17, tzinfo=UTC)
+    db.add(
+        HouseholdItem(
+            name="Eggs",
+            cadence_days=None,
+            cadence_source="learning",
+            last_acquired_at=now - timedelta(days=7),
+            preferred_place_name="Costco",
+            preferred_place_address="4502 E Oak St, Phoenix, AZ 85008",
+            replenishment_mode="either",
+        )
+    )
+    db.commit()
+
+    plan, summary = WhileOutService(
+        db, settings=settings(), route_provider=MeasuredProvider()
+    ).plan(
+        origin={"label": "Home", "latitude": 33.45, "longitude": -112.07},
+        primary_destination={
+            "label": "Costco",
+            "latitude": 33.43,
+            "longitude": -112.04,
+        },
+        now=now,
+    )
+
+    assert _plan_items(plan) == []
+    assert summary["excluded"] == [
+        {
+            "kind": "household_item",
+            "id": 1,
+            "title": "Eggs",
+            "reason": "Still learning its purchase interval; it is not marked due yet.",
+        }
+    ]
+
+
 def test_time_budget_filters_infeasible_candidate_and_is_truthful(db):
     now = datetime(2026, 8, 9, tzinfo=UTC)
     db.add(

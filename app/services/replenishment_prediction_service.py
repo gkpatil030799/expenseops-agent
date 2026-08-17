@@ -114,7 +114,11 @@ class TrainingDatasetService:
                     for index in range(1, len(history))
                 ]
                 feedback = self._feedback_before(item.id, history[-1].acquired_at)
-                historical_cadence = history[-1].configured_cadence_days or item.cadence_days
+                historical_cadence = (
+                    history[-1].configured_cadence_days
+                    if history[-1].configured_cadence_days is not None
+                    else item.cadence_days
+                )
                 features = feature_vector(
                     item,
                     history,
@@ -134,7 +138,9 @@ class TrainingDatasetService:
                         baseline_days=adaptive_interval(
                             item, intervals, cadence_days=historical_cadence
                         ),
-                        configured_baseline_days=float(historical_cadence),
+                        configured_baseline_days=(
+                            float(historical_cadence) if historical_cadence is not None else None
+                        ),
                     )
                 )
         return sorted(result, key=lambda row: (_aware(row.observed_at), row.household_item_id))
@@ -155,11 +161,13 @@ def adaptive_interval(
     intervals: list[float],
     *,
     cadence_days: int | None = None,
-) -> float:
-    configured = cadence_days or item.cadence_days
+) -> float | None:
+    configured = cadence_days if cadence_days is not None else item.cadence_days
     if not intervals:
-        return float(configured)
+        return float(configured) if configured is not None else None
     if len(intervals) == 1:
+        if configured is None:
+            return round(intervals[0], 4)
         return round((intervals[0] * 0.65) + (configured * 0.35), 4)
     median = statistics.median(intervals[-8:])
     recent = weighted_median(intervals)
@@ -174,16 +182,23 @@ def feature_vector(
     *,
     cadence_days: int | None = None,
 ) -> list[float]:
-    configured = cadence_days or item.cadence_days
+    configured = cadence_days if cadence_days is not None else item.cadence_days
+    baseline = (
+        float(configured)
+        if configured is not None
+        else (float(statistics.median(intervals[-8:])) if intervals else None)
+    )
+    if baseline is None:
+        raise ValueError("insufficient cadence history")
     observed = _aware(acquisitions[-1].acquired_at) if acquisitions else utc_now()
     quantity, quantity_known = _comparable_quantity(acquisitions)
     angle = 2 * math.pi * observed.month / 12
     return [
-        float(configured),
+        baseline,
         float(len(acquisitions)),
-        float(statistics.median(intervals[-8:])) if intervals else float(configured),
-        float(weighted_median(intervals)) if intervals else float(configured),
-        float(intervals[-1]) if intervals else float(configured),
+        float(statistics.median(intervals[-8:])) if intervals else baseline,
+        float(weighted_median(intervals)) if intervals else baseline,
+        float(intervals[-1]) if intervals else baseline,
         float(quantity),
         float(quantity_known),
         float(sum(event.feedback_type == "still_have" for event in feedback)),
@@ -230,6 +245,8 @@ class ReplenishmentPredictionService:
                 )
             ).scalars()
         )
+        if item.cadence_days is None and not intervals:
+            return None
         features = feature_vector(item, acquisitions, intervals, feedback)
         active_model = (
             self.db.execute(
@@ -240,8 +257,14 @@ class ReplenishmentPredictionService:
             .scalars()
             .first()
         )
-        method = "adaptive_median" if intervals else "configured_cadence"
+        method = (
+            "observed_interval"
+            if intervals and len(intervals) == 1 and item.cadence_days is None
+            else ("adaptive_median" if intervals else "configured_cadence")
+        )
         interval = adaptive_interval(item, intervals)
+        if interval is None:
+            return None
         feedback_after_purchase = [
             event
             for event in feedback
@@ -251,7 +274,7 @@ class ReplenishmentPredictionService:
         if feedback_after_purchase:
             interval += min(
                 interval * (self.settings.replenishment_max_feedback_cadence_adjustment_pct / 100),
-                item.cadence_days * 0.05 * len(feedback_after_purchase),
+                interval * 0.05 * len(feedback_after_purchase),
             )
             method = "adaptive_weighted_feedback"
         model_id = None
@@ -259,7 +282,7 @@ class ReplenishmentPredictionService:
             try:
                 _validate_active_artifact(active_model.artifact_json, len(features))
                 candidate_interval = _linear_predict(active_model.artifact_json, features)
-                _validate_model_interval(candidate_interval, item.cadence_days)
+                _validate_model_interval(candidate_interval, interval)
                 interval = candidate_interval
                 method = f"ml_ridge_{active_model.id}"
                 model_id = active_model.id
@@ -342,12 +365,12 @@ def _comparable_quantity(
     return float(latest.normalized_quantity), 1
 
 
-def _validate_model_interval(interval: float, cadence_days: int) -> None:
+def _validate_model_interval(interval: float, baseline_days: float) -> None:
     if not math.isfinite(interval):
         raise ValueError("non_finite_prediction")
     if interval < 1.0:
         raise ValueError("negative_or_subday_prediction")
-    if interval > max(3.0, cadence_days * 3.0):
+    if interval > max(3.0, baseline_days * 3.0):
         raise ValueError("extreme_prediction")
 
 

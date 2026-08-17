@@ -52,6 +52,8 @@ async function mockExpenseDashboard(page: Page, transactions: unknown[] = []) {
     }),
   );
   await page.route("**/ai/memory", (route) => route.fulfill({ json: [] }));
+  await page.route("**/ai/memory/settings", (route) => route.fulfill({ json: { transaction_learning_enabled: true } }));
+  await page.route("**/ai/memory/metrics", (route) => route.fulfill({ json: { shown: 0, accepted: 0, edited: 0, rejected: 0, agreement_rate: null, correction_rate: null } }));
 }
 
 async function mockSpendingInsights(page: Page) {
@@ -449,9 +451,9 @@ test("receipt review submits staged decisions as one atomic request", async ({ p
     created_at: "2026-08-12T18:01:00Z",
     updated_at: "2026-08-12T18:01:00Z",
     decision_summary: { tracked: 0, ignored: 0, undecided: 1, total: 1 },
-    items: [{ id: 501, raw_name: "Basmati Rice", normalized_name: "basmati rice", quantity: 1, unit: "bag", line_total_cents: 1899, household_item_id: null, household_item_name: null, acquisition_id: null, match_status: "unmatched", match_confidence: 0.4 }],
+    items: [{ id: 501, raw_name: "Basmati Rice", normalized_name: "basmati rice", quantity: 1, unit: "bag", line_total_cents: 1899, household_item_id: null, household_item_name: null, acquisition_id: null, match_status: "unmatched", match_confidence: 0.4, classification: "uncertain", classification_confidence: 0.4, canonical_name: null }],
   };
-  await page.route("**/api/household/items", (route) => route.fulfill({ json: [{ id: 71, name: "Rice", quantity: "1", unit: "bag", cadence_days: 30, replenishment_mode: "either", enabled: true, should_surface: false }] }));
+  await page.route("**/api/household/items", (route) => route.fulfill({ json: [{ id: 71, name: "Rice", quantity: "1", unit: "bag", cadence_days: 30, cadence_source: "configured", replenishment_mode: "either", enabled: true, should_surface: false }] }));
   await page.route("**/api/replenishment/receipts?**", (route) => {
     const bucket = new URL(route.request().url()).searchParams.get("bucket");
     return route.fulfill({ json: bucket === "active" ? { items: [receipt], total: 1, limit: 25, offset: 0, has_more: false } : { items: [], total: 0, limit: 25, offset: 0, has_more: false } });
@@ -487,6 +489,98 @@ test("receipt review submits staged decisions as one atomic request", async ({ p
     finalize: "save",
   });
   expect(patchCalls).toBe(0);
+});
+
+test("new-user receipt review proposes useful staples and confirms one cadence-free batch", async ({ page }) => {
+  await mockExpenseDashboard(page);
+  await mockHouseholdOps(page, { allClear: true });
+  const baseLine = {
+    normalized_name: "line",
+    quantity: 1,
+    unit: "each",
+    line_total_cents: 1000,
+    household_item_id: null,
+    household_item_name: null,
+    acquisition_id: null,
+    match_confidence: 0.95,
+  };
+  const receipt = {
+    id: 91,
+    source: "gmail",
+    merchant: "Costco",
+    purchased_at: "2026-08-17T18:00:00Z",
+    total_cents: 8015,
+    currency: "USD",
+    parse_status: "needs_review",
+    parse_confidence: 0.99,
+    failure_code: null,
+    transaction_id: null,
+    created_at: "2026-08-17T18:01:00Z",
+    updated_at: "2026-08-17T18:01:00Z",
+    decision_summary: { tracked: 0, ignored: 2, undecided: 4, total: 6 },
+    items: [
+      { ...baseLine, id: 901, raw_name: "KS EGGS 24CT", match_status: "unmatched", classification: "perishable_grocery", classification_confidence: 0.98, canonical_name: "Eggs" },
+      { ...baseLine, id: 902, raw_name: "ORG 2% MLK GAL", match_status: "unmatched", classification: "perishable_grocery", classification_confidence: 0.98, canonical_name: "Milk" },
+      { ...baseLine, id: 903, raw_name: "TIDE PODS 42CT", match_status: "unmatched", classification: "replenishable_household", classification_confidence: 0.98, canonical_name: "Laundry detergent" },
+      { ...baseLine, id: 904, raw_name: "KS PAPER TOWELS 12RL", match_status: "unmatched", classification: "replenishable_household", classification_confidence: 0.98, canonical_name: "Paper towels" },
+      { ...baseLine, id: 905, raw_name: "FOOD COURT COFFEE", match_status: "irrelevant", classification: "routine_consumption", classification_confidence: 0.99, canonical_name: null },
+      { ...baseLine, id: 906, raw_name: "COTTON T-SHIRT", match_status: "irrelevant", classification: "one_time_purchase", classification_confidence: 0.99, canonical_name: null },
+    ],
+  };
+  let active = true;
+  let submitted: Record<string, unknown> | null = null;
+  let lineWriteCalls = 0;
+  await page.route("**/api/household/items", (route) => route.fulfill({ json: [] }));
+  await page.route("**/api/replenishment/receipts?**", (route) => {
+    const bucket = new URL(route.request().url()).searchParams.get("bucket");
+    return route.fulfill({
+      json: bucket === "active" && active
+        ? { items: [receipt], total: 1, limit: 25, offset: 0, has_more: false }
+        : { items: [], total: 0, limit: 25, offset: 0, has_more: false },
+    });
+  });
+  await page.route("**/api/replenishment/receipts/91/items/**", (route) => {
+    lineWriteCalls += 1;
+    return route.fulfill({ status: 500, json: { detail: "Line writes are forbidden" } });
+  });
+  await page.route("**/api/replenishment/receipts/91/decisions", async (route) => {
+    submitted = route.request().postDataJSON() as Record<string, unknown>;
+    active = false;
+    return route.fulfill({
+      json: {
+        ...receipt,
+        parse_status: "confirmed",
+        updated_at: "2026-08-17T18:02:00Z",
+        decision_summary: { tracked: 4, ignored: 2, undecided: 0, total: 6 },
+      },
+    });
+  });
+
+  await page.goto("/");
+  await page.getByRole("button", { name: "Household" }).click();
+  await page.getByRole("button", { name: /^Receipts/ }).click();
+  await page.getByRole("button", { name: "Review receipt" }).click();
+  await expect(page.getByText("Recommended: track as Eggs.")).toBeVisible();
+  await expect(page.getByText("Recommended: track as Laundry detergent.")).toBeVisible();
+  await expect(page.getByText("Not tracked · routine consumption")).toBeVisible();
+  await expect(page.getByText("Not tracked · one-time purchase")).toBeVisible();
+  await expect(page.getByText("It starts in Learning with no guessed cadence.").first()).toBeVisible();
+  await expect(page.getByLabel(/Starting cadence|Cadence days/)).toHaveCount(0);
+  await page.getByRole("button", { name: "Confirm receipt" }).click();
+  await expect(page.getByText("Receipt confirmed: 4 tracked, 2 ignored, 0 left undecided.")).toBeVisible();
+  expect(lineWriteCalls).toBe(0);
+  expect(submitted).toEqual({
+    expected_updated_at: "2026-08-17T18:01:00Z",
+    decisions: [
+      { line_id: 901, decision: "create", name: "Eggs", replenishment_mode: "either" },
+      { line_id: 902, decision: "create", name: "Milk", replenishment_mode: "either" },
+      { line_id: 903, decision: "create", name: "Laundry detergent", replenishment_mode: "either" },
+      { line_id: 904, decision: "create", name: "Paper towels", replenishment_mode: "either" },
+    ],
+    finalize: "confirm",
+    acknowledge_undecided: false,
+  });
+  expect(JSON.stringify(submitted)).not.toContain("cadence_days");
 });
 
 test("a stale household route cannot expose a start link", async ({ page }) => {

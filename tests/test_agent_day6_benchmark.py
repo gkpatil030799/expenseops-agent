@@ -24,7 +24,7 @@ def test_day6_benchmark_has_exact_bounded_scenario_matrix():
     assert scenarios[4].page_context is not None
     assert len(scenarios[7].evidence) == 3
     receipt, errand, _integration = scenarios[7].evidence
-    assert receipt.tool_version == "1.1"
+    assert receipt.tool_version == "1.2"
     assert receipt.output["receipts"][0]["confirmed_household_item_ids"] == ["101"]
     assert errand.tool_version == "1.1"
     assert errand.output["errands"][0]["household_item_ids"] == ["101"]

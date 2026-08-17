@@ -77,15 +77,24 @@ class AgentToolContext:
     workspace_id: int
     user_id: int
     request_id: str | None = None
+    latest_user_text: str | None = None
 
     def __post_init__(self) -> None:
         if self.workspace_id < 1 or self.user_id < 1:
             raise ValueError("Agent tool context requires valid server tenant identifiers")
         if self.request_id is not None and len(self.request_id) > 64:
             raise ValueError("Agent tool request_id is too long")
+        if self.latest_user_text is not None and len(self.latest_user_text) > 4_000:
+            raise ValueError("Agent tool latest_user_text is too long")
 
     @classmethod
-    def from_session(cls, db: Session, *, request_id: str | None = None) -> AgentToolContext:
+    def from_session(
+        cls,
+        db: Session,
+        *,
+        request_id: str | None = None,
+        latest_user_text: str | None = None,
+    ) -> AgentToolContext:
         workspace_id = db.info.get("workspace_id")
         user_id = db.info.get("user_id")
         if not isinstance(workspace_id, int) or not isinstance(user_id, int):
@@ -98,6 +107,7 @@ class AgentToolContext:
             workspace_id=workspace_id,
             user_id=user_id,
             request_id=request_id,
+            latest_user_text=latest_user_text,
         )
 
 

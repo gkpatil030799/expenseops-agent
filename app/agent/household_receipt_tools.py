@@ -175,6 +175,7 @@ class ReceiptSummaryItem(HouseholdReceiptToolModel):
 
 
 class ReceiptLineItem(HouseholdReceiptToolModel):
+    public_id: str = Field(min_length=1, max_length=128)
     name: str = Field(min_length=1, max_length=500)
     quantity: float | None = Field(default=None, ge=0)
     unit: str | None = Field(default=None, max_length=64)
@@ -182,6 +183,17 @@ class ReceiptLineItem(HouseholdReceiptToolModel):
     match_status: Literal["matched", "possible", "unmatched", "ignored"]
     household_item_name: str | None = Field(default=None, min_length=1, max_length=255)
     household_item_public_id: str | None = Field(default=None, min_length=1, max_length=128)
+    classification: Literal[
+        "replenishable_household",
+        "perishable_grocery",
+        "routine_consumption",
+        "dining_or_experience",
+        "one_time_purchase",
+        "non_product_line",
+        "uncertain",
+    ]
+    classification_confidence: float = Field(ge=0, le=1)
+    canonical_name: str | None = Field(default=None, min_length=1, max_length=255)
     confirmed_acquisition: bool
 
 
@@ -237,7 +249,7 @@ def register_household_receipt_tools(registry: AgentToolRegistry) -> None:
             input_model=ReceiptsInput,
             output_model=ReceiptsOutput,
             handler=_get_receipts,
-            version="1.1",
+            version="1.2",
         )
     )
 
@@ -598,6 +610,7 @@ def _receipt_detail(context: AgentToolContext, values: ReceiptsInput) -> dict:
         ),
         "lines": [
             {
+                "public_id": str(line.id),
                 "name": line.raw_name,
                 "quantity": line.quantity,
                 "unit": _clean_optional(line.unit),
@@ -609,6 +622,9 @@ def _receipt_detail(context: AgentToolContext, values: ReceiptsInput) -> dict:
                     if line.household_item_id in household_names
                     else None
                 ),
+                "classification": line.classification or "uncertain",
+                "classification_confidence": float(line.classification_confidence or 0.0),
+                "canonical_name": _clean_optional(line.canonical_name),
                 "confirmed_acquisition": line.id in confirmed_line_ids,
             }
             for line in lines
@@ -738,21 +754,23 @@ def _household_item_dict(
     *,
     now: datetime,
 ) -> dict:
-    basis = _evidence_basis(prediction)
+    basis = _evidence_basis(item, prediction)
     if prediction is not None:
         canonical_due_state = due_state(float(prediction.due_score), has_history=True)
     else:
         score = due_score(item.last_acquired_at, item.cadence_days, now=now)
-        canonical_due_state = due_state(score, has_history=item.last_acquired_at is not None)
+        canonical_due_state = due_state(
+            score,
+            has_history=item.last_acquired_at is not None and item.cadence_days is not None,
+        )
+    projected_due = _projected_due_at(item, prediction)
     return {
         "public_id": str(item.id),
         "name": item.name,
         "quantity": _clean_optional(item.quantity),
         "unit": _clean_optional(item.unit),
         "due_state": "learning" if canonical_due_state == "unknown" else canonical_due_state,
-        "predicted_due_on": _projected_due_at(item, prediction).date().isoformat()
-        if item.last_acquired_at is not None or prediction is not None
-        else None,
+        "predicted_due_on": projected_due.date().isoformat() if projected_due else None,
         "confidence_level": _confidence_level(prediction),
         "evidence_basis": basis,
         "reason": _prediction_reason(item, prediction, acquisition_count),
@@ -767,19 +785,20 @@ def _household_item_dict(
 def _projected_due_at(
     item: HouseholdItem,
     prediction: ReplenishmentPrediction | None,
-) -> datetime:
+) -> datetime | None:
     if prediction is not None:
         return _aware(prediction.predicted_need_at)
-    if item.last_acquired_at is not None:
+    if item.last_acquired_at is not None and item.cadence_days is not None:
         return _aware(item.last_acquired_at) + timedelta(days=item.cadence_days)
-    return datetime.max.replace(tzinfo=UTC)
+    return None
 
 
 def _evidence_basis(
+    item: HouseholdItem,
     prediction: ReplenishmentPrediction | None,
-) -> Literal["configured_cadence", "purchase_pattern", "validated_model"]:
+) -> Literal["configured_cadence", "purchase_pattern", "validated_model", "insufficient_history"]:
     if prediction is None:
-        return "configured_cadence"
+        return "configured_cadence" if item.cadence_days is not None else "insufficient_history"
     if prediction.method.startswith("ml_ridge"):
         return "validated_model"
     if prediction.method.startswith("adaptive"):
@@ -800,15 +819,17 @@ def _prediction_reason(
     prediction: ReplenishmentPrediction | None,
     acquisition_count: int,
 ) -> str:
-    basis = _evidence_basis(prediction)
+    basis = _evidence_basis(item, prediction)
     if basis == "validated_model":
         reason = (
             f"Based on validated timing patterns and {acquisition_count} confirmed acquisitions."
         )
     elif basis == "purchase_pattern":
         reason = f"Based on recent timing across {acquisition_count} confirmed acquisitions."
-    else:
+    elif basis == "configured_cadence":
         reason = f"Based on the configured {item.cadence_days}-day cadence."
+    else:
+        reason = "Learning from purchase history; no cadence has been inferred yet."
     if item.last_acquired_at is not None:
         acquired_on = _aware(item.last_acquired_at).date().isoformat()
         reason += f" Last recorded purchase date: {acquired_on}."

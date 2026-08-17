@@ -350,6 +350,8 @@ async function mockInsights(
   await page.route(/\/transactions(?:\?|$)/, (route) => route.fulfill({ json: [] }));
   await page.route("**/splitwise/me", (route) => route.fulfill({ json: {} }));
   await page.route("**/ai/memory", (route) => route.fulfill({ json: [] }));
+  await page.route("**/ai/memory/settings", (route) => route.fulfill({ json: { transaction_learning_enabled: true } }));
+  await page.route("**/ai/memory/metrics", (route) => route.fulfill({ json: { shown: 0, accepted: 0, edited: 0, rejected: 0, agreement_rate: null, correction_rate: null } }));
 }
 
 test("Insights ranks purchase spend and reports credits outside Total spend", async ({ page }) => {

@@ -131,6 +131,11 @@ def test_ai_chat_context_includes_relevant_memories_without_raw_ids():
             return FakeScalars()
 
     class FakeDb:
+        info = {"workspace_id": 1, "user_id": 1}
+
+        def scalar(self, _stmt):
+            return None
+
         def execute(self, _stmt):
             return FakeExecute()
 
@@ -158,6 +163,5 @@ def test_ai_chat_context_includes_relevant_memories_without_raw_ids():
 
     serialized = json.dumps(context.prompt_context)
     assert "222" not in serialized
-    assert (
-        context.prompt_context["relevant_memories"][0]["original_phrase"] == "split like last time"
-    )
+    assert context.prompt_context["relevant_memories"][0]["original_phrase"] == ""
+    assert "split like last time" not in serialized

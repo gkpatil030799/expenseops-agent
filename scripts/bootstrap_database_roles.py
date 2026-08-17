@@ -77,6 +77,8 @@ APPLICATION_TABLES = (
     "promotion_messages",
     "promotion_offers",
     "promotion_settings",
+    "proactive_attention_deliveries",
+    "proactive_attention_preferences",
     "purchase_receipt_items",
     "purchase_receipts",
     "rate_limit_events",

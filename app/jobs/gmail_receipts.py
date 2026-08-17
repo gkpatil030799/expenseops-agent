@@ -35,9 +35,15 @@ def run(max_results: int = 25) -> dict[str, int]:
                     )
                     continue
                 try:
-                    result = GmailReceiptService(db, context.settings).sync(
-                        max_results=max_results
-                    )
+                    service = GmailReceiptService(db, context.settings)
+                    if not service.configured:
+                        log_event(
+                            logger,
+                            "gmail_receipt_workspace_sync_skipped_not_configured",
+                            workspace_id=context.workspace_id,
+                        )
+                        continue
+                    result = service.sync(max_results=max_results)
                 finally:
                     release_job_lease(
                         db,
