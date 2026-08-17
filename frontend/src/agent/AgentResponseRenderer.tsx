@@ -4,7 +4,10 @@ import {
   BarChart3,
   CheckCircle2,
   ClipboardList,
+  Clock3,
   Inbox,
+  Info,
+  ListChecks,
   PackageCheck,
   PlugZap,
   ReceiptText,
@@ -17,6 +20,8 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 
 import type {
+  AgentAttentionPriority,
+  AgentAttentionSummaryBlock,
   AgentEmptyStateBlock,
   AgentErrandSummaryBlock,
   AgentIntegrationStatusBlock,
@@ -29,9 +34,13 @@ import type {
   AgentStructuredResponse,
   AgentTransactionListBlock,
 } from "./contracts";
+import {
+  isAgentNavigationRequest,
+  type AgentNavigationRequest,
+} from "./pageContext";
 import { AgentProtocolError, parseAgentStructuredResponse } from "./validation";
 
-export type AgentNavigationRequest = Pick<AgentNavigationBlock, "target_surface" | "entity">;
+export type { AgentNavigationRequest } from "./pageContext";
 
 export function AgentResponseRenderer({
   response,
@@ -74,15 +83,19 @@ export function AgentResponseRenderer({
           case "transaction_list":
             return <TransactionListCard key={key} block={block} onNavigate={onNavigate} />;
           case "replenishment_summary":
-            return <ReplenishmentSummaryCard key={key} block={block} />;
+            return <ReplenishmentSummaryCard key={key} block={block} onNavigate={onNavigate} />;
           case "receipt_summary":
-            return <ReceiptSummaryCard key={key} block={block} />;
+            return <ReceiptSummaryCard key={key} block={block} onNavigate={onNavigate} />;
           case "deal_list":
-            return <DealListCard key={key} block={block} />;
+            return <DealListCard key={key} block={block} onNavigate={onNavigate} />;
           case "errand_summary":
-            return <ErrandSummaryCard key={key} block={block} />;
+            return <ErrandSummaryCard key={key} block={block} onNavigate={onNavigate} />;
           case "integration_status":
-            return <IntegrationStatusCard key={key} block={block} />;
+            return <IntegrationStatusCard key={key} block={block} onNavigate={onNavigate} />;
+          case "attention_summary":
+            return <AttentionSummaryCard key={key} block={block} onNavigate={onNavigate} />;
+          case "navigation":
+            return <NavigationCard key={key} block={block} onNavigate={onNavigate} />;
           case "error":
             return (
               <Card key={key} className="border-rose-200 bg-rose-50/70">
@@ -112,7 +125,7 @@ export function AgentResponseRenderer({
   );
 }
 
-function ReplenishmentSummaryCard({ block }: { block: AgentReplenishmentSummaryBlock }) {
+function ReplenishmentSummaryCard({ block, onNavigate }: { block: AgentReplenishmentSummaryBlock; onNavigate?: (request: AgentNavigationRequest) => void }) {
   return (
     <Card>
       <CardHeader className="pb-3">
@@ -136,6 +149,7 @@ function ReplenishmentSummaryCard({ block }: { block: AgentReplenishmentSummaryB
                   </p>
                 </div>
                 <Badge variant="secondary" className="shrink-0">{replenishmentStateLabel(item.due_state)}</Badge>
+                <EntityNavigationButton label={`Open ${item.name}`} request={{ target_surface: "household_staples", entity: { kind: "household_item", public_id: item.public_id } }} onNavigate={onNavigate} />
               </div>
             ))}
           </div>
@@ -163,7 +177,7 @@ function ReplenishmentSummaryCard({ block }: { block: AgentReplenishmentSummaryB
   );
 }
 
-function ReceiptSummaryCard({ block }: { block: AgentReceiptSummaryBlock }) {
+function ReceiptSummaryCard({ block, onNavigate }: { block: AgentReceiptSummaryBlock; onNavigate?: (request: AgentNavigationRequest) => void }) {
   const receiptDate = block.purchased_at || block.ingested_at;
   return (
     <Card>
@@ -196,12 +210,13 @@ function ReceiptSummaryCard({ block }: { block: AgentReceiptSummaryBlock }) {
           </div>
         ) : null}
         {block.items_truncated ? <p className="text-xs text-slate-500">Showing {block.items.length} of {block.total_line_count} lines.</p> : null}
+        <EntityNavigationButton label="Review receipt" request={{ target_surface: "household_receipts", entity: { kind: "receipt", public_id: block.public_id } }} onNavigate={onNavigate} />
       </CardContent>
     </Card>
   );
 }
 
-function DealListCard({ block }: { block: AgentDealListBlock }) {
+function DealListCard({ block, onNavigate }: { block: AgentDealListBlock; onNavigate?: (request: AgentNavigationRequest) => void }) {
   return (
     <Card>
       <CardHeader className="pb-3">
@@ -228,6 +243,7 @@ function DealListCard({ block }: { block: AgentDealListBlock }) {
                 {[deal.category, dealValueLabel(deal), deal.expires_at ? `Expires ${formatDateTime(deal.expires_at)}` : null, deal.promo_code ? `Code ${deal.promo_code}` : null].filter(Boolean).join(" · ")}
               </p>
               {deal.relevance_reasons.length ? <p className="mt-2 text-xs text-slate-600 [overflow-wrap:anywhere]">{deal.relevance_reasons.join(" · ")}</p> : null}
+              <EntityNavigationButton label={`Open ${deal.merchant} deal`} request={{ target_surface: "deals", entity: { kind: "deal", public_id: deal.public_id } }} onNavigate={onNavigate} />
             </article>
           ))}
         </div>
@@ -236,7 +252,7 @@ function DealListCard({ block }: { block: AgentDealListBlock }) {
   );
 }
 
-function ErrandSummaryCard({ block }: { block: AgentErrandSummaryBlock }) {
+function ErrandSummaryCard({ block, onNavigate }: { block: AgentErrandSummaryBlock; onNavigate?: (request: AgentNavigationRequest) => void }) {
   return (
     <Card>
       <CardHeader className="pb-3">
@@ -255,6 +271,7 @@ function ErrandSummaryCard({ block }: { block: AgentErrandSummaryBlock }) {
                   </p>
                 </div>
                 {errand.included_in_next_plan ? <Badge variant="outline" className="shrink-0">Next trip</Badge> : null}
+                <EntityNavigationButton label={`Open ${errand.title}`} request={{ target_surface: "household_errands", entity: { kind: "errand", public_id: errand.public_id } }} onNavigate={onNavigate} />
               </div>
             ))}
           </div>
@@ -292,7 +309,7 @@ function ErrandSummaryCard({ block }: { block: AgentErrandSummaryBlock }) {
   );
 }
 
-function IntegrationStatusCard({ block }: { block: AgentIntegrationStatusBlock }) {
+function IntegrationStatusCard({ block, onNavigate }: { block: AgentIntegrationStatusBlock; onNavigate?: (request: AgentNavigationRequest) => void }) {
   return (
     <Card>
       <CardHeader className="pb-3">
@@ -310,11 +327,221 @@ function IntegrationStatusCard({ block }: { block: AgentIntegrationStatusBlock }
               <Badge variant={integration.status === "connected" || integration.status === "ready" ? "secondary" : "outline"} className="shrink-0">
                 {humanize(integration.status)}
               </Badge>
+              <EntityNavigationButton label={`Open ${humanize(integration.provider)}`} request={{ target_surface: "integrations", entity: { kind: "integration", public_id: integration.provider } }} onNavigate={onNavigate} />
             </div>
           ))}
         </dl>
       </CardContent>
     </Card>
+  );
+}
+
+const ATTENTION_PRESENTATION: {
+  priority: AgentAttentionPriority;
+  label: string;
+  icon: ReactNode;
+  iconClassName: string;
+}[] = [
+  {
+    priority: "action_required",
+    label: "Action required",
+    icon: <AlertCircle className="size-4" aria-hidden="true" />,
+    iconClassName: "bg-rose-100 text-rose-700",
+  },
+  {
+    priority: "time_sensitive",
+    label: "Time sensitive",
+    icon: <Clock3 className="size-4" aria-hidden="true" />,
+    iconClassName: "bg-amber-100 text-amber-800",
+  },
+  {
+    priority: "useful_to_know",
+    label: "Useful to know",
+    icon: <Info className="size-4" aria-hidden="true" />,
+    iconClassName: "bg-indigo-100 text-indigo-700",
+  },
+];
+
+function AttentionSummaryCard({
+  block,
+  onNavigate,
+}: {
+  block: AgentAttentionSummaryBlock;
+  onNavigate?: (request: AgentNavigationRequest) => void;
+}) {
+  const unavailable = joinLabels(block.unavailable_domains.map(attentionDomainLabel));
+  const coverage = block.status === "partial"
+    ? `Partial result. Checked ${block.checked_domains.length} ExpenseOps ${block.checked_domains.length === 1 ? "area" : "areas"}. Couldn't check ${unavailable} right now.`
+    : `All selected checks completed. Checked ${block.checked_domains.length} ExpenseOps ${block.checked_domains.length === 1 ? "area" : "areas"}.`;
+
+  return (
+    <Card
+      data-testid="agent-attention-summary"
+      className="min-w-0 overflow-hidden border-indigo-200 bg-gradient-to-br from-white to-indigo-50/60"
+    >
+      <CardHeader className="pb-3">
+        <div className="flex min-w-0 items-start justify-between gap-3">
+          <div className="min-w-0">
+            <p className="text-xs font-semibold uppercase tracking-[0.14em] text-indigo-700">
+              Cross-domain summary
+            </p>
+            <CardTitle className="mt-1 text-base [overflow-wrap:anywhere]">{block.title}</CardTitle>
+          </div>
+          <span className="flex size-10 shrink-0 items-center justify-center rounded-control bg-indigo-100 text-indigo-700">
+            <ListChecks className="size-5" aria-hidden="true" />
+          </span>
+        </div>
+      </CardHeader>
+      <CardContent className="min-w-0 space-y-4 pt-0">
+        {ATTENTION_PRESENTATION.map((presentation) => {
+          const items = block.items.filter((item) => item.priority === presentation.priority);
+          if (!items.length) return null;
+          return (
+            <section key={presentation.priority} aria-label={presentation.label}>
+              <h4 className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wide text-slate-600">
+                <span className={`flex size-7 shrink-0 items-center justify-center rounded-control ${presentation.iconClassName}`}>
+                  {presentation.icon}
+                </span>
+                {presentation.label}
+              </h4>
+              <ul className="mt-2 divide-y divide-slate-200 overflow-hidden rounded-control border border-slate-200 bg-white/90">
+                {items.map((item) => (
+                  <li key={`${item.priority}-${item.domain}`} className="min-w-0 px-3 py-3">
+                    <div className="flex min-w-0 items-start gap-3">
+                      <Badge variant="secondary" className="min-w-7 shrink-0 justify-center tabular-nums" aria-label={`${item.count} ${item.title}`}>
+                        {item.count}
+                      </Badge>
+                      <div className="min-w-0 flex-1">
+                        <p className="text-sm font-semibold text-slate-900 [overflow-wrap:anywhere]">{item.title}</p>
+                        {item.detail ? (
+                          <p className="mt-1 text-xs leading-5 text-slate-600 [overflow-wrap:anywhere]">{item.detail}</p>
+                        ) : null}
+                      </div>
+                    </div>
+                    <AttentionNavigationButton navigation={item.navigation} onNavigate={onNavigate} />
+                  </li>
+                ))}
+              </ul>
+            </section>
+          );
+        })}
+        {!block.items.length ? (
+          <p className="rounded-control border border-dashed border-slate-200 bg-white/70 px-3 py-3 text-sm leading-5 text-slate-600">
+            {block.items_truncated
+              ? "No attention items appeared in the bounded results; additional matching records may exist."
+              : "No attention items were found in the areas that completed."}
+          </p>
+        ) : null}
+        {block.items_truncated ? (
+          <p className="text-xs text-slate-600">
+            This bounded summary may not include every matching item or record.
+          </p>
+        ) : null}
+        <div className={block.status === "partial" ? "rounded-control border border-amber-200 bg-amber-50 px-3 py-2.5" : "border-t border-slate-200 pt-3"}>
+          <div className="flex flex-wrap items-center gap-2">
+            <Badge variant={block.status === "partial" ? "outline" : "secondary"}>
+              {block.status === "partial" ? "Partial" : "Checks complete"}
+            </Badge>
+            <p className="min-w-0 flex-1 text-xs leading-5 text-slate-600 [overflow-wrap:anywhere]" aria-label="Attention coverage">
+              {coverage}
+            </p>
+          </div>
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
+function AttentionNavigationButton({
+  navigation,
+  onNavigate,
+}: {
+  navigation?: AgentNavigationBlock | null;
+  onNavigate?: (request: AgentNavigationRequest) => void;
+}) {
+  if (!navigation || !onNavigate) return null;
+  const request: AgentNavigationRequest = {
+    target_surface: navigation.target_surface,
+    entity: navigation.entity || null,
+  };
+  if (!isAgentNavigationRequest(request)) return null;
+  return (
+    <Button
+      type="button"
+      size="sm"
+      variant="ghost"
+      className="mt-2 min-h-11 min-w-0 w-full justify-between sm:w-auto"
+      onClick={() => onNavigate(request)}
+      aria-label={navigation.label}
+    >
+      <span className="min-w-0 truncate">{navigation.label}</span>
+      <ArrowRight className="size-4 shrink-0" aria-hidden="true" />
+    </Button>
+  );
+}
+
+function attentionDomainLabel(domain: AgentAttentionSummaryBlock["checked_domains"][number]): string {
+  if (domain === "spending") return "spending";
+  if (domain === "transactions") return "transactions";
+  if (domain === "replenishment") return "household needs";
+  if (domain === "receipts") return "receipts";
+  if (domain === "deals") return "deals";
+  if (domain === "errands") return "errands";
+  return "integrations";
+}
+
+function joinLabels(values: string[]): string {
+  if (values.length < 2) return values[0] || "the requested area";
+  if (values.length === 2) return `${values[0]} and ${values[1]}`;
+  return `${values.slice(0, -1).join(", ")}, and ${values.at(-1)}`;
+}
+
+function NavigationCard({
+  block,
+  onNavigate,
+}: {
+  block: AgentNavigationBlock;
+  onNavigate?: (request: AgentNavigationRequest) => void;
+}) {
+  const request: AgentNavigationRequest = {
+    target_surface: block.target_surface,
+    entity: block.entity || null,
+  };
+  if (!onNavigate || !isAgentNavigationRequest(request)) return null;
+  return (
+    <Button
+      type="button"
+      variant="outline"
+      className="min-h-11 min-w-0 w-full justify-between"
+      onClick={() => onNavigate(request)}
+      aria-label={block.label}
+    >
+      <span className="min-w-0 truncate">{block.label}</span><ArrowRight className="size-4 shrink-0" aria-hidden="true" />
+    </Button>
+  );
+}
+
+function EntityNavigationButton({
+  label,
+  request,
+  onNavigate,
+}: {
+  label: string;
+  request: AgentNavigationRequest;
+  onNavigate?: (request: AgentNavigationRequest) => void;
+}) {
+  if (!onNavigate || !isAgentNavigationRequest(request)) return null;
+  return (
+    <Button
+      type="button"
+      size="sm"
+      variant="ghost"
+      className="min-h-11 shrink-0"
+      onClick={() => onNavigate(request)}
+      aria-label={label}
+    >
+      Open<ArrowRight className="size-4" aria-hidden="true" />
+    </Button>
   );
 }
 
@@ -489,6 +716,12 @@ function AgentEmptyCard({
   block: AgentEmptyStateBlock;
   onNavigate?: (request: AgentNavigationRequest) => void;
 }) {
+  const navigationRequest: AgentNavigationRequest | null = block.suggested_navigation
+    ? {
+        target_surface: block.suggested_navigation.target_surface,
+        entity: block.suggested_navigation.entity || null,
+      }
+    : null;
   return (
     <Card className="border-dashed bg-slate-50/70">
       <CardContent className="flex flex-col items-center p-5 text-center sm:p-5">
@@ -497,12 +730,12 @@ function AgentEmptyCard({
         </span>
         <p className="mt-3 font-semibold text-slate-900">{block.title}</p>
         <p className="mt-1 max-w-sm text-sm leading-5 text-slate-600 [overflow-wrap:anywhere]">{block.message}</p>
-        {block.suggested_navigation && onNavigate ? (
+        {block.suggested_navigation && navigationRequest && onNavigate && isAgentNavigationRequest(navigationRequest) ? (
           <Button
             className="mt-3"
             size="sm"
             variant="outline"
-            onClick={() => onNavigate(block.suggested_navigation!)}
+            onClick={() => onNavigate(navigationRequest)}
           >
             {block.suggested_navigation.label}
           </Button>

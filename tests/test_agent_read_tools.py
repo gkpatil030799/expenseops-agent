@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from datetime import date
+from datetime import UTC, date, datetime
 
 import pytest
 from pydantic import ValidationError
@@ -25,6 +25,7 @@ from app.db import Base
 from app.models import (
     ExpenseTransaction,
     PlaidItem,
+    SplitwiseIntegration,
     TransactionStatus,
     User,
     Workspace,
@@ -302,6 +303,138 @@ def test_spending_tool_reconciles_exactly_with_canonical_insights(read_tool_data
     assert output["pending_transactions_excluded"] is True
 
 
+def test_spending_tool_preserves_personal_card_and_shared_actual_share_semantics(
+    read_tool_database,
+):
+    factory, contexts, item_ids = read_tool_database
+    context = contexts["owner"]
+    with _scoped(factory, context) as db:
+        db.add(
+            SplitwiseIntegration(
+                workspace_id=context.workspace_id,
+                user_id=context.user_id,
+                credentials_encrypted="encrypted-test-value",
+                splitwise_user_id="22",
+                verified_at=datetime.now(UTC),
+            )
+        )
+        personal = _transaction(
+            workspace_id=context.workspace_id,
+            item_id=item_ids["shared"],
+            provider_id="basis-personal",
+            merchant="Personal Market",
+            amount_cents=2_000,
+            occurred_on=date(2026, 8, 10),
+            status=TransactionStatus.PERSONAL.value,
+        )
+        shared = _transaction(
+            workspace_id=context.workspace_id,
+            item_id=item_ids["shared"],
+            provider_id="basis-shared",
+            merchant="Shared Dinner",
+            amount_cents=10_000,
+            occurred_on=date(2026, 8, 11),
+            status=TransactionStatus.POSTED.value,
+        )
+        shared.splitwise_payload_json = json.dumps(
+            {
+                "users__0__user_id": 22,
+                "users__0__paid_share": "100.00",
+                "users__0__owed_share": "60.00",
+                "users__1__user_id": 33,
+                "users__1__paid_share": "0.00",
+                "users__1__owed_share": "40.00",
+            }
+        )
+        db.add_all([personal, shared])
+        db.commit()
+        registry = build_read_tool_registry(_settings())
+
+        card = _execute(
+            registry,
+            db,
+            "get_spending_insights",
+            {
+                "start_date": "2026-08-01",
+                "end_date": "2026-08-31",
+                "spend_basis": "card",
+            },
+        )
+        actual_share = _execute(
+            registry,
+            db,
+            "get_spending_insights",
+            {
+                "start_date": "2026-08-01",
+                "end_date": "2026-08-31",
+                "spend_basis": "actual_share",
+            },
+        )
+
+    assert card["spend_basis"] == "card"
+    assert card["summary"] == {
+        **card["summary"],
+        "total_cents": 12_000,
+        "personal_cents": 2_000,
+        "shared_cents": 10_000,
+    }
+    assert actual_share["spend_basis"] == "actual_share"
+    assert actual_share["summary"] == {
+        **actual_share["summary"],
+        "total_cents": 8_000,
+        "personal_cents": 2_000,
+        "shared_cents": 6_000,
+    }
+
+
+def test_spending_tool_category_scope_returns_only_requested_category(read_tool_database):
+    factory, contexts, item_ids = read_tool_database
+    context = contexts["owner"]
+    with _scoped(factory, context) as db:
+        db.add_all(
+            [
+                _transaction(
+                    workspace_id=context.workspace_id,
+                    item_id=item_ids["shared"],
+                    provider_id="category-shopping",
+                    merchant="Category Store",
+                    amount_cents=4_200,
+                    occurred_on=date(2026, 8, 10),
+                    category="Shopping",
+                ),
+                _transaction(
+                    workspace_id=context.workspace_id,
+                    item_id=item_ids["shared"],
+                    provider_id="category-restaurants",
+                    merchant="Category Cafe",
+                    amount_cents=9_900,
+                    occurred_on=date(2026, 8, 11),
+                    category="Restaurants",
+                ),
+            ]
+        )
+        db.commit()
+
+        output = _execute(
+            build_read_tool_registry(_settings()),
+            db,
+            "get_spending_insights",
+            {
+                "start_date": "2026-08-01",
+                "end_date": "2026-08-31",
+                "category": "Lifestyle",
+                "spend_basis": "card",
+            },
+        )
+
+    assert output["summary"]["total_cents"] == 4_200
+    assert output["summary"]["transaction_count"] == 1
+    assert [(row["name"], row["amount_cents"]) for row in output["categories"]] == [
+        ("Lifestyle", 4_200)
+    ]
+    assert [row["name"] for row in output["merchants"]] == ["Category Store"]
+
+
 def test_read_tool_outputs_and_transaction_search_are_hard_bounded(read_tool_database):
     factory, contexts, item_ids = read_tool_database
     context = contexts["owner"]
@@ -494,6 +627,69 @@ def test_transaction_search_applies_supported_filters_and_excludes_removed_rows(
         }
     ]
     assert [item["merchant"] for item in personal["transactions"]] == ["Starbucks Personal"]
+
+
+def test_exact_transaction_id_is_bounded_and_remains_tenant_scoped(read_tool_database):
+    factory, contexts, item_ids = read_tool_database
+    owner_context = contexts["owner"]
+    outsider_context = contexts["outsider"]
+    with _scoped(factory, outsider_context) as outsider_db:
+        other = _transaction(
+            workspace_id=outsider_context.workspace_id,
+            item_id=item_ids["other"],
+            provider_id="exact-other",
+            merchant="Other Workspace Secret",
+            amount_cents=9_999,
+            occurred_on=date(2026, 8, 9),
+        )
+        outsider_db.add(other)
+        outsider_db.commit()
+        other_id = other.id
+
+    with _scoped(factory, owner_context) as db:
+        own = _transaction(
+            workspace_id=owner_context.workspace_id,
+            item_id=item_ids["shared"],
+            provider_id="exact-own",
+            merchant="Exact Own Merchant",
+            amount_cents=1_111,
+            occurred_on=date(2026, 8, 9),
+        )
+        db.add(own)
+        db.commit()
+        registry = build_read_tool_registry(_settings())
+
+        own_output = _execute(
+            registry,
+            db,
+            "search_transactions",
+            {
+                "transaction_id": own.id,
+                # Exact lookup intentionally ignores stale page-list filters.
+                "merchant": "does not match",
+                "start_date": "2020-01-01",
+                "end_date": "2020-01-02",
+            },
+        )
+        cross_workspace_output = _execute(
+            registry,
+            db,
+            "search_transactions",
+            {"transaction_id": other_id},
+        )
+        context = AgentToolContext.from_session(db)
+        with pytest.raises(ValidationError):
+            registry.prepare(
+                "search_transactions",
+                {"transaction_id": 2_147_483_648},
+                context=context,
+            )
+
+    assert [row["public_id"] for row in own_output["transactions"]] == [str(own.id)]
+    assert own_output["total_count"] == 1
+    assert own_output["result_limit"] == 1
+    assert cross_workspace_output["transactions"] == []
+    assert cross_workspace_output["total_count"] == 0
 
 
 def test_prompt_injection_merchant_is_inert_data_and_provider_fields_are_omitted(

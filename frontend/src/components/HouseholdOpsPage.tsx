@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   AlertCircle,
   ArrowRight,
@@ -8,6 +8,7 @@ import {
   CircleOff,
   Clock3,
   Brain,
+  Bot,
   ExternalLink,
   House,
   ListChecks,
@@ -30,6 +31,12 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { PageHeader } from "@/components/ui/page-header";
+import {
+  buildHouseholdContext,
+  type AgentContextPublisher,
+  type AgentHouseholdView,
+  type AgentNavigationRequest,
+} from "@/agent/pageContext";
 import { api } from "@/lib/api";
 import type {
   Errand,
@@ -98,7 +105,7 @@ type ReceiptLineDecisionDraft = {
   replenishment_mode?: HouseholdItem["replenishment_mode"];
 };
 
-type HouseholdView = "today" | "errands" | "receipts" | "staples" | "history";
+type HouseholdView = AgentHouseholdView;
 
 type GmailReceiptSyncStatus = {
   configured: boolean;
@@ -144,7 +151,13 @@ const emptyManualPlaceForm: ManualPlaceForm = {
 const controlClass =
   "h-11 w-full rounded-lg border border-slate-300 bg-white px-3 text-sm text-slate-800 outline-none transition hover:border-slate-400 focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/20 sm:h-10";
 
-export function HouseholdOpsPage() {
+export function HouseholdOpsPage({
+  onAgentContextChange,
+  agentNavigationRequest,
+}: {
+  onAgentContextChange?: AgentContextPublisher;
+  agentNavigationRequest?: AgentNavigationRequest | null;
+} = {}) {
   const [householdView, setHouseholdView] = useState<HouseholdView>("today");
   const [errands, setErrands] = useState<Errand[]>([]);
   const [items, setItems] = useState<HouseholdItem[]>([]);
@@ -187,7 +200,10 @@ export function HouseholdOpsPage() {
   const [receiptDecisionDrafts, setReceiptDecisionDrafts] = useState<Record<number, Record<number, ReceiptLineDecisionDraft>>>({});
   const [reviewingReceiptId, setReviewingReceiptId] = useState<number | null>(null);
   const [expandedHistoryReceiptId, setExpandedHistoryReceiptId] = useState<number | null>(null);
+  const [focusedErrandId, setFocusedErrandId] = useState<number | null>(null);
+  const [focusedItemId, setFocusedItemId] = useState<number | null>(null);
   const [plannedTripSignature, setPlannedTripSignature] = useState<string | null>(null);
+  const handledNavigationRequest = useRef<AgentNavigationRequest | null>(null);
 
   const tripInputSignature = useMemo(
     () => JSON.stringify({
@@ -217,6 +233,95 @@ export function HouseholdOpsPage() {
   );
   const dueItems = useMemo(() => items.filter((item) => item.should_surface), [items]);
   const enabledItems = useMemo(() => items.filter((item) => item.enabled), [items]);
+
+  const agentContext = useMemo(() => {
+    const focusedErrand = householdView === "errands" || householdView === "today"
+      ? activeErrands.find((errand) => errand.id === focusedErrandId)
+      : null;
+    const focusedItem = householdView === "staples" || householdView === "today"
+      ? items.find((item) => item.id === focusedItemId)
+      : null;
+    const focusedReceipt = householdView === "receipts" || householdView === "today"
+      ? receiptQueue.find((receipt) => receipt.id === reviewingReceiptId)
+      : null;
+    const entity = focusedReceipt
+      ? {
+          kind: "receipt" as const,
+          publicId: focusedReceipt.id,
+          label: `${focusedReceipt.merchant || "Receipt"} · ${receiptDate(focusedReceipt)}`,
+        }
+      : focusedErrand
+        ? { kind: "errand" as const, publicId: focusedErrand.id, label: focusedErrand.title }
+        : focusedItem
+          ? { kind: "household_item" as const, publicId: focusedItem.id, label: focusedItem.name }
+          : null;
+    return buildHouseholdContext({ view: householdView, entity });
+  }, [activeErrands, focusedErrandId, focusedItemId, householdView, items, receiptQueue, reviewingReceiptId]);
+
+  useEffect(() => {
+    onAgentContextChange?.(agentContext);
+  }, [agentContext, onAgentContextChange]);
+
+  useEffect(() => {
+    if (!agentNavigationRequest || handledNavigationRequest.current === agentNavigationRequest) return;
+    const viewBySurface: Partial<Record<AgentNavigationRequest["target_surface"], HouseholdView>> = {
+      household_today: "today",
+      household_errands: "errands",
+      household_receipts: "receipts",
+      household_staples: "staples",
+      household_history: "history",
+    };
+    const requestedView = viewBySurface[agentNavigationRequest.target_surface];
+    if (!requestedView) return;
+    if (agentNavigationRequest.entity && busy === "initial") return;
+    handledNavigationRequest.current = agentNavigationRequest;
+    const entity = agentNavigationRequest.entity;
+    const destinationView = requestedView === "today" && entity
+      ? entity.kind === "errand"
+        ? "errands"
+        : entity.kind === "receipt"
+          ? "receipts"
+          : entity.kind === "household_item"
+            ? "staples"
+            : "today"
+      : requestedView;
+    setHouseholdView(destinationView);
+    if (!entity) {
+      setFocusedErrandId(null);
+      setFocusedItemId(null);
+      setReviewingReceiptId(null);
+      return;
+    }
+    const requestedId = Number(entity.public_id);
+    setFocusedErrandId(null);
+    setFocusedItemId(null);
+    setReviewingReceiptId(null);
+    if (destinationView === "errands" && entity.kind === "errand") {
+      setFocusedErrandId(activeErrands.some((errand) => errand.id === requestedId) ? requestedId : null);
+    } else if (destinationView === "staples" && entity.kind === "household_item") {
+      setFocusedItemId(items.some((item) => item.id === requestedId) ? requestedId : null);
+    } else if (destinationView === "receipts" && entity.kind === "receipt") {
+      setReviewingReceiptId(receiptQueue.some((receipt) => receipt.id === requestedId) ? requestedId : null);
+    }
+  }, [activeErrands, agentNavigationRequest, busy, items, receiptQueue]);
+
+  function focusErrandForAgent(errandId: number) {
+    setFocusedErrandId((current) => current === errandId ? null : errandId);
+    setFocusedItemId(null);
+    setReviewingReceiptId(null);
+  }
+
+  function focusItemForAgent(itemId: number) {
+    setFocusedItemId((current) => current === itemId ? null : itemId);
+    setFocusedErrandId(null);
+    setReviewingReceiptId(null);
+  }
+
+  function reviewReceipt(receiptId: number) {
+    setReviewingReceiptId(receiptId);
+    setFocusedErrandId(null);
+    setFocusedItemId(null);
+  }
 
   useEffect(() => {
     void loadHouseholdOps();
@@ -1026,7 +1131,7 @@ export function HouseholdOpsPage() {
                 </div>
                 {receiptQueue.length ? <div className="space-y-3">
                   <div className="divide-y divide-slate-100 overflow-hidden rounded-xl border border-slate-200">
-                    {receiptQueue.map((receipt) => <ReceiptQueueRow key={receipt.id} receipt={receipt} selected={reviewingReceiptId === receipt.id} busy={busy !== null} onReview={() => setReviewingReceiptId(receipt.id)} onIgnore={() => receiptAction(receipt, "ignore")} />)}
+                    {receiptQueue.map((receipt) => <ReceiptQueueRow key={receipt.id} receipt={receipt} selected={reviewingReceiptId === receipt.id} busy={busy !== null} onReview={() => reviewReceipt(receipt.id)} onIgnore={() => receiptAction(receipt, "ignore")} />)}
                   </div>
                   {receiptQueueHasMore ? <div className="flex justify-center"><Button variant="outline" onClick={() => loadMoreReceipts("active")} disabled={busy !== null}>{busy === "receipts-more-active" ? "Loading…" : `Load more (${receiptQueue.length} of ${receiptQueueTotal})`}</Button></div> : null}
                   {receiptQueue.find((receipt) => receipt.id === reviewingReceiptId) ? <ReceiptReviewCard receipt={receiptQueue.find((receipt) => receipt.id === reviewingReceiptId)!} items={items} draft={receiptItemDraft} decisions={receiptDecisionDrafts[reviewingReceiptId!] || {}} busy={busy !== null} onDraft={setReceiptItemDraft} onMatch={stageReceiptMatch} onTrack={trackReceiptItem} onUndo={undoReceiptAcquisition} onSave={saveReceiptDecisions} onConfirm={(receipt) => receiptAction(receipt, "confirm")} onIgnore={(receipt) => receiptAction(receipt, "ignore")} onClose={() => setReviewingReceiptId(null)} /> : null}
@@ -1131,6 +1236,8 @@ export function HouseholdOpsPage() {
                     key={errand.id}
                     errand={errand}
                     busy={busy !== null}
+                    focused={focusedErrandId === errand.id}
+                    onAgentFocus={() => focusErrandForAgent(errand.id)}
                     onEdit={() => editErrand(errand)}
                     onToggle={() => mutateErrand(errand, "toggle")}
                     onComplete={() => mutateErrand(errand, "complete")}
@@ -1198,7 +1305,7 @@ export function HouseholdOpsPage() {
           {dueItems.length ? (
             <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
               {dueItems.map((item) => (
-                <DueItemCard key={item.id} item={item} busy={busy !== null} onAction={(action) => mutateItem(item, action)} onEdit={() => editItem(item)} />
+                <DueItemCard key={item.id} item={item} busy={busy !== null} focused={focusedItemId === item.id} onAgentFocus={() => focusItemForAgent(item.id)} onAction={(action) => mutateItem(item, action)} onEdit={() => editItem(item)} />
               ))}
             </div>
           ) : (
@@ -1215,7 +1322,7 @@ export function HouseholdOpsPage() {
             {items.length ? (
               <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-3">
                 {items.map((item) => (
-                  <div key={item.id} className="flex items-center justify-between gap-3 rounded-xl border border-slate-200 bg-slate-50/60 p-3 transition hover:border-slate-300 hover:bg-white">
+                  <div key={item.id} className={`flex items-center justify-between gap-3 rounded-xl border bg-slate-50/60 p-3 transition hover:border-slate-300 hover:bg-white ${focusedItemId === item.id ? "border-indigo-300 ring-1 ring-indigo-200" : "border-slate-200"}`}>
                     <div className="min-w-0">
                       <div className="flex items-center gap-2">
                         <span className="truncate text-sm font-semibold text-slate-900">{item.name}</span>
@@ -1224,6 +1331,7 @@ export function HouseholdOpsPage() {
                       <p className="mt-1 truncate text-xs text-slate-600">Every {item.cadence_days} days · {item.preferred_place_name || "No preferred store"}</p>
                     </div>
                     <div className="flex shrink-0 gap-1">
+                      <button type="button" onClick={() => focusItemForAgent(item.id)} aria-pressed={focusedItemId === item.id} aria-label={`Use ${item.name} as Agent context`} data-testid={`agent-context-household-item-${item.id}`} className={`inline-flex h-11 w-11 items-center justify-center rounded-lg transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500 ${focusedItemId === item.id ? "bg-indigo-100 text-indigo-700" : "text-slate-500 hover:bg-slate-100 hover:text-slate-900"}`}><Bot className="h-4 w-4" aria-hidden="true" /></button>
                       <IconButton label={`Edit ${item.name}`} onClick={() => editItem(item)}><Pencil className="h-4 w-4" /></IconButton>
                       <IconButton label={`Delete ${item.name}`} danger onClick={() => mutateItem(item, "delete")}><Trash2 className="h-4 w-4" /></IconButton>
                     </div>
@@ -1704,13 +1812,13 @@ function PlaceResolver({ result, manual, remember, busy, onManual, onRemember, o
   );
 }
 
-function ErrandRow({ errand, busy, onEdit, onToggle, onComplete, onSkip, onDelete, onChoosePlace }: { errand: Errand; busy: boolean; onEdit: () => void; onToggle: () => void; onComplete: () => void; onSkip: () => void; onDelete: () => void; onChoosePlace: () => void }) {
+function ErrandRow({ errand, busy, focused, onAgentFocus, onEdit, onToggle, onComplete, onSkip, onDelete, onChoosePlace }: { errand: Errand; busy: boolean; focused: boolean; onAgentFocus: () => void; onEdit: () => void; onToggle: () => void; onComplete: () => void; onSkip: () => void; onDelete: () => void; onChoosePlace: () => void }) {
   return (
-    <div className="group bg-white p-4 transition hover:bg-slate-50/70">
+    <div className={`group p-4 transition hover:bg-slate-50/70 ${focused ? "bg-indigo-50/60 ring-1 ring-inset ring-indigo-200" : "bg-white"}`}>
       <div className="flex items-start gap-3">
         <button onClick={onComplete} disabled={busy} className="mt-0.5 flex h-11 w-11 shrink-0 items-center justify-center rounded-full border border-slate-300 text-slate-500 transition hover:border-indigo-500 hover:bg-indigo-50 hover:text-indigo-700 sm:h-9 sm:w-9" aria-label={`Complete ${errand.title}`}><Check className="h-4 w-4" /></button>
         <div className="min-w-0 flex-1"><div className="flex flex-wrap items-center gap-2"><h3 className="font-semibold text-slate-950">{errand.title}</h3>{errand.priority === "high" ? <Badge className="bg-rose-50 text-rose-700">High</Badge> : null}<Badge className={errand.included_in_next_plan ? "bg-indigo-50 text-indigo-700" : "bg-slate-100 text-slate-600"}>{errand.included_in_next_plan ? "In next trip" : "Not in trip"}</Badge><Badge className={errand.place_resolution_status === "resolved" ? "bg-emerald-50 text-emerald-700" : "bg-amber-50 text-amber-700"}>{errand.place_resolution_status === "resolved" ? "Location ready" : "Needs location"}</Badge>{errand.place_resolution_method === "automatic" ? <Badge variant="secondary">Auto-selected</Badge> : null}{errand.resolved_open_now === true ? <Badge className="bg-emerald-50 text-emerald-700">Open now</Badge> : null}</div><div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-slate-600">{errand.place_resolution_status === "resolved" ? <span className="inline-flex items-center gap-1"><MapPin className="h-3.5 w-3.5" />{errand.resolved_place_name} · {errand.resolved_place_address}</span> : errand.place_name ? <span>Looking for: {errand.place_name}</span> : null}{errand.due_at ? <span className="inline-flex items-center gap-1"><CalendarClock className="h-3.5 w-3.5" />{dueLabel(errand.due_at)}</span> : null}{errand.estimated_duration_minutes !== null ? <span className="inline-flex items-center gap-1"><Clock3 className="h-3.5 w-3.5" />{errand.estimated_duration_minutes} min</span> : null}</div>{errand.place_resolution_status !== "resolved" ? <Button variant="outline" size="sm" className="mt-2" onClick={onChoosePlace} disabled={busy}><MapPin className="h-3.5 w-3.5" />Choose location</Button> : <Button variant="ghost" size="sm" className="mt-2" onClick={onChoosePlace} disabled={busy}>Change location</Button>}{errand.linked_household_items.length ? <p className="mt-2 text-xs text-indigo-700">Includes {errand.linked_household_items.map((item) => item.name).join(", ")}</p> : null}</div>
-        <div className="flex shrink-0 flex-wrap justify-end gap-1"><IconButton label={errand.included_in_next_plan ? "Exclude from next trip" : "Include in next trip"} onClick={onToggle}>{errand.included_in_next_plan ? <CircleOff className="h-4 w-4" /> : <Plus className="h-4 w-4" />}</IconButton><IconButton label={`Edit ${errand.title}`} onClick={onEdit}><Pencil className="h-4 w-4" /></IconButton><IconButton label={`Skip ${errand.title}`} onClick={onSkip}><X className="h-4 w-4" /></IconButton><IconButton label={`Delete ${errand.title}`} danger onClick={onDelete}><Trash2 className="h-4 w-4" /></IconButton></div>
+        <div className="flex shrink-0 flex-wrap justify-end gap-1"><button type="button" onClick={onAgentFocus} aria-pressed={focused} aria-label={`Use ${errand.title} as Agent context`} data-testid={`agent-context-errand-${errand.id}`} className={`inline-flex h-11 w-11 items-center justify-center rounded-lg transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500 ${focused ? "bg-indigo-100 text-indigo-700" : "text-slate-500 hover:bg-slate-100 hover:text-slate-900"}`}><Bot className="h-4 w-4" aria-hidden="true" /></button><IconButton label={errand.included_in_next_plan ? "Exclude from next trip" : "Include in next trip"} onClick={onToggle}>{errand.included_in_next_plan ? <CircleOff className="h-4 w-4" /> : <Plus className="h-4 w-4" />}</IconButton><IconButton label={`Edit ${errand.title}`} onClick={onEdit}><Pencil className="h-4 w-4" /></IconButton><IconButton label={`Skip ${errand.title}`} onClick={onSkip}><X className="h-4 w-4" /></IconButton><IconButton label={`Delete ${errand.title}`} danger onClick={onDelete}><Trash2 className="h-4 w-4" /></IconButton></div>
       </div>
     </div>
   );
@@ -1724,10 +1832,10 @@ function ErrandHistoryRow({ errand, busy, onRepeat, onDelete }: { errand: Errand
   </div>;
 }
 
-function DueItemCard({ item, busy, onAction, onEdit }: { item: HouseholdItem; busy: boolean; onAction: (action: "bought" | "still-have" | "skip-once" | "disable" | "add") => void; onEdit: () => void }) {
+function DueItemCard({ item, busy, focused, onAgentFocus, onAction, onEdit }: { item: HouseholdItem; busy: boolean; focused: boolean; onAgentFocus: () => void; onAction: (action: "bought" | "still-have" | "skip-once" | "disable" | "add") => void; onEdit: () => void }) {
   return (
-    <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
-      <div className="flex items-start justify-between gap-3"><div><Badge className={item.due_state === "likely_due" ? "bg-rose-50 text-rose-700" : "bg-amber-50 text-amber-700"}>{item.due_state === "likely_due" ? "Likely due" : "Probably due"}</Badge><h3 className="mt-2 font-semibold text-slate-950">{item.name}</h3><p className="mt-1 text-xs text-slate-600">{item.quantity || ""} {item.unit || ""}{item.preferred_place_name ? ` · ${item.preferred_place_name}` : ""}</p></div><IconButton label={`Edit ${item.name}`} onClick={onEdit}><Pencil className="h-4 w-4" /></IconButton></div>
+    <div className={`rounded-xl border bg-white p-4 shadow-sm ${focused ? "border-indigo-300 ring-1 ring-indigo-200" : "border-slate-200"}`}>
+      <div className="flex items-start justify-between gap-3"><div><Badge className={item.due_state === "likely_due" ? "bg-rose-50 text-rose-700" : "bg-amber-50 text-amber-700"}>{item.due_state === "likely_due" ? "Likely due" : "Probably due"}</Badge><h3 className="mt-2 font-semibold text-slate-950">{item.name}</h3><p className="mt-1 text-xs text-slate-600">{item.quantity || ""} {item.unit || ""}{item.preferred_place_name ? ` · ${item.preferred_place_name}` : ""}</p></div><div className="flex gap-1"><button type="button" onClick={onAgentFocus} aria-pressed={focused} aria-label={`Use ${item.name} as Agent context`} data-testid={`agent-context-household-item-due-${item.id}`} className={`inline-flex h-11 w-11 items-center justify-center rounded-lg transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500 ${focused ? "bg-indigo-100 text-indigo-700" : "text-slate-500 hover:bg-slate-100 hover:text-slate-900"}`}><Bot className="h-4 w-4" aria-hidden="true" /></button><IconButton label={`Edit ${item.name}`} onClick={onEdit}><Pencil className="h-4 w-4" /></IconButton></div></div>
       <div className="mt-4 flex flex-wrap gap-2"><Button size="sm" onClick={() => onAction("add")} disabled={busy || item.linked_errand_id !== null}><Plus className="h-3.5 w-3.5" />{item.linked_errand_id ? "In next trip" : item.replenishment_mode === "delivery" ? "Add errand" : `Add${item.preferred_place_name ? ` to ${item.preferred_place_name}` : ""}`}</Button><Button variant="outline" size="sm" onClick={() => onAction("bought")} disabled={busy}>Bought it</Button><Button variant="outline" size="sm" onClick={() => onAction("still-have")} disabled={busy}>Still have it</Button><Button variant="ghost" size="sm" onClick={() => onAction("skip-once")} disabled={busy}>Skip once</Button><Button variant="ghost" size="sm" onClick={() => onAction("disable")} disabled={busy}>Disable</Button></div>
     </div>
   );

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from decimal import Decimal
 from functools import lru_cache
 from typing import Annotated, Literal
 
@@ -102,6 +103,12 @@ class Settings(BaseSettings):
 
     openai_api_key: str = Field(default="", repr=False)
     openai_model: str = "gpt-4.1-mini"
+    # Optional operator-owned pricing snapshot for beta cost estimation. Costs
+    # remain null unless the snapshot explicitly names the configured model and
+    # provides both rates; this avoids silently applying stale vendor pricing.
+    openai_pricing_model: str = ""
+    openai_input_cost_per_million_tokens_usd: Decimal | None = Field(default=None, ge=0)
+    openai_output_cost_per_million_tokens_usd: Decimal | None = Field(default=None, ge=0)
 
     # Unified in-app agent rollout controls. Capabilities remain independently
     # gated and safely disabled until their implementation phase is released.

@@ -111,6 +111,11 @@ class ErrandSummary(DomainReadModel):
     place_resolution_status: str = Field(min_length=1, max_length=32)
     resolved_place_name: str | None = Field(default=None, min_length=1, max_length=255)
     household_items: list[str] = Field(max_length=MAX_ERRAND_HOUSEHOLD_ITEMS)
+    household_item_ids: list[str] = Field(
+        default_factory=list,
+        max_length=MAX_ERRAND_HOUSEHOLD_ITEMS,
+    )
+    household_items_truncated: bool = False
 
 
 class ErrandPlanStopSummary(DomainReadModel):
@@ -119,6 +124,10 @@ class ErrandPlanStopSummary(DomainReadModel):
     errands: list[str] = Field(max_length=MAX_STOP_ERRANDS)
     errands_truncated: bool
     household_items: list[str] = Field(max_length=MAX_STOP_HOUSEHOLD_ITEMS)
+    household_item_ids: list[str] = Field(
+        default_factory=list,
+        max_length=MAX_STOP_HOUSEHOLD_ITEMS,
+    )
     household_items_truncated: bool
 
 
@@ -155,7 +164,8 @@ def build_deals_errands_tools(settings: Settings) -> tuple[AgentTool, AgentTool]
             name="get_relevant_deals",
             description=(
                 "Read current ranked ExpenseOps promotions using bounded deal, category, "
-                "search, expiry, and existing replenishment-relevance filters."
+                "search, expiry, and existing replenishment-relevance filters. Pair with "
+                "household replenishment when the user asks about a need and a useful deal."
             ),
             effect=ToolEffect.READ,
             input_model=RelevantDealsInput,
@@ -166,12 +176,14 @@ def build_deals_errands_tools(settings: Settings) -> tuple[AgentTool, AgentTool]
             name="get_errands_and_plan",
             description=(
                 "Read bounded ExpenseOps errands and, when requested, a stored current or "
-                "specific plan with canonical freshness and stop order."
+                "specific plan with canonical freshness and stop order. Pair with household "
+                "replenishment only to surface exact stored item links, never inferred stores."
             ),
             effect=ToolEffect.READ,
             input_model=ErrandsAndPlanInput,
             output_model=ErrandsAndPlanOutput,
             handler=_get_errands_and_plan,
+            version="1.1",
         ),
     )
 
@@ -369,15 +381,19 @@ def _relevance_reasons(offer: PromotionOffer, breakdown: dict) -> list[str]:
 
 
 def _errand_summary(errand: Errand) -> dict:
-    household_items = sorted(
+    household_item_pairs = sorted(
         {
-            _text(link.household_item.name, 255, "Tracked item")
+            (
+                str(link.household_item.id),
+                _text(link.household_item.name, 255, "Tracked item"),
+            )
             for link in errand.household_links
             if link.household_item is not None
             and link.household_item.workspace_id == errand.workspace_id
         },
-        key=str.casefold,
+        key=lambda value: (value[1].casefold(), int(value[0])),
     )
+    bounded_household_items = household_item_pairs[:MAX_ERRAND_HOUSEHOLD_ITEMS]
     resolved_place_name = None
     if errand.place_resolution_status == "resolved":
         resolved_place_name = _optional_text(errand.resolved_place_name, 255)
@@ -396,7 +412,9 @@ def _errand_summary(errand: Errand) -> dict:
             "unresolved",
         ),
         "resolved_place_name": resolved_place_name,
-        "household_items": household_items[:MAX_ERRAND_HOUSEHOLD_ITEMS],
+        "household_items": [name for _item_id, name in bounded_household_items],
+        "household_item_ids": [item_id for item_id, _name in bounded_household_items],
+        "household_items_truncated": len(household_item_pairs) > len(bounded_household_items),
     }
 
 
@@ -434,21 +452,26 @@ def _plan_stop_summary(stop: ErrandPlanStop, *, workspace_id: int) -> dict:
         },
         key=str.casefold,
     )
-    household_items = sorted(
+    household_item_pairs = sorted(
         {
-            _text(link.household_item.name, 255, "Tracked item")
+            (
+                str(link.household_item.id),
+                _text(link.household_item.name, 255, "Tracked item"),
+            )
             for link in stop.household_item_links
             if link.household_item is not None and link.household_item.workspace_id == workspace_id
         },
-        key=str.casefold,
+        key=lambda value: (value[1].casefold(), int(value[0])),
     )
+    bounded_household_items = household_item_pairs[:MAX_STOP_HOUSEHOLD_ITEMS]
     return {
         "order": max(1, int(stop.stop_order)),
         "place_name": _text(stop.place_name, 255, "Planned stop"),
         "errands": errand_titles[:MAX_STOP_ERRANDS],
         "errands_truncated": len(errand_titles) > MAX_STOP_ERRANDS,
-        "household_items": household_items[:MAX_STOP_HOUSEHOLD_ITEMS],
-        "household_items_truncated": len(household_items) > MAX_STOP_HOUSEHOLD_ITEMS,
+        "household_items": [name for _item_id, name in bounded_household_items],
+        "household_item_ids": [item_id for item_id, _name in bounded_household_items],
+        "household_items_truncated": len(household_item_pairs) > len(bounded_household_items),
     }
 
 

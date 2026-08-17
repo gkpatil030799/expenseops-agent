@@ -1,10 +1,16 @@
-import { useEffect, useRef, useState, type ReactNode } from "react";
-import { Brain, Building2, CheckCircle2, ChevronRight, Circle, Copy, ExternalLink, Link2, MessageCircle, Pencil, Plus, Settings2, Shield, SlidersHorizontal, Trash2, Unplug, UserMinus, UserRound, Users, UsersRound, WalletCards } from "lucide-react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { Bot, Brain, Building2, CheckCircle2, ChevronRight, Circle, Copy, ExternalLink, Link2, MessageCircle, Pencil, Plus, Settings2, Shield, SlidersHorizontal, Trash2, Unplug, UserMinus, UserRound, Users, UsersRound, WalletCards } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { PageHeader } from "@/components/ui/page-header";
+import {
+  buildSettingsContext,
+  type AgentContextPublisher,
+  type AgentNavigationRequest,
+  type AgentSettingsSection,
+} from "@/agent/pageContext";
 import { ApiError, api, apiErrorMessage } from "@/lib/api";
 import { onboardingChecklist } from "@/onboardingLogic";
 
@@ -33,7 +39,7 @@ type PrivacySummary = {
   consents: Record<ConsentPurpose, boolean>;
   deletion: { confirmation: string; financial_history_retained_for_audit: boolean };
 };
-type SettingsSection = "account" | "workspace" | "personal" | "workspace-connections" | "expense" | "splitwise" | "learning" | "privacy";
+type SettingsSection = AgentSettingsSection;
 
 const settingsSections: Array<{ value: SettingsSection; label: string; description: string; icon: typeof Settings2 }> = [
   { value: "account", label: "Account", description: "Identity and setup", icon: UserRound },
@@ -46,7 +52,7 @@ const settingsSections: Array<{ value: SettingsSection; label: string; descripti
   { value: "privacy", label: "Privacy & account", description: "Data and access actions", icon: Shield },
 ];
 
-export function AccountSettingsPage({ context, splitwiseTools, learnedBehaviorTools }: { context: AccountContext; splitwiseTools?: ReactNode; learnedBehaviorTools?: ReactNode }) {
+export function AccountSettingsPage({ context, splitwiseTools, learnedBehaviorTools, onAgentContextChange, agentNavigationRequest }: { context: AccountContext; splitwiseTools?: ReactNode; learnedBehaviorTools?: ReactNode; onAgentContextChange?: AgentContextPublisher; agentNavigationRequest?: AgentNavigationRequest | null }) {
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
   const [integrations, setIntegrations] = useState<Integrations | null>(null);
   const [workspaceName, setWorkspaceName] = useState("");
@@ -61,8 +67,49 @@ export function AccountSettingsPage({ context, splitwiseTools, learnedBehaviorTo
   const [privacy, setPrivacy] = useState<PrivacySummary | null>(null);
   const [deletionConfirmation, setDeletionConfirmation] = useState("");
   const [section, setSection] = useState<SettingsSection>("account");
+  const [focusedIntegrationId, setFocusedIntegrationId] = useState<string | null>(null);
   const [busyAction, setBusyAction] = useState<string | null>(null);
   const pendingActions = useRef(new Set<string>());
+  const handledNavigationRequest = useRef<AgentNavigationRequest | null>(null);
+
+  const agentContext = useMemo(
+    () => buildSettingsContext({
+      section,
+      integration: focusedIntegrationId
+        ? { publicId: focusedIntegrationId, label: integrationLabel(focusedIntegrationId) }
+        : null,
+    }),
+    [focusedIntegrationId, section],
+  );
+
+  useEffect(() => {
+    onAgentContextChange?.(agentContext);
+  }, [agentContext, onAgentContextChange]);
+
+  useEffect(() => {
+    if (!agentNavigationRequest || handledNavigationRequest.current === agentNavigationRequest) return;
+    if (agentNavigationRequest.target_surface !== "settings" && agentNavigationRequest.target_surface !== "integrations") return;
+    handledNavigationRequest.current = agentNavigationRequest;
+    const provider = agentNavigationRequest.entity?.kind === "integration"
+      ? agentNavigationRequest.entity.public_id
+      : null;
+    if (provider) {
+      setFocusedIntegrationId(provider);
+      setSection(integrationSettingsSection(provider));
+    } else {
+      setFocusedIntegrationId(null);
+      setSection(agentNavigationRequest.target_surface === "integrations" ? "workspace-connections" : "account");
+    }
+  }, [agentNavigationRequest]);
+
+  function changeSection(value: SettingsSection) {
+    setSection(value);
+    setFocusedIntegrationId(null);
+  }
+
+  function toggleIntegrationFocus(provider: string) {
+    setFocusedIntegrationId((current) => current === provider ? null : provider);
+  }
 
   async function performAction<T>(key: string, work: () => Promise<T>, success?: string) {
     if (pendingActions.current.has(key)) return undefined;
@@ -258,9 +305,9 @@ export function AccountSettingsPage({ context, splitwiseTools, learnedBehaviorTo
       {integrationError ? <p role="alert" className="rounded-xl border border-rose-200 bg-rose-50 p-3 text-sm text-rose-800">{integrationError}</p> : null}
       {message ? <p role="status" className="rounded-xl border border-emerald-200 bg-emerald-50 p-3 text-sm text-emerald-800">{message}</p> : null}
 
-      <MobileSettingsNavigation selected={section} onChange={setSection} />
+      <MobileSettingsNavigation selected={section} onChange={changeSection} />
       <div className="grid items-start gap-5 lg:grid-cols-[240px_minmax(0,1fr)]">
-        <SettingsNavigation selected={section} onChange={setSection} />
+        <SettingsNavigation selected={section} onChange={changeSection} />
         <main id="settings-panel" className="min-w-0" aria-live="polite">
           {section === "account" ? <SettingsPanel title="Account" description="Your signed-in identity and setup progress.">
             <Card>
@@ -291,11 +338,11 @@ export function AccountSettingsPage({ context, splitwiseTools, learnedBehaviorTo
 
           {section === "personal" ? <SettingsPanel title="Personal connections" description="Services tied to you as an individual, not every workspace member.">
             <Card><CardHeader><CardTitle>Your accounts</CardTitle><CardDescription>Each member connects their own bank, Splitwise payer, and Telegram delivery identity.</CardDescription></CardHeader><CardContent className="space-y-3">
-              <IntegrationRow name="Telegram" mark="TG" scope="Personal" connected={integrations?.telegram.connected} connectedDetail={integrations?.telegram.telegram_user_id ? `Telegram user ${integrations.telegram.telegram_user_id} · chat ${integrations.telegram.chat_id}` : "Connected to your ExpenseOps identity."} busy={busyAction === "connect-telegram" || busyAction === "disconnect-/api/integrations/telegram"} onConnect={connectTelegram} onDisconnect={() => disconnect("/api/integrations/telegram")} />
+              <IntegrationRow providerId="telegram" focused={focusedIntegrationId === "telegram"} onAgentFocus={() => toggleIntegrationFocus("telegram")} name="Telegram" mark="TG" scope="Personal" connected={integrations?.telegram.connected} connectedDetail={integrations?.telegram.telegram_user_id ? `Telegram user ${integrations.telegram.telegram_user_id} · chat ${integrations.telegram.chat_id}` : "Connected to your ExpenseOps identity."} busy={busyAction === "connect-telegram" || busyAction === "disconnect-/api/integrations/telegram"} onConnect={connectTelegram} onDisconnect={() => disconnect("/api/integrations/telegram")} />
               {telegramSetup ? <TelegramSetup value={telegramSetup} /> : null}
-              <IntegrationRow name="Plaid" mark="P" scope="Personal" connected={integrations?.plaid.institutions.some((value) => value.is_mine)} connectedDetail={integrations?.plaid.institutions.filter((value) => value.is_mine).map((value) => value.name).join(", ") || "Connect your bank so ExpenseOps can attribute its transactions to you."} onConnect={() => window.location.assign("/?workspace=expenses&connect=plaid")} />
+              <IntegrationRow providerId="plaid" focused={focusedIntegrationId === "plaid"} onAgentFocus={() => toggleIntegrationFocus("plaid")} name="Plaid" mark="P" scope="Personal" connected={integrations?.plaid.institutions.some((value) => value.is_mine)} connectedDetail={integrations?.plaid.institutions.filter((value) => value.is_mine).map((value) => value.name).join(", ") || "Connect your bank so ExpenseOps can attribute its transactions to you."} onConnect={() => window.location.assign("/?workspace=expenses&connect=plaid")} />
               {integrations?.plaid.institutions.map((institution) => <div key={institution.id} className="flex min-h-11 flex-col justify-between gap-2 rounded-lg bg-slate-50 px-3 py-2 text-sm sm:flex-row sm:items-center"><span className="min-w-0"><span className="block truncate font-medium text-slate-950">{institution.name}</span><span className="block text-xs text-slate-600">{institution.owner_name ? `${institution.owner_name}${institution.ownership_verified ? " · verified owner" : " · verification needed"}` : "Owner not confirmed"}</span></span><div className="flex gap-2">{!institution.owner_user_id ? <Button size="sm" variant="outline" disabled={Boolean(busyAction)} onClick={() => claimBank(institution.id, institution.name)}>{busyAction === `claim-plaid-${institution.id}` ? "Confirming…" : "Confirm mine"}</Button> : null}{institution.is_mine || canManageWorkspace ? <Button size="sm" variant="outline" disabled={busyAction === `disconnect-/api/integrations/plaid/${institution.id}`} onClick={() => disconnect(`/api/integrations/plaid/${institution.id}`)}><Unplug className="h-4 w-4" />{busyAction === `disconnect-/api/integrations/plaid/${institution.id}` ? "Disconnecting…" : "Disconnect"}</Button> : null}</div></div>)}
-              <IntegrationRow name="Splitwise" mark="S" scope="Personal" connected={integrations?.splitwise.connected} available={integrations?.splitwise.available} unavailableDetail="Splitwise sign-in is not configured by the application administrator." connectedDetail={integrations?.splitwise.identity ? `${integrations.splitwise.identity}${integrations.splitwise.email ? ` · ${integrations.splitwise.email}` : ""}${integrations.splitwise.verified ? " · verified payer" : " · reconnect to verify payer"}` : "Connect your personal Splitwise account."} busy={busyAction === "connect-splitwise" || busyAction === "disconnect-/api/integrations/splitwise"} onConnect={connectSplitwise} onDisconnect={() => disconnect("/api/integrations/splitwise")} />
+              <IntegrationRow providerId="splitwise" focused={focusedIntegrationId === "splitwise"} onAgentFocus={() => toggleIntegrationFocus("splitwise")} name="Splitwise" mark="S" scope="Personal" connected={integrations?.splitwise.connected} available={integrations?.splitwise.available} unavailableDetail="Splitwise sign-in is not configured by the application administrator." connectedDetail={integrations?.splitwise.identity ? `${integrations.splitwise.identity}${integrations.splitwise.email ? ` · ${integrations.splitwise.email}` : ""}${integrations.splitwise.verified ? " · verified payer" : " · reconnect to verify payer"}` : "Connect your personal Splitwise account."} busy={busyAction === "connect-splitwise" || busyAction === "disconnect-/api/integrations/splitwise"} onConnect={connectSplitwise} onDisconnect={() => disconnect("/api/integrations/splitwise")} />
             </CardContent></Card>
           </SettingsPanel> : null}
 
@@ -307,9 +354,9 @@ export function AccountSettingsPage({ context, splitwiseTools, learnedBehaviorTo
               <p className="text-xs leading-5 text-slate-600">Review the <a className="font-medium text-indigo-700 underline" href="/legal/privacy" target="_blank" rel="noreferrer">Privacy Policy</a> before connecting.</p>
             </CardContent></Card>
             <Card><CardContent className="grid gap-3 p-4 sm:p-5">
-              <IntegrationRow name="Gmail" mark="G" scope="Workspace" connected={integrations?.gmail.connected} connectedDetail={integrations?.gmail.identity ? `Connected as ${integrations.gmail.identity}` : "Connected workspace receipt inbox."} ownerManaged={!canManageWorkspace} busy={busyAction === "connect-gmail" || busyAction === "disconnect-/api/integrations/gmail"} onConnect={canManageWorkspace ? connectGmail : undefined} onDisconnect={canManageWorkspace ? () => disconnect("/api/integrations/gmail") : undefined} />
-              <IntegrationRow name="Google Maps" mark="M" scope="Application" connected connectedDetail="Application-managed routing and place search." />
-              <IntegrationRow name="OpenAI" mark="AI" scope="Application" connected connectedDetail="Application-managed language and receipt processing." />
+              <IntegrationRow providerId="gmail" focused={focusedIntegrationId === "gmail"} onAgentFocus={() => toggleIntegrationFocus("gmail")} name="Gmail" mark="G" scope="Workspace" connected={integrations?.gmail.connected} connectedDetail={integrations?.gmail.identity ? `Connected as ${integrations.gmail.identity}` : "Connected workspace receipt inbox."} ownerManaged={!canManageWorkspace} busy={busyAction === "connect-gmail" || busyAction === "disconnect-/api/integrations/gmail"} onConnect={canManageWorkspace ? connectGmail : undefined} onDisconnect={canManageWorkspace ? () => disconnect("/api/integrations/gmail") : undefined} />
+              <IntegrationRow providerId="google_maps" focused={focusedIntegrationId === "google_maps"} onAgentFocus={() => toggleIntegrationFocus("google_maps")} name="Google Maps" mark="M" scope="Application" connected connectedDetail="Application-managed routing and place search." />
+              <IntegrationRow providerId="openai" focused={focusedIntegrationId === "openai"} onAgentFocus={() => toggleIntegrationFocus("openai")} name="OpenAI" mark="AI" scope="Application" connected connectedDetail="Application-managed language and receipt processing." />
             </CardContent></Card>
           </SettingsPanel> : null}
 
@@ -370,9 +417,27 @@ function ChecklistRow({ done, label, detail }: { done: boolean; label: string; d
   return <div className="flex items-start gap-3 rounded-lg border border-slate-200 p-3"><Icon className={`mt-0.5 h-5 w-5 ${done ? "text-emerald-600" : "text-slate-400"}`} /><div><p className="font-medium text-slate-950">{label}</p><p className="text-sm text-slate-600">{detail}</p></div></div>;
 }
 
-function IntegrationRow({ name, mark, scope, connected, available = true, connectedDetail, unavailableDetail, ownerManaged = false, busy = false, onConnect, onDisconnect }: { name: string; mark: string; scope: "Personal" | "Workspace" | "Application"; connected?: boolean; available?: boolean; connectedDetail?: string; unavailableDetail?: string; ownerManaged?: boolean; busy?: boolean; onConnect?: () => void; onDisconnect?: () => void }) {
+function IntegrationRow({ providerId, focused, onAgentFocus, name, mark, scope, connected, available = true, connectedDetail, unavailableDetail, ownerManaged = false, busy = false, onConnect, onDisconnect }: { providerId: string; focused: boolean; onAgentFocus: () => void; name: string; mark: string; scope: "Personal" | "Workspace" | "Application"; connected?: boolean; available?: boolean; connectedDetail?: string; unavailableDetail?: string; ownerManaged?: boolean; busy?: boolean; onConnect?: () => void; onDisconnect?: () => void }) {
   const status = connected ? connectedDetail || "Connected" : available ? "Not connected" : unavailableDetail || "Connection is not available yet.";
-  return <div className="flex flex-col gap-3 rounded-xl border border-slate-200 p-3 sm:flex-row sm:items-center sm:justify-between"><div className="flex min-w-0 items-start gap-3"><span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-slate-950 text-xs font-bold text-white">{mark}</span><div className="min-w-0"><div className="flex flex-wrap items-center gap-2"><p className="font-medium text-slate-950">{name}</p><span className="rounded-full bg-slate-100 px-2 py-0.5 text-[11px] font-semibold text-slate-600">{scope}</span>{connected ? <span className="inline-flex items-center gap-1 text-xs font-medium text-emerald-700"><CheckCircle2 className="h-3.5 w-3.5" />Connected</span> : null}</div><p className="mt-1 text-sm leading-5 text-slate-600">{status}</p></div></div><div className="shrink-0">{onConnect && !connected && available ? <Button size="sm" disabled={busy} onClick={onConnect}><Link2 className="h-4 w-4" />{busy ? "Connecting…" : "Connect"}</Button> : onConnect && !connected ? <span className="rounded-full bg-slate-100 px-2.5 py-1 text-xs font-medium text-slate-600">Setup needed</span> : onDisconnect && connected ? <Button size="sm" variant="outline" disabled={busy} onClick={onDisconnect}><Unplug className="h-4 w-4" />{busy ? "Disconnecting…" : "Disconnect"}</Button> : ownerManaged ? <span className="rounded-full bg-slate-100 px-2.5 py-1 text-xs font-medium text-slate-600">Owner managed</span> : null}</div></div>;
+  return <div className={`flex flex-col gap-3 rounded-xl border p-3 sm:flex-row sm:items-center sm:justify-between ${focused ? "border-indigo-300 bg-indigo-50/40 ring-1 ring-indigo-200" : "border-slate-200"}`}><div className="flex min-w-0 items-start gap-3"><span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-slate-950 text-xs font-bold text-white">{mark}</span><div className="min-w-0"><div className="flex flex-wrap items-center gap-2"><p className="font-medium text-slate-950">{name}</p><span className="rounded-full bg-slate-100 px-2 py-0.5 text-[11px] font-semibold text-slate-600">{scope}</span>{connected ? <span className="inline-flex items-center gap-1 text-xs font-medium text-emerald-700"><CheckCircle2 className="h-3.5 w-3.5" />Connected</span> : null}</div><p className="mt-1 text-sm leading-5 text-slate-600">{status}</p></div></div><div className="flex shrink-0 flex-wrap items-center gap-2"><button type="button" className={`inline-flex min-h-11 items-center gap-2 rounded-control px-3 text-xs font-semibold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500 ${focused ? "bg-indigo-100 text-indigo-800" : "text-indigo-700 hover:bg-indigo-50"}`} onClick={onAgentFocus} aria-pressed={focused} aria-label={`Use ${name} as Agent context`} data-testid={`agent-context-integration-${providerId}`}><Bot className="size-4" aria-hidden="true" />{focused ? "In Agent context" : "Ask Agent"}</button>{onConnect && !connected && available ? <Button size="sm" disabled={busy} onClick={onConnect}><Link2 className="h-4 w-4" />{busy ? "Connecting…" : "Connect"}</Button> : onConnect && !connected ? <span className="rounded-full bg-slate-100 px-2.5 py-1 text-xs font-medium text-slate-600">Setup needed</span> : onDisconnect && connected ? <Button size="sm" variant="outline" disabled={busy} onClick={onDisconnect}><Unplug className="h-4 w-4" />{busy ? "Disconnecting…" : "Disconnect"}</Button> : ownerManaged ? <span className="rounded-full bg-slate-100 px-2.5 py-1 text-xs font-medium text-slate-600">Owner managed</span> : null}</div></div>;
+}
+
+function integrationSettingsSection(provider: string): SettingsSection {
+  return provider === "plaid" || provider === "splitwise" || provider === "telegram"
+    ? "personal"
+    : "workspace-connections";
+}
+
+function integrationLabel(provider: string): string {
+  const labels: Record<string, string> = {
+    plaid: "Plaid",
+    gmail: "Gmail",
+    splitwise: "Splitwise",
+    telegram: "Telegram",
+    google_maps: "Google Maps",
+    openai: "OpenAI",
+  };
+  return labels[provider] || provider;
 }
 
 function initials(value: string) {

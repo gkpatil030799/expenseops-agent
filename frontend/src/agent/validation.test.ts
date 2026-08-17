@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 
 import {
   AgentProtocolError,
+  parseAgentConversationDetail,
+  parseAgentFeedback,
   parseAgentStreamEvent,
   parseAgentStructuredResponse,
 } from "./validation";
@@ -188,6 +190,43 @@ function supportedResponse() {
         ],
       },
       {
+        type: "attention_summary",
+        block_version: "1.0",
+        title: "Today needs attention",
+        status: "partial",
+        checked_domains: ["transactions", "replenishment", "receipts"],
+        unavailable_domains: ["deals"],
+        items: [
+          {
+            priority: "action_required",
+            domain: "transactions",
+            title: "Expense reviews",
+            detail: "Two transactions still need review.",
+            count: 2,
+            navigation: {
+              type: "navigation",
+              label: "View expenses",
+              target_surface: "expense_review",
+            },
+          },
+          {
+            priority: "action_required",
+            domain: "receipts",
+            title: "Receipt review",
+            detail: null,
+            count: 1,
+            navigation: null,
+          },
+          {
+            priority: "time_sensitive",
+            domain: "replenishment",
+            title: "Household item likely due",
+            count: 1,
+          },
+        ],
+        items_truncated: false,
+      },
+      {
         type: "error",
         code: "agent_provider_failed",
         title: "ExpenseOps could not retrieve that data",
@@ -201,6 +240,41 @@ function supportedResponse() {
         suggested_navigation: null,
       },
     ],
+  };
+}
+
+function attentionSummary(overrides: Record<string, unknown> = {}) {
+  return {
+    type: "attention_summary",
+    block_version: "1.0",
+    title: "Today needs attention",
+    status: "partial",
+    checked_domains: ["transactions", "replenishment"],
+    unavailable_domains: ["deals"],
+    items: [
+      {
+        priority: "action_required",
+        domain: "transactions",
+        title: "Expense reviews",
+        detail: "Two transactions still need review.",
+        count: 2,
+        navigation: {
+          type: "navigation",
+          label: "View expenses",
+          target_surface: "expense_review",
+        },
+      },
+      {
+        priority: "time_sensitive",
+        domain: "replenishment",
+        title: "Household item likely due",
+        detail: null,
+        count: 1,
+        navigation: null,
+      },
+    ],
+    items_truncated: false,
+    ...overrides,
   };
 }
 
@@ -218,6 +292,7 @@ describe("Agent structured-response validation", () => {
       "deal_list",
       "errand_summary",
       "integration_status",
+      "attention_summary",
       "error",
       "empty",
     ]);
@@ -314,8 +389,144 @@ describe("Agent structured-response validation", () => {
     expect(parseAgentStructuredResponse(response)).toBe(response);
   });
 
+  it("accepts allowlisted navigation with omitted or compatible entity fields", () => {
+    const response = {
+      schema_version: "1.0",
+      blocks: [
+        {
+          type: "navigation",
+          label: "Open insights",
+          target_surface: "expense_insights",
+        },
+        {
+          type: "empty",
+          title: "No matching deals",
+          message: "Open the active deal list instead.",
+          suggested_navigation: {
+            type: "navigation",
+            label: "Open Target deal",
+            target_surface: "deals",
+            entity: { kind: "deal", public_id: "71" },
+          },
+        },
+      ],
+    };
+
+    expect(parseAgentStructuredResponse(response)).toBe(response);
+  });
+
+  it("accepts a bounded partial attention summary even when completed areas are empty", () => {
+    const block = attentionSummary({ items: [] });
+    const response = { schema_version: "1.0", blocks: [block] };
+
+    expect(parseAgentStructuredResponse(response)).toBe(response);
+  });
+
+  it.each([
+    attentionSummary({ block_version: "2.0" }),
+    attentionSummary({ status: "complete" }),
+    attentionSummary({ checked_domains: ["transactions", "transactions"] }),
+    attentionSummary({ unavailable_domains: ["replenishment", "deals"] }),
+    attentionSummary({
+      items: [
+        {
+          priority: "action_required",
+          domain: "transactions",
+          title: "Expense reviews",
+          count: 0,
+        },
+      ],
+    }),
+    attentionSummary({
+      items: [
+        {
+          priority: "time_sensitive",
+          domain: "replenishment",
+          title: "Household item likely due",
+          count: 1,
+        },
+        {
+          priority: "action_required",
+          domain: "transactions",
+          title: "Expense reviews",
+          count: 2,
+        },
+      ],
+    }),
+    attentionSummary({
+      items: [
+        {
+          priority: "action_required",
+          domain: "transactions",
+          title: "Expense reviews",
+          count: 2,
+          href: "https://evil.example",
+        },
+      ],
+    }),
+    attentionSummary({
+      items: [
+        {
+          priority: "action_required",
+          domain: "transactions",
+          title: "Expense reviews",
+          count: 2,
+          navigation: {
+            type: "navigation",
+            label: "Leave ExpenseOps",
+            target_surface: "expense_review",
+            href: "https://evil.example",
+          },
+        },
+      ],
+    }),
+    attentionSummary({
+      items: [
+        {
+          priority: "action_required",
+          domain: "receipts",
+          title: "Receipt review",
+          count: 1,
+        },
+      ],
+    }),
+  ])("rejects malformed, inconsistent, or unsafe attention-summary payloads", (block) => {
+    expect(() =>
+      parseAgentStructuredResponse({ schema_version: "1.0", blocks: [block] }),
+    ).toThrow(AgentProtocolError);
+  });
+
+  it.each([
+    {
+      type: "navigation",
+      label: "External URL",
+      target_surface: "deals",
+      href: "https://evil.example",
+    },
+    {
+      type: "navigation",
+      label: "Contradictory entity",
+      target_surface: "deals",
+      entity: { kind: "receipt", public_id: "51" },
+    },
+    {
+      type: "empty",
+      title: "Unsafe suggestion",
+      message: "This must fail closed.",
+      suggested_navigation: {
+        type: "navigation",
+        label: "Unknown target",
+        target_surface: "https://evil.example",
+      },
+    },
+  ])("rejects unsafe top-level or nested navigation", (block) => {
+    expect(() =>
+      parseAgentStructuredResponse({ schema_version: "1.0", blocks: [block] }),
+    ).toThrow(AgentProtocolError);
+  });
+
   it.each(["navigation", "action_confirmation", "unexpected_block"])(
-    "fails closed for unsupported %s blocks",
+    "fails closed for malformed or unsupported %s blocks",
     (type) => {
       expect(() =>
         parseAgentStructuredResponse({
@@ -355,6 +566,131 @@ describe("Agent structured-response validation", () => {
             })),
           },
         ],
+      }),
+    ).toThrow(AgentProtocolError);
+  });
+});
+
+describe("Agent feedback validation", () => {
+  const feedback = {
+    schema_version: "1.0",
+    public_id: "feedback-public-1",
+    message_public_id: "message-assistant-1",
+    conversation_public_id: "conversation-public-1",
+    run_public_id: "run-public-1",
+    rating: "not_helpful",
+    reason: "didnt_understand",
+    created_at: "2026-08-16T16:00:00Z",
+    updated_at: "2026-08-16T16:00:01Z",
+  };
+
+  it("accepts the bounded feedback projection", () => {
+    expect(parseAgentFeedback(feedback)).toBe(feedback);
+    expect(
+      parseAgentFeedback({ ...feedback, rating: "helpful", reason: null }),
+    ).toEqual({ ...feedback, rating: "helpful", reason: null });
+  });
+
+  it.each([
+    { rating: "mixed" },
+    { reason: "full_answer_copy" },
+    { rating: "helpful", reason: "other" },
+    { reason: undefined },
+    { run_public_id: "" },
+    { schema_version: "2.0" },
+    { answer_text: "This must never enter the feedback contract." },
+  ])("rejects malformed or unbounded feedback fields: %o", (overrides) => {
+    expect(() => parseAgentFeedback({ ...feedback, ...overrides })).toThrow(
+      AgentProtocolError,
+    );
+  });
+
+  it("keeps loaded feedback bound to its exact assistant message and conversation", () => {
+    const detail = {
+      conversation: {
+        public_id: "conversation-public-1",
+        title: "Feedback",
+        archived_at: null,
+        created_at: "2026-08-16T15:59:00Z",
+        updated_at: "2026-08-16T16:00:01Z",
+      },
+      messages: [
+        {
+          public_id: "message-assistant-1",
+          conversation_public_id: "conversation-public-1",
+          role: "assistant",
+          text: null,
+          structured_response: {
+            schema_version: "1.0",
+            blocks: [{ type: "text", text: "Grounded answer." }],
+          },
+          client_message_id: null,
+          feedback_eligible: true,
+          feedback,
+          created_at: "2026-08-16T16:00:00Z",
+        },
+      ],
+      messages_total: 1,
+      messages_offset: 0,
+      messages_has_more: false,
+    };
+
+    expect(parseAgentConversationDetail(detail)).toBe(detail);
+    expect(() =>
+      parseAgentConversationDetail({
+        ...detail,
+        messages: [
+          {
+            ...detail.messages[0],
+            feedback: { ...feedback, message_public_id: "different-message" },
+          },
+        ],
+      }),
+    ).toThrow(AgentProtocolError);
+    expect(() =>
+      parseAgentConversationDetail({
+        ...detail,
+        messages: [{ ...detail.messages[0], feedback_eligible: false }],
+      }),
+    ).toThrow(AgentProtocolError);
+    expect(() =>
+      parseAgentConversationDetail({
+        ...detail,
+        messages: [
+          {
+            ...detail.messages[0],
+            role: "user",
+            feedback_eligible: true,
+            feedback: null,
+          },
+        ],
+      }),
+    ).toThrow(AgentProtocolError);
+  });
+
+  it("checks feedback run identity on an enclosing assistant-completed event", () => {
+    const message = {
+      public_id: "message-assistant-1",
+      conversation_public_id: "conversation-public-1",
+      role: "assistant",
+      text: "Grounded answer.",
+      structured_response: null,
+      client_message_id: null,
+      feedback_eligible: true,
+      feedback,
+      created_at: "2026-08-16T16:00:00Z",
+    };
+    const event = {
+      ...streamBase,
+      type: "assistant_completed",
+      message,
+    };
+
+    expect(parseAgentStreamEvent(event)).toBe(event);
+    expect(() =>
+      parseAgentStreamEvent({
+        ...event,
+        run_public_id: "different-run",
       }),
     ).toThrow(AgentProtocolError);
   });

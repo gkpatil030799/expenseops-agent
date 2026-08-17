@@ -2,6 +2,8 @@ import type { Page, Request as PlaywrightRequest } from "@playwright/test";
 
 import type {
   AgentConversation,
+  AgentFeedbackCreate,
+  AgentFeedbackOut,
   AgentMessage,
   AgentRunOut,
   AgentStreamEvent,
@@ -27,9 +29,17 @@ export type RecordedAgentStreamCall = {
   body: AgentTurnPostBody | null;
 };
 
+export type RecordedAgentFeedbackRequest = {
+  method: string;
+  pathname: string;
+  body: AgentFeedbackCreate | null;
+};
+
 export type MockAgentApp = {
   conversation: AgentConversation;
   requests: RecordedRequest[];
+  feedbackRequests: RecordedAgentFeedbackRequest[];
+  setAgentEnabled: (enabled: boolean) => void;
   waitForArchiveRequest: () => Promise<void>;
   releaseArchiveRequest: () => void;
 };
@@ -133,6 +143,8 @@ export function canonicalMessages(
       text: userText,
       structured_response: null,
       client_message_id: clientMessageId,
+      feedback_eligible: false,
+      feedback: null,
       created_at: NOW,
     },
     {
@@ -142,6 +154,8 @@ export function canonicalMessages(
       text: null,
       structured_response: response,
       client_message_id: null,
+      feedback_eligible: true,
+      feedback: null,
       created_at: "2026-08-15T07:00:02Z",
     },
   ];
@@ -271,6 +285,9 @@ export async function mockAgentApp(
   } = {},
 ): Promise<MockAgentApp> {
   const requests: RecordedRequest[] = [];
+  const feedbackRequests: RecordedAgentFeedbackRequest[] = [];
+  const feedbackByMessage = new Map<string, AgentFeedbackOut>();
+  let agentFeatureEnabled = agentEnabled;
   let conversationExists = initialConversation;
   let markArchiveStarted = () => {};
   const archiveStarted = new Promise<void>((resolve) => {
@@ -299,7 +316,7 @@ export async function mockAgentApp(
             name: "Patil household",
             workspace_type: "household",
           },
-          features: { agent: { enabled: agentEnabled, read_only: true } },
+          features: { agent: { enabled: agentFeatureEnabled, read_only: true } },
         },
       });
     }
@@ -310,6 +327,26 @@ export async function mockAgentApp(
       }
       return route.fulfill({ json: conversationExists ? [agentConversation] : [] });
     }
+    const feedbackMatch = /^\/api\/agent\/messages\/([^/]+)\/feedback$/.exec(url.pathname);
+    if (feedbackMatch) {
+      const messagePublicId = decodeURIComponent(feedbackMatch[1]);
+      const body = request.postDataJSON() as AgentFeedbackCreate | null;
+      feedbackRequests.push({ method: request.method(), pathname: url.pathname, body });
+      const existing = feedbackByMessage.get(messagePublicId);
+      const feedback: AgentFeedbackOut = {
+        schema_version: "1.0",
+        public_id: existing?.public_id || "feedback-public-1",
+        message_public_id: messagePublicId,
+        conversation_public_id: agentConversation.public_id,
+        run_public_id: "run-public-1",
+        rating: body?.rating || "helpful",
+        reason: body?.reason || null,
+        created_at: existing?.created_at || NOW,
+        updated_at: "2026-08-16T16:00:00Z",
+      };
+      feedbackByMessage.set(messagePublicId, feedback);
+      return route.fulfill({ json: feedback });
+    }
     if (url.pathname === `/api/agent/conversations/${agentConversation.public_id}`) {
       if (request.method() === "DELETE") {
         markArchiveStarted();
@@ -319,11 +356,15 @@ export async function mockAgentApp(
       }
       const responseMessages =
         typeof messages === "function" ? messages(await agentStreamCalls(page)) : messages;
+      const messagesWithFeedback = responseMessages.map((message) => {
+        const feedback = feedbackByMessage.get(message.public_id);
+        return feedback ? { ...message, feedback } : message;
+      });
       return route.fulfill({
         json: {
           conversation: agentConversation,
-          messages: responseMessages,
-          messages_total: responseMessages.length,
+          messages: messagesWithFeedback,
+          messages_total: messagesWithFeedback.length,
           messages_offset: 0,
           messages_has_more: false,
         },
@@ -354,6 +395,10 @@ export async function mockAgentApp(
   return {
     conversation: agentConversation,
     requests,
+    feedbackRequests,
+    setAgentEnabled: (enabled) => {
+      agentFeatureEnabled = enabled;
+    },
     waitForArchiveRequest: () => archiveStarted,
     releaseArchiveRequest: releaseHeldArchive,
   };

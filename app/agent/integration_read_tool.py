@@ -86,7 +86,8 @@ def build_integration_status_tool(settings: Settings) -> AgentTool:
         name="get_integration_status",
         description=(
             "Return safe canonical connection and readiness states for the authenticated "
-            "ExpenseOps user's personal, workspace, and application integrations."
+            "ExpenseOps user's personal, workspace, and application integrations. Use for "
+            "attention questions only when connection health is directly relevant."
         ),
         effect=ToolEffect.READ,
         input_model=IntegrationStatusToolInput,

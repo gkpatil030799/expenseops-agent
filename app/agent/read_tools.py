@@ -20,6 +20,7 @@ MAX_SPENDING_BREAKDOWN_ITEMS = 10
 MAX_NOTABLE_CHANGES = 4
 MAX_AVAILABLE_CURRENCIES = 16
 MAX_TRANSACTION_RESULTS = 25
+MAX_TRANSACTION_ENTITY_ID = 2_147_483_647
 
 _SHARED_TRANSACTION_STATUSES = (
     TransactionStatus.SHARED_DRAFT.value,
@@ -44,8 +45,20 @@ class SpendingInsightsInput(ReadToolModel):
     account_id: str | None = Field(default=None, min_length=1, max_length=128)
     category: str | None = Field(default=None, min_length=1, max_length=100)
     merchant: str | None = Field(default=None, min_length=1, max_length=255)
-    review_type: Literal["all", "personal", "shared"] = "all"
-    spend_basis: Literal["card", "actual_share"] = "card"
+    review_type: Literal["all", "personal", "shared"] | None = Field(
+        default=None,
+        description=(
+            "Use null unless the user explicitly requests a review scope; the server may apply "
+            "the current page scope."
+        ),
+    )
+    spend_basis: Literal["card", "actual_share"] | None = Field(
+        default=None,
+        description=(
+            "Use null unless the user explicitly requests a spend basis; the server may apply "
+            "the current page basis."
+        ),
+    )
     currency_code: str | None = Field(
         default=None,
         min_length=3,
@@ -108,11 +121,22 @@ class SpendingInsightsOutput(ReadToolModel):
 
 
 class TransactionSearchInput(ReadToolModel):
+    transaction_id: int | None = Field(
+        default=None,
+        ge=1,
+        le=MAX_TRANSACTION_ENTITY_ID,
+    )
     merchant: str | None = Field(default=None, min_length=1, max_length=255)
     start_date: str | None = Field(default=None, pattern=r"^\d{4}-\d{2}-\d{2}$")
     end_date: str | None = Field(default=None, pattern=r"^\d{4}-\d{2}-\d{2}$")
     category: str | None = Field(default=None, min_length=1, max_length=100)
-    review_type: Literal["all", "personal", "shared", "unreviewed"] = "all"
+    review_type: Literal["all", "personal", "shared", "unreviewed"] | None = Field(
+        default=None,
+        description=(
+            "Use null unless the user explicitly requests a review scope; the server may apply "
+            "the current page scope."
+        ),
+    )
     review_status: str | None = Field(default=None, min_length=1, max_length=32)
     min_amount_cents: int | None = None
     max_amount_cents: int | None = None
@@ -139,7 +163,7 @@ class TransactionSearchInput(ReadToolModel):
             raise ValueError("min_amount_cents must not exceed max_amount_cents")
         if self.review_status and self.review_status not in _SEARCHABLE_TRANSACTION_STATUSES:
             raise ValueError("review_status is not supported")
-        if self.review_status and self.review_type != "all":
+        if self.review_status and self.review_type not in {None, "all"}:
             raise ValueError("review_status and review_type cannot both be specified")
         return self
 
@@ -182,8 +206,9 @@ def build_read_tool_registry(settings: Settings) -> AgentToolRegistry:
         AgentTool(
             name="search_transactions",
             description=(
-                "Search the authenticated ExpenseOps workspace using bounded merchant, date, "
-                "category, review-state, amount, currency, and pending filters."
+                "Return bounded authenticated ExpenseOps transaction rows when the latest user "
+                "message explicitly asks to list, find, show, or identify transaction/charge "
+                "rows, or use unreviewed scope for expense attention."
             ),
             effect=ToolEffect.READ,
             input_model=TransactionSearchInput,
@@ -208,8 +233,8 @@ def _get_spending_insights(
         account_id=values.account_id,
         category=values.category,
         merchant=values.merchant,
-        review_type=values.review_type,
-        spend_basis=values.spend_basis,
+        review_type=values.review_type or "all",
+        spend_basis=values.spend_basis or "card",
         currency_code=values.currency_code,
     )
     scope = result["scope"]
@@ -240,6 +265,11 @@ def _search_transactions(
         ExpenseTransaction.workspace_id == context.workspace_id,
         ExpenseTransaction.status != TransactionStatus.REMOVED.value,
     ]
+    if values.transaction_id is not None:
+        criteria.append(ExpenseTransaction.id == values.transaction_id)
+        rows = list(context.db.scalars(select(ExpenseTransaction).where(*criteria).limit(1)))
+        return _transaction_search_output(rows, result_limit=1, total_count=len(rows))
+
     if values.merchant:
         merchant_query = f"%{_escape_like(values.merchant.casefold())}%"
         criteria.append(
@@ -295,6 +325,19 @@ def _search_transactions(
             .limit(values.limit)
         )
     )
+    return _transaction_search_output(
+        rows,
+        result_limit=values.limit,
+        total_count=total_count,
+    )
+
+
+def _transaction_search_output(
+    rows: list[ExpenseTransaction],
+    *,
+    result_limit: int,
+    total_count: int,
+) -> dict:
     return {
         "transactions": [
             {
@@ -310,7 +353,7 @@ def _search_transactions(
             for row in rows
         ],
         "total_count": total_count,
-        "result_limit": values.limit,
+        "result_limit": result_limit,
         "truncated": total_count > len(rows),
     }
 

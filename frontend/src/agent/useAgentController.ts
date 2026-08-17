@@ -9,10 +9,13 @@ import {
   createAgentConversation,
   listAgentConversations,
   loadAgentConversation,
+  submitAgentFeedback,
   streamAgentTurn,
 } from "./api";
 import type {
   AgentConversation,
+  AgentFeedbackCreate,
+  AgentFeedbackOut,
   AgentMessage,
   AgentPageContext,
   AgentStreamEvent,
@@ -45,6 +48,10 @@ export type AgentController = {
   archiveConversation: () => Promise<void>;
   sendMessage: (text: string) => Promise<void>;
   retryLastMessage: () => Promise<void>;
+  submitFeedback: (
+    messagePublicId: string,
+    payload: AgentFeedbackCreate,
+  ) => Promise<AgentFeedbackOut>;
   reload: () => Promise<void>;
   clearError: () => void;
 };
@@ -53,11 +60,11 @@ type RetryAttempt = {
   conversationPublicId: string;
   text: string;
   clientMessageId: string;
-  pageContext: AgentPageContext;
+  pageContext: AgentPageContext | null;
   reuseClientMessageId: boolean;
 };
 
-export function useAgentController(pageContext: AgentPageContext): AgentController {
+export function useAgentController(pageContext: AgentPageContext | null): AgentController {
   const [conversations, setConversations] = useState<AgentConversation[]>([]);
   const [activeConversation, setActiveConversation] = useState<AgentConversation | null>(null);
   const [messages, setMessages] = useState<AgentMessage[]>([]);
@@ -232,7 +239,9 @@ export function useAgentController(pageContext: AgentPageContext): AgentControll
         }
         const clientMessageId =
           retry?.reuseClientMessageId === true ? retry.clientMessageId : createMessageId();
-        const contextSnapshot = retry?.pageContext || pageContext;
+        // A retry must preserve the original turn snapshot, including an
+        // intentional null after the user cleared page context.
+        const contextSnapshot = retry ? retry.pageContext : pageContext;
         const attempt: RetryAttempt = {
           conversationPublicId: conversation.public_id,
           text,
@@ -249,6 +258,8 @@ export function useAgentController(pageContext: AgentPageContext): AgentControll
           text,
           structured_response: null,
           client_message_id: clientMessageId,
+          feedback_eligible: false,
+          feedback: null,
           created_at: new Date().toISOString(),
         };
         setMessages((current) =>
@@ -352,6 +363,19 @@ export function useAgentController(pageContext: AgentPageContext): AgentControll
     else await initialize();
   }, [initialize, loadConversationById]);
 
+  const submitFeedback = useCallback(
+    async (messagePublicId: string, payload: AgentFeedbackCreate) => {
+      const feedback = await submitAgentFeedback(messagePublicId, payload);
+      setMessages((current) =>
+        current.map((message) =>
+          message.public_id === messagePublicId ? { ...message, feedback } : message,
+        ),
+      );
+      return feedback;
+    },
+    [],
+  );
+
   return {
     conversations,
     activeConversation,
@@ -371,6 +395,7 @@ export function useAgentController(pageContext: AgentPageContext): AgentControll
     archiveConversation,
     sendMessage,
     retryLastMessage,
+    submitFeedback,
     reload,
     clearError: () => setError(null),
   };

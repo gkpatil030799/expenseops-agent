@@ -217,8 +217,9 @@ def _conversation(db: Session, context: TenantContext):
 
 
 def _draft(text: str = "The model draft is not canonical financial evidence.") -> RuntimeResult:
+    del text
     return RuntimeResult(
-        draft=ReadOnlyModelResponse(blocks=[AgentTextBlock(text=text)]),
+        draft=ReadOnlyModelResponse(completion="evidence_collected"),
         input_tokens=20,
         output_tokens=8,
         provider_request_id="stream-provider-response",
@@ -257,17 +258,7 @@ def test_stream_orders_progress_then_canonical_grounded_terminal_events(
             {"start_date": "2026-08-01", "end_date": "2026-08-14"},
         )
         return RuntimeResult(
-            draft=ReadOnlyModelResponse(
-                blocks=[
-                    AgentSpendingSummaryBlock(
-                        title="Untrusted model total",
-                        start_date=date(2026, 8, 1),
-                        end_date=date(2026, 8, 14),
-                        currency_code="USD",
-                        total_cents=999_999_999,
-                    )
-                ]
-            ),
+            draft=ReadOnlyModelResponse(completion="evidence_collected"),
             input_tokens=31,
             output_tokens=11,
             provider_request_count=1,
@@ -332,6 +323,8 @@ def test_stream_orders_progress_then_canonical_grounded_terminal_events(
         terminal = events[-1]
         assert isinstance(terminal, AgentRunCompletedEvent)
         assert completed.message.structured_response == structured.response
+        assert completed.message.feedback_eligible is True
+        assert completed.message.feedback is None
         assert terminal.run.status == "completed"
         assert runtime.calls == 1
         assert db.scalar(select(func.count(AgentMessage.id))) == 2
@@ -539,6 +532,64 @@ def test_closing_stream_cancels_run_without_persisting_assistant_fragment(agent_
             db.scalar(select(func.count(AgentMessage.id)).where(AgentMessage.role == "assistant"))
             == 0
         )
+
+
+def test_disconnect_then_same_id_retry_is_safe_and_does_not_duplicate(
+    agent_streaming_db,
+):
+    entered = asyncio.Event()
+
+    async def first_call_never_finishes(
+        _request: RuntimeRequest,
+        _executor: ReadToolExecutor,
+    ) -> RuntimeResult:
+        entered.set()
+        await asyncio.Event().wait()
+        raise AssertionError("unreachable")
+
+    runtime = FakeRuntime(first_call_never_finishes)
+    with _scoped(agent_streaming_db) as db:
+        context = agent_streaming_db.contexts["owner"]
+        conversation = _conversation(db, context)
+        orchestrator = ReadOnlyAgentOrchestrator(
+            db,
+            settings=_settings(),
+            runtime=runtime,
+            now=lambda: datetime(2026, 8, 14, 12, tzinfo=UTC),
+        )
+
+        async def scenario():
+            first_stream = orchestrator.stream_turn(
+                conversation.public_id,
+                owner_user_id=context.user_id,
+                text="Show my spending",
+                client_message_id="stream-disconnect-retry-1",
+            )
+            first_event = await anext(first_stream)
+            await entered.wait()
+            await first_stream.aclose()
+            retry_events = await _collect(
+                orchestrator,
+                conversation.public_id,
+                context,
+                text="Show my spending",
+                client_message_id="stream-disconnect-retry-1",
+            )
+            return first_event, retry_events
+
+        first_event, retry_events = asyncio.run(scenario())
+        db.expire_all()
+        assert isinstance(first_event, AgentRunStartedEvent)
+        assert len(retry_events) == 1
+        assert isinstance(retry_events[0], AgentRunFailedEvent)
+        assert retry_events[0].code == "agent_turn_result_unavailable"
+        assert runtime.calls == 1
+        assert db.scalar(select(func.count(AgentRun.id))) == 1
+        assert db.scalar(select(func.count(AgentToolCall.id))) == 0
+        assert db.scalar(select(func.count(AgentMessage.id))) == 1
+        run = db.scalar(select(AgentRun))
+        assert run is not None
+        assert (run.status, run.error_code) == ("cancelled", "run_cancelled")
 
 
 def test_cross_workspace_conversation_stream_is_indistinguishable_and_runs_no_provider(

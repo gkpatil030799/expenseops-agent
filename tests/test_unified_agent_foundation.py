@@ -36,6 +36,8 @@ from app.main import app
 from app.models import (
     AgentActionProposal,
     AgentConversation,
+    AgentMessage,
+    AuditEvent,
     User,
     Workspace,
     WorkspaceMembership,
@@ -319,6 +321,35 @@ def test_conversation_api_is_private_to_owner_even_inside_one_workspace(
     assert cross_workspace_user.status_code == 404
 
 
+def test_run_id_guessing_is_private_to_owner_and_workspace(agent_foundation_db):
+    factory, contexts, _state = agent_foundation_db
+    with _scoped(factory, contexts["a"]) as db:
+        service = UnifiedAgentService(db, _agent_settings())
+        conversation = service.create_conversation(owner_user_id=contexts["a"].user_id)
+        trigger = service.append_user_message(
+            conversation.public_id,
+            owner_user_id=contexts["a"].user_id,
+            text="How much did I spend?",
+        )
+        run = service.create_run(
+            conversation.public_id,
+            owner_user_id=contexts["a"].user_id,
+            trigger_message_public_id=trigger.public_id,
+            page_context=None,
+            model_name="fake-read-only",
+            prompt_version="day7-test",
+        )
+        run_public_id = run.public_id
+
+    for actor in ("c", "b"):
+        with _scoped(factory, contexts[actor]) as db:
+            with pytest.raises(AgentNotFoundError, match="Agent run not found"):
+                UnifiedAgentService(db, _agent_settings()).get_run(
+                    run_public_id,
+                    owner_user_id=contexts[actor].user_id,
+                )
+
+
 def test_message_idempotency_and_archival_are_durable(agent_foundation_db):
     factory, contexts, _state = agent_foundation_db
     with _scoped(factory, contexts["a"]) as db:
@@ -364,7 +395,9 @@ def test_message_idempotency_and_archival_are_durable(agent_foundation_db):
 
 def test_run_tool_call_and_structured_response_metadata_persist_without_prompts(
     agent_foundation_db,
+    caplog,
 ):
+    caplog.set_level("INFO")
     factory, contexts, _state = agent_foundation_db
     with _scoped(factory, contexts["a"]) as db:
         service = UnifiedAgentService(db, _agent_settings())
@@ -452,8 +485,278 @@ def test_run_tool_call_and_structured_response_metadata_persist_without_prompts(
         assert completed.status == "completed"
         assert completed.total_tokens == 125
 
+        events = {
+            getattr(record, "event", None): getattr(record, "log_metadata", {})
+            for record in caplog.records
+            if getattr(record, "event", None)
+        }
+        assert events["agent_run_started"] == {"run_id": run.public_id}
+        completed_metrics = events["agent_run_completed"]
+        assert completed_metrics["input_tokens"] == 100
+        assert completed_metrics["output_tokens"] == 25
+        assert completed_metrics["total_tokens"] == 125
+        assert completed_metrics["estimated_cost_micros"] == 120
+
         with pytest.raises(AgentNotFoundError):
             service.get_conversation("guessed-id", owner_user_id=contexts["a"].user_id)
+
+
+def test_completed_answer_feedback_is_private_idempotent_and_returned_with_history(
+    agent_foundation_db,
+):
+    factory, contexts, state = agent_foundation_db
+    state["settings"] = _agent_settings()
+    with _scoped(factory, contexts["a"]) as db:
+        service = UnifiedAgentService(db, state["settings"])
+        conversation = service.create_conversation(owner_user_id=contexts["a"].user_id)
+        trigger = service.append_user_message(
+            conversation.public_id,
+            owner_user_id=contexts["a"].user_id,
+            text="How much did I spend?",
+            client_message_id="feedback-turn-1",
+        )
+        run = service.create_run(
+            conversation.public_id,
+            owner_user_id=contexts["a"].user_id,
+            trigger_message_public_id=trigger.public_id,
+            page_context=None,
+            model_name="test-model",
+            prompt_version="feedback-v1",
+        )
+        service.start_run(run.public_id, owner_user_id=contexts["a"].user_id)
+        assistant = service.stage_assistant_message(
+            conversation.public_id,
+            owner_user_id=contexts["a"].user_id,
+            response=AgentStructuredResponse(
+                blocks=[{"type": "text", "text": "Grounded canonical answer."}]
+            ),
+        )
+        service.complete_run(
+            run.public_id,
+            owner_user_id=contexts["a"].user_id,
+            assistant_message_public_id=assistant.public_id,
+        )
+        assistant_public_id = assistant.public_id
+        conversation_public_id = conversation.public_id
+
+    client = TestClient(app)
+    headers_a = {"Authorization": "Bearer agent-token-a"}
+    first = client.post(
+        f"/api/agent/messages/{assistant_public_id}/feedback",
+        headers=headers_a,
+        json={"rating": "helpful", "reason": None},
+    )
+    assert first.status_code == 200
+    assert first.json()["rating"] == "helpful"
+    assert first.json()["message_public_id"] == assistant_public_id
+    assert first.json()["run_public_id"] == run.public_id
+
+    replay = client.post(
+        f"/api/agent/messages/{assistant_public_id}/feedback",
+        headers=headers_a,
+        json={"rating": "helpful"},
+    )
+    assert replay.status_code == 200
+    assert replay.json() == first.json()
+
+    changed = client.post(
+        f"/api/agent/messages/{assistant_public_id}/feedback",
+        headers=headers_a,
+        json={"rating": "not_helpful", "reason": "wrong_data"},
+    )
+    assert changed.status_code == 200
+    assert changed.json()["public_id"] == first.json()["public_id"]
+    assert changed.json()["created_at"] == first.json()["created_at"]
+    assert changed.json()["rating"] == "not_helpful"
+
+    archived = client.delete(
+        f"/api/agent/conversations/{conversation_public_id}",
+        headers=headers_a,
+    )
+    assert archived.status_code == 204
+    archived_replay = client.post(
+        f"/api/agent/messages/{assistant_public_id}/feedback",
+        headers=headers_a,
+        json={"rating": "not_helpful", "reason": "wrong_data"},
+    )
+    assert archived_replay.status_code == 200
+    assert archived_replay.json() == changed.json()
+
+    loaded = client.get(
+        f"/api/agent/conversations/{conversation_public_id}",
+        headers=headers_a,
+    )
+    assert loaded.status_code == 200
+    user_message, assistant_message = loaded.json()["messages"]
+    assert user_message["feedback_eligible"] is False
+    assert user_message["feedback"] is None
+    assert assistant_message["feedback_eligible"] is True
+    assert assistant_message["feedback"] == changed.json()
+
+    for token in ("agent-token-c", "agent-token-b"):
+        hidden = client.post(
+            f"/api/agent/messages/{assistant_public_id}/feedback",
+            headers={"Authorization": f"Bearer {token}"},
+            json={"rating": "helpful"},
+        )
+        assert hidden.status_code == 404
+
+    user_feedback = client.post(
+        f"/api/agent/messages/{trigger.public_id}/feedback",
+        headers=headers_a,
+        json={"rating": "helpful"},
+    )
+    assert user_feedback.status_code == 409
+
+    with _scoped(factory, contexts["a"]) as db:
+        stored = db.scalar(
+            select(AgentMessage).where(AgentMessage.public_id == assistant_public_id)
+        )
+        assert set(stored.metadata_json["feedback"]) == {
+            "schema_version",
+            "public_id",
+            "run_public_id",
+            "rating",
+            "reason",
+            "created_at",
+            "updated_at",
+        }
+        assert "Grounded canonical answer" not in str(stored.metadata_json["feedback"])
+        feedback_audits = list(
+            db.scalars(
+                select(AuditEvent).where(
+                    AuditEvent.event_type == "agent_feedback_recorded",
+                    AuditEvent.resource_id == assistant_public_id,
+                )
+            )
+        )
+        assert len(feedback_audits) == 2
+        assert {event.metadata_json["rating"] for event in feedback_audits} == {
+            "helpful",
+            "not_helpful",
+        }
+
+    state["settings"] = Settings(_env_file=None)
+    disabled = client.post(
+        f"/api/agent/messages/{assistant_public_id}/feedback",
+        headers=headers_a,
+        json={"rating": "helpful"},
+    )
+    assert disabled.status_code == 404
+    with _scoped(factory, contexts["a"]) as db:
+        retained = db.scalar(
+            select(AgentMessage).where(AgentMessage.public_id == assistant_public_id)
+        )
+        assert retained.metadata_json["feedback"]["rating"] == "not_helpful"
+
+
+def test_failed_assistant_answer_is_not_feedback_eligible(agent_foundation_db):
+    factory, contexts, state = agent_foundation_db
+    state["settings"] = _agent_settings()
+    with _scoped(factory, contexts["a"]) as db:
+        service = UnifiedAgentService(db, state["settings"])
+        conversation = service.create_conversation(owner_user_id=contexts["a"].user_id)
+        trigger = service.append_user_message(
+            conversation.public_id,
+            owner_user_id=contexts["a"].user_id,
+            text="Unavailable provider request",
+            client_message_id="failed-feedback-turn",
+        )
+        run = service.create_run(
+            conversation.public_id,
+            owner_user_id=contexts["a"].user_id,
+            trigger_message_public_id=trigger.public_id,
+            page_context=None,
+            model_name="test-model",
+            prompt_version="feedback-v1",
+        )
+        service.start_run(run.public_id, owner_user_id=contexts["a"].user_id)
+        assistant = service.stage_assistant_message(
+            conversation.public_id,
+            owner_user_id=contexts["a"].user_id,
+            response=AgentStructuredResponse(
+                blocks=[
+                    {
+                        "type": "error",
+                        "code": "agent_provider_failed",
+                        "title": "Unavailable",
+                        "message": "Please retry.",
+                        "retryable": True,
+                    }
+                ]
+            ),
+        )
+        service.fail_run(
+            run.public_id,
+            owner_user_id=contexts["a"].user_id,
+            error_code="agent_provider_failed",
+            error_message="safe",
+            assistant_message_public_id=assistant.public_id,
+        )
+        assistant_public_id = assistant.public_id
+        conversation_public_id = conversation.public_id
+
+    client = TestClient(app)
+    headers = {"Authorization": "Bearer agent-token-a"}
+    rejected = client.post(
+        f"/api/agent/messages/{assistant_public_id}/feedback",
+        headers=headers,
+        json={"rating": "not_helpful", "reason": "too_slow"},
+    )
+    assert rejected.status_code == 409
+    loaded = client.get(
+        f"/api/agent/conversations/{conversation_public_id}",
+        headers=headers,
+    )
+    assistant_message = loaded.json()["messages"][-1]
+    assert assistant_message["feedback_eligible"] is False
+    assert assistant_message["feedback"] is None
+
+
+def test_duplicate_or_corrupt_run_message_metadata_fails_feedback_closed(
+    agent_foundation_db,
+):
+    factory, contexts, state = agent_foundation_db
+    state["settings"] = _agent_settings()
+    with _scoped(factory, contexts["a"]) as db:
+        service = UnifiedAgentService(db, state["settings"])
+        conversation = service.create_conversation(owner_user_id=contexts["a"].user_id)
+        assistant = service.append_assistant_message(
+            conversation.public_id,
+            owner_user_id=contexts["a"].user_id,
+            response=AgentStructuredResponse(
+                blocks=[{"type": "text", "text": "Completed answer."}]
+            ),
+        )
+        for _index in range(2):
+            run = service.create_run(
+                conversation.public_id,
+                owner_user_id=contexts["a"].user_id,
+                trigger_message_public_id=None,
+                page_context=None,
+                model_name="test-model",
+                prompt_version="feedback-v1",
+            )
+            service.start_run(run.public_id, owner_user_id=contexts["a"].user_id)
+            service.complete_run(
+                run.public_id,
+                owner_user_id=contexts["a"].user_id,
+                assistant_message_public_id=assistant.public_id,
+            )
+        states = service.feedback_states_for_messages(
+            conversation.public_id,
+            owner_user_id=contexts["a"].user_id,
+            messages=[assistant],
+        )
+        assert states[assistant.public_id].eligible is False
+        assistant_public_id = assistant.public_id
+
+    rejected = TestClient(app).post(
+        f"/api/agent/messages/{assistant_public_id}/feedback",
+        headers={"Authorization": "Bearer agent-token-a"},
+        json={"rating": "helpful"},
+    )
+    assert rejected.status_code == 409
 
 
 def test_action_proposal_preserves_exact_snapshot_and_confirmation_never_executes(

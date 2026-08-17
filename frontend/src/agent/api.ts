@@ -3,6 +3,8 @@ import { api } from "@/lib/api";
 import type {
   AgentConversation,
   AgentConversationDetail,
+  AgentFeedbackCreate,
+  AgentFeedbackOut,
   AgentPageContext,
   AgentStreamEvent,
   AgentTurnCreate,
@@ -12,6 +14,7 @@ import {
   parseAgentConversation,
   parseAgentConversationDetail,
   parseAgentConversationList,
+  parseAgentFeedback,
   parseAgentStreamEvent,
 } from "./validation";
 
@@ -73,6 +76,23 @@ export async function loadAgentConversation(publicId: string): Promise<AgentConv
 
 export async function archiveAgentConversation(publicId: string): Promise<void> {
   await api(`/api/agent/conversations/${encodeURIComponent(publicId)}`, { method: "DELETE" });
+}
+
+export async function submitAgentFeedback(
+  messagePublicId: string,
+  payload: AgentFeedbackCreate,
+): Promise<AgentFeedbackOut> {
+  const feedback = parseAgentFeedback(
+    await api<unknown>(
+      `/api/agent/messages/${encodeURIComponent(messagePublicId)}/feedback`,
+      {
+        method: "POST",
+        body: JSON.stringify({ rating: payload.rating, reason: payload.reason ?? null }),
+      },
+    ),
+  );
+  if (feedback.message_public_id !== messagePublicId) throw new AgentProtocolError();
+  return feedback;
 }
 
 export async function streamAgentTurn({
