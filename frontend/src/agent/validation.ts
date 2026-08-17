@@ -2,11 +2,13 @@ import {
   AGENT_SCHEMA_VERSION,
   type AgentConversation,
   type AgentConversationDetail,
+  type AgentFeedbackOut,
   type AgentMessage,
   type AgentRunOut,
   type AgentStreamEvent,
   type AgentStructuredResponse,
 } from "./contracts";
+import { isAgentNavigationRequest } from "./pageContext";
 
 export class AgentProtocolError extends Error {
   constructor(message = "ExpenseOps received an unsupported Agent response.") {
@@ -37,7 +39,15 @@ export function parseAgentStreamEvent(value: unknown): AgentStreamEvent {
       parseAgentStructuredResponse(record.response);
       break;
     case "assistant_completed":
-      parseAgentMessage(record.message);
+      {
+        const message = parseAgentMessage(record.message);
+        if (
+          message.feedback !== null &&
+          message.feedback.run_public_id !== record.run_public_id
+        ) {
+          throw new AgentProtocolError();
+        }
+      }
       break;
     case "run_completed":
       parseAgentRun(record.run);
@@ -92,6 +102,35 @@ export function parseAgentConversationDetail(value: unknown): AgentConversationD
   return value as AgentConversationDetail;
 }
 
+export function parseAgentFeedback(value: unknown): AgentFeedbackOut {
+  const record = requireRecord(value);
+  requireAllowedKeys(record, [
+    "schema_version",
+    "public_id",
+    "message_public_id",
+    "conversation_public_id",
+    "run_public_id",
+    "rating",
+    "reason",
+    "created_at",
+    "updated_at",
+  ]);
+  requireSchema(record);
+  requireString(record.public_id, 128);
+  requireString(record.message_public_id, 128);
+  requireString(record.conversation_public_id, 128);
+  requireString(record.run_public_id, 128);
+  requireOneOf(record.rating, ["helpful", "not_helpful"]);
+  if (record.reason === undefined) throw new AgentProtocolError();
+  if (record.reason !== null) {
+    requireOneOf(record.reason, ["wrong_data", "didnt_understand", "too_slow", "other"]);
+  }
+  if (record.rating === "helpful" && record.reason != null) throw new AgentProtocolError();
+  requireString(record.created_at, 128);
+  requireString(record.updated_at, 128);
+  return value as AgentFeedbackOut;
+}
+
 function parseAgentMessage(value: unknown): AgentMessage {
   const record = requireRecord(value);
   requireString(record.public_id, 128);
@@ -102,6 +141,20 @@ function parseAgentMessage(value: unknown): AgentMessage {
     parseAgentStructuredResponse(record.structured_response);
   }
   requireNullableString(record.client_message_id, 64);
+  requireBoolean(record.feedback_eligible);
+  if (record.feedback === undefined) throw new AgentProtocolError();
+  if (record.role === "user" && record.feedback_eligible) throw new AgentProtocolError();
+  if (record.feedback !== null && record.feedback !== undefined) {
+    const feedback = parseAgentFeedback(record.feedback);
+    if (
+      record.role !== "assistant" ||
+      record.feedback_eligible !== true ||
+      feedback.message_public_id !== record.public_id ||
+      feedback.conversation_public_id !== record.conversation_public_id
+    ) {
+      throw new AgentProtocolError();
+    }
+  }
   requireString(record.created_at, 128);
   if (record.text == null && record.structured_response == null) throw new AgentProtocolError();
   return value as AgentMessage;
@@ -282,6 +335,12 @@ function parseSupportedBlock(value: unknown): void {
         requireNullableString(row.last_successful_sync_at, 128);
       });
       return;
+    case "attention_summary":
+      parseAttentionSummaryBlock(block);
+      return;
+    case "navigation":
+      parseNavigationBlock(block);
+      return;
     case "error":
       requireString(block.code, 100);
       requireString(block.title, 160);
@@ -292,14 +351,128 @@ function parseSupportedBlock(value: unknown): void {
       requireString(block.title, 160);
       requireString(block.message, 1_000);
       if (block.suggested_navigation !== null && block.suggested_navigation !== undefined) {
-        const navigation = requireRecord(block.suggested_navigation);
-        if (navigation.type !== "navigation") throw new AgentProtocolError();
-        requireString(navigation.label, 120);
-        requireString(navigation.target_surface, 64);
+        parseNavigationBlock(block.suggested_navigation);
       }
       return;
     default:
       throw new AgentProtocolError("ExpenseOps cannot safely display this response yet.");
+  }
+}
+
+const ATTENTION_DOMAINS = [
+  "spending",
+  "transactions",
+  "replenishment",
+  "receipts",
+  "deals",
+  "errands",
+  "integrations",
+] as const;
+
+const ATTENTION_PRIORITIES = [
+  "action_required",
+  "time_sensitive",
+  "useful_to_know",
+] as const;
+
+function parseAttentionSummaryBlock(block: Record<string, unknown>): void {
+  requireAllowedKeys(block, [
+    "type",
+    "block_id",
+    "block_version",
+    "title",
+    "status",
+    "checked_domains",
+    "unavailable_domains",
+    "items",
+    "items_truncated",
+  ]);
+  if (block.block_version !== "1.0") {
+    throw new AgentProtocolError("ExpenseOps cannot display this attention-summary version yet.");
+  }
+  requireString(block.title, 160);
+  requireOneOf(block.status, ["complete", "partial"]);
+  const checkedDomains = parseAttentionDomains(block.checked_domains, 1);
+  const unavailableDomains = parseAttentionDomains(block.unavailable_domains, 0);
+  if (unavailableDomains.some((domain) => checkedDomains.includes(domain))) {
+    throw new AgentProtocolError();
+  }
+  if (
+    (block.status === "complete" && unavailableDomains.length !== 0) ||
+    (block.status === "partial" && unavailableDomains.length === 0)
+  ) {
+    throw new AgentProtocolError();
+  }
+  if (!Array.isArray(block.items) || block.items.length > 12) {
+    throw new AgentProtocolError();
+  }
+  const seenItems = new Set<string>();
+  let previousOrder = -1;
+  block.items.forEach((value) => {
+    const item = requireRecord(value);
+    requireAllowedKeys(item, ["priority", "domain", "title", "detail", "count", "navigation"]);
+    requireOneOf(item.priority, ATTENTION_PRIORITIES);
+    requireOneOf(item.domain, ATTENTION_DOMAINS);
+    requireString(item.title, 160);
+    requireNullableString(item.detail, 500);
+    requirePositiveInteger(item.count);
+    if (!checkedDomains.includes(item.domain as (typeof ATTENTION_DOMAINS)[number])) {
+      throw new AgentProtocolError();
+    }
+    if (item.navigation !== null && item.navigation !== undefined) {
+      parseNavigationBlock(item.navigation);
+    }
+    const identity = `${String(item.priority)}:${String(item.domain)}`;
+    if (seenItems.has(identity)) throw new AgentProtocolError();
+    seenItems.add(identity);
+    const order =
+      ATTENTION_PRIORITIES.indexOf(item.priority as (typeof ATTENTION_PRIORITIES)[number]) *
+        ATTENTION_DOMAINS.length +
+      ATTENTION_DOMAINS.indexOf(item.domain as (typeof ATTENTION_DOMAINS)[number]);
+    if (order <= previousOrder) throw new AgentProtocolError();
+    previousOrder = order;
+  });
+  requireBoolean(block.items_truncated);
+}
+
+function parseAttentionDomains(
+  value: unknown,
+  minimum: number,
+): (typeof ATTENTION_DOMAINS)[number][] {
+  if (!Array.isArray(value) || value.length < minimum || value.length > ATTENTION_DOMAINS.length) {
+    throw new AgentProtocolError();
+  }
+  const result = value.map((domain) => {
+    requireOneOf(domain, ATTENTION_DOMAINS);
+    return domain as (typeof ATTENTION_DOMAINS)[number];
+  });
+  if (new Set(result).size !== result.length) throw new AgentProtocolError();
+  if (result.some((domain, index) => index > 0 && ATTENTION_DOMAINS.indexOf(domain) <= ATTENTION_DOMAINS.indexOf(result[index - 1]))) {
+    throw new AgentProtocolError();
+  }
+  return result;
+}
+
+function parseNavigationBlock(value: unknown): void {
+  const navigation = requireRecord(value);
+  requireAllowedKeys(navigation, ["type", "block_id", "label", "target_surface", "entity"]);
+  if (navigation.type !== "navigation") {
+    throw new AgentProtocolError();
+  }
+  requireNullableString(navigation.block_id, 128);
+  requireString(navigation.label, 120);
+  requireString(navigation.target_surface, 64);
+  if (!isAgentNavigationRequest({
+    target_surface: navigation.target_surface,
+    entity: navigation.entity ?? null,
+  })) {
+    throw new AgentProtocolError("ExpenseOps received an unsafe navigation target.");
+  }
+}
+
+function requireAllowedKeys(record: Record<string, unknown>, allowed: string[]): void {
+  if (Object.keys(record).some((key) => !allowed.includes(key))) {
+    throw new AgentProtocolError();
   }
 }
 
@@ -395,6 +568,11 @@ function requireInteger(value: unknown): void {
 function requireNonNegativeInteger(value: unknown): void {
   requireInteger(value);
   if ((value as number) < 0) throw new AgentProtocolError();
+}
+
+function requirePositiveInteger(value: unknown): void {
+  requireInteger(value);
+  if ((value as number) < 1) throw new AgentProtocolError();
 }
 
 function requireNullableInteger(value: unknown): void {

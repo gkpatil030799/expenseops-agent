@@ -16,6 +16,10 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { ResponsiveSheet } from "@/components/ui/responsive-sheet";
+import {
+  buildExpenseInsightsContext,
+  type AgentContextPublisher,
+} from "@/agent/pageContext";
 import { customGranularity, dateRangeForPreset, type DatePreset } from "@/insightsLogic";
 import {
   axisTicks,
@@ -119,7 +123,11 @@ const secondaryPresets: [DatePreset, string][] = [
 
 const presets = [...primaryPresets, ...secondaryPresets];
 
-export function InsightsDashboard() {
+export function InsightsDashboard({
+  onAgentContextChange,
+}: {
+  onAgentContextChange?: AgentContextPublisher;
+} = {}) {
   const initial = useMemo(() => dateRangeForPreset("30d"), []);
   const [preset, setPreset] = useState<DatePreset>("30d");
   const [start, setStart] = useState(initial.start);
@@ -138,6 +146,25 @@ export function InsightsDashboard() {
   const [sharedMode, setSharedMode] = useState<"people" | "groups">("people");
   const [trendMode, setTrendMode] = useState<"total" | "split">("total");
   const [reloadToken, setReloadToken] = useState(0);
+
+  const agentContext = useMemo(
+    () => buildExpenseInsightsContext({
+      startDate: start,
+      endDate: end,
+      datePreset: preset,
+      accountId: account,
+      category,
+      merchant,
+      reviewType,
+      currencyCode: currency,
+      spendBasis: basis === "actual_share" ? "actual_share" : "card",
+    }),
+    [account, basis, category, currency, end, merchant, preset, reviewType, start],
+  );
+
+  useEffect(() => {
+    onAgentContextChange?.(agentContext);
+  }, [agentContext, onAgentContextChange]);
 
   useEffect(() => {
     const timer = window.setTimeout(() => setMerchant(merchantInput.trim()), 300);

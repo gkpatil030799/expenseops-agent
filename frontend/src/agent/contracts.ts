@@ -295,11 +295,49 @@ export type AgentIntegrationStatusBlock = AgentResponseBlockBase & {
   integrations: AgentIntegrationStatusItem[];
 };
 
+export type AgentAttentionDomain =
+  | "spending"
+  | "transactions"
+  | "replenishment"
+  | "receipts"
+  | "deals"
+  | "errands"
+  | "integrations";
+
+export type AgentAttentionPriority =
+  | "action_required"
+  | "time_sensitive"
+  | "useful_to_know";
+
 export type AgentNavigationBlock = AgentResponseBlockBase & {
   type: "navigation";
   label: string;
   target_surface: AgentSurface;
-  entity: AgentPageEntity | null;
+  entity?: AgentPageEntity | null;
+};
+
+export type AgentAttentionItem = {
+  priority: AgentAttentionPriority;
+  domain: AgentAttentionDomain;
+  title: string;
+  detail?: string | null;
+  count: number;
+  navigation?: AgentNavigationBlock | null;
+};
+
+/**
+ * A compact, deterministic cross-domain view. Text is plain account-facing
+ * copy produced by ExpenseOps composition code; navigation remains semantic.
+ */
+export type AgentAttentionSummaryBlock = AgentResponseBlockBase & {
+  type: "attention_summary";
+  block_version: "1.0";
+  title: string;
+  status: "complete" | "partial";
+  checked_domains: AgentAttentionDomain[];
+  unavailable_domains: AgentAttentionDomain[];
+  items: AgentAttentionItem[];
+  items_truncated: boolean;
 };
 
 export type AgentLabelValue = {
@@ -361,6 +399,7 @@ export type AgentResponseBlock =
   | AgentReceiptSummaryBlock
   | AgentErrandSummaryBlock
   | AgentIntegrationStatusBlock
+  | AgentAttentionSummaryBlock
   | AgentNavigationBlock
   | AgentActionConfirmationBlock
   | AgentErrorBlock
@@ -381,6 +420,33 @@ export type AgentConversation = {
 
 export type AgentConversationOut = AgentConversation;
 
+export type AgentFeedbackRating = "helpful" | "not_helpful";
+
+export type AgentFeedbackReason =
+  | "wrong_data"
+  | "didnt_understand"
+  | "too_slow"
+  | "other";
+
+export type AgentFeedbackCreate = {
+  rating: AgentFeedbackRating;
+  reason?: AgentFeedbackReason | null;
+};
+
+export type AgentFeedback = {
+  schema_version: AgentSchemaVersion;
+  public_id: string;
+  message_public_id: string;
+  conversation_public_id: string;
+  run_public_id: string;
+  rating: AgentFeedbackRating;
+  reason: AgentFeedbackReason | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type AgentFeedbackOut = AgentFeedback;
+
 export type AgentMessage = {
   public_id: string;
   conversation_public_id: string;
@@ -388,6 +454,8 @@ export type AgentMessage = {
   text: string | null;
   structured_response: AgentStructuredResponse | null;
   client_message_id: string | null;
+  feedback_eligible: boolean;
+  feedback: AgentFeedbackOut | null;
   created_at: string;
 };
 

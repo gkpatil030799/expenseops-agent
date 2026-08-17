@@ -7,6 +7,7 @@ from typing import Annotated, Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 AGENT_CONTRACT_VERSION = "1.0"
+MAX_AGENT_PAGE_CONTEXT_BYTES = 1_536
 
 
 class StrictAgentModel(BaseModel):
@@ -93,11 +94,60 @@ class AgentPageEntity(StrictAgentModel):
     public_id: str = Field(min_length=1, max_length=128)
 
 
+_ENTITY_COMPATIBLE_SURFACES = {
+    "transaction": {
+        AgentSurface.EXPENSE_REVIEW,
+        AgentSurface.EXPENSE_INSIGHTS,
+        AgentSurface.EXPENSE_ACTIVITY,
+    },
+    "deal": {AgentSurface.DEALS},
+    "receipt": {
+        AgentSurface.HOUSEHOLD_TODAY,
+        AgentSurface.HOUSEHOLD_RECEIPTS,
+    },
+    "errand": {
+        AgentSurface.HOUSEHOLD_TODAY,
+        AgentSurface.HOUSEHOLD_ERRANDS,
+    },
+    "household_item": {
+        AgentSurface.HOUSEHOLD_TODAY,
+        AgentSurface.HOUSEHOLD_STAPLES,
+        AgentSurface.HOUSEHOLD_HISTORY,
+    },
+    "integration": {
+        AgentSurface.SETTINGS,
+        AgentSurface.INTEGRATIONS,
+    },
+}
+
+
+def _require_compatible_entity_surface(
+    surface: AgentSurface,
+    entity: AgentPageEntity | None,
+) -> None:
+    if entity is not None and surface not in _ENTITY_COMPATIBLE_SURFACES[entity.kind]:
+        raise ValueError("entity kind is not compatible with the page surface")
+
+
 class AgentPageContext(StrictAgentModel):
     schema_version: Literal["1.0"] = AGENT_CONTRACT_VERSION
     surface: AgentSurface
     filters: AgentPageFilters = Field(default_factory=AgentPageFilters)
     entity: AgentPageEntity | None = None
+
+    @model_validator(mode="after")
+    def validate_entity_surface(self) -> AgentPageContext:
+        _require_compatible_entity_surface(self.surface, self.entity)
+        return self
+
+    @model_validator(mode="after")
+    def validate_serialized_size(self) -> AgentPageContext:
+        serialized = self.model_dump_json(exclude_none=True)
+        if len(serialized.encode("utf-8")) > MAX_AGENT_PAGE_CONTEXT_BYTES:
+            raise ValueError(
+                f"page context must not exceed {MAX_AGENT_PAGE_CONTEXT_BYTES} UTF-8 bytes"
+            )
+        return self
 
 
 class AgentTurnCreate(StrictAgentModel):
@@ -365,6 +415,98 @@ class AgentNavigationBlock(AgentResponseBlockBase):
     target_surface: AgentSurface
     entity: AgentPageEntity | None = None
 
+    @model_validator(mode="after")
+    def validate_entity_surface(self) -> AgentNavigationBlock:
+        _require_compatible_entity_surface(self.target_surface, self.entity)
+        return self
+
+
+AgentEvidenceDomain = Literal[
+    "spending",
+    "transactions",
+    "replenishment",
+    "receipts",
+    "deals",
+    "errands",
+    "integrations",
+]
+AgentAttentionPriority = Literal[
+    "action_required",
+    "time_sensitive",
+    "useful_to_know",
+]
+
+_EVIDENCE_DOMAIN_ORDER = (
+    "spending",
+    "transactions",
+    "replenishment",
+    "receipts",
+    "deals",
+    "errands",
+    "integrations",
+)
+_ATTENTION_PRIORITY_ORDER = (
+    "action_required",
+    "time_sensitive",
+    "useful_to_know",
+)
+
+
+class AgentAttentionItem(StrictAgentModel):
+    priority: AgentAttentionPriority
+    domain: AgentEvidenceDomain
+    title: str = Field(min_length=1, max_length=160)
+    detail: str | None = Field(default=None, min_length=1, max_length=500)
+    count: int = Field(ge=1)
+    navigation: AgentNavigationBlock | None = None
+
+
+class AgentAttentionSummaryBlock(AgentResponseBlockBase):
+    type: Literal["attention_summary"] = "attention_summary"
+    block_version: Literal["1.0"] = "1.0"
+    title: str = Field(min_length=1, max_length=160)
+    status: Literal["complete", "partial"]
+    checked_domains: list[AgentEvidenceDomain] = Field(min_length=1, max_length=7)
+    unavailable_domains: list[AgentEvidenceDomain] = Field(default_factory=list, max_length=7)
+    items: list[AgentAttentionItem] = Field(default_factory=list, max_length=12)
+    items_truncated: bool = False
+
+    @model_validator(mode="after")
+    def validate_attention_summary(self) -> AgentAttentionSummaryBlock:
+        domain_order = {value: index for index, value in enumerate(_EVIDENCE_DOMAIN_ORDER)}
+        priority_order = {value: index for index, value in enumerate(_ATTENTION_PRIORITY_ORDER)}
+        if len(set(self.checked_domains)) != len(self.checked_domains):
+            raise ValueError("checked_domains must be unique")
+        if len(set(self.unavailable_domains)) != len(self.unavailable_domains):
+            raise ValueError("unavailable_domains must be unique")
+        if set(self.checked_domains) & set(self.unavailable_domains):
+            raise ValueError("checked and unavailable domains must be disjoint")
+        if self.checked_domains != sorted(self.checked_domains, key=domain_order.__getitem__):
+            raise ValueError("checked_domains must use canonical domain order")
+        if self.unavailable_domains != sorted(
+            self.unavailable_domains,
+            key=domain_order.__getitem__,
+        ):
+            raise ValueError("unavailable_domains must use canonical domain order")
+        if (self.status == "complete") != (not self.unavailable_domains):
+            raise ValueError("status must reflect unavailable domain coverage")
+        checked = set(self.checked_domains)
+        item_keys = [(item.priority, item.domain) for item in self.items]
+        if len(set(item_keys)) != len(item_keys):
+            raise ValueError("attention items must be unique by priority and domain")
+        if any(item.domain not in checked for item in self.items):
+            raise ValueError("attention item domains must have checked evidence")
+        expected_items = sorted(
+            self.items,
+            key=lambda item: (
+                priority_order[item.priority],
+                domain_order[item.domain],
+            ),
+        )
+        if self.items != expected_items:
+            raise ValueError("attention items must use canonical priority and domain order")
+        return self
+
 
 class AgentLabelValue(StrictAgentModel):
     label: str = Field(min_length=1, max_length=100)
@@ -421,6 +563,7 @@ AgentResponseBlock = Annotated[
     | AgentReceiptSummaryBlock
     | AgentErrandSummaryBlock
     | AgentIntegrationStatusBlock
+    | AgentAttentionSummaryBlock
     | AgentNavigationBlock
     | AgentActionConfirmationBlock
     | AgentErrorBlock
@@ -442,6 +585,29 @@ class AgentConversationOut(StrictAgentModel):
     updated_at: datetime
 
 
+class AgentFeedbackRequest(StrictAgentModel):
+    rating: Literal["helpful", "not_helpful"]
+    reason: Literal["wrong_data", "didnt_understand", "too_slow", "other"] | None = None
+
+    @model_validator(mode="after")
+    def validate_reason(self) -> AgentFeedbackRequest:
+        if self.rating == "helpful" and self.reason is not None:
+            raise ValueError("a helpful rating cannot include a negative reason")
+        return self
+
+
+class AgentFeedbackOut(StrictAgentModel):
+    schema_version: Literal["1.0"] = AGENT_CONTRACT_VERSION
+    public_id: str = Field(min_length=1, max_length=128)
+    message_public_id: str = Field(min_length=1, max_length=128)
+    conversation_public_id: str = Field(min_length=1, max_length=128)
+    run_public_id: str = Field(min_length=1, max_length=128)
+    rating: Literal["helpful", "not_helpful"]
+    reason: Literal["wrong_data", "didnt_understand", "too_slow", "other"] | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
 class AgentMessageOut(StrictAgentModel):
     public_id: str = Field(min_length=1, max_length=128)
     conversation_public_id: str = Field(min_length=1, max_length=128)
@@ -449,6 +615,8 @@ class AgentMessageOut(StrictAgentModel):
     text: str | None = Field(default=None, min_length=1, max_length=8_000)
     structured_response: AgentStructuredResponse | None = None
     client_message_id: str | None = Field(default=None, min_length=1, max_length=64)
+    feedback_eligible: bool = False
+    feedback: AgentFeedbackOut | None = None
     created_at: datetime
 
     @model_validator(mode="after")

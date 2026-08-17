@@ -20,6 +20,14 @@ _SENSITIVE_KEY_PATTERN = re.compile(
     r"raw[_-]?payload|plaid[_-]?payload)",
     re.IGNORECASE,
 )
+_SAFE_NUMERIC_METRIC_KEYS = frozenset(
+    {
+        "input_tokens",
+        "output_tokens",
+        "total_tokens",
+        "estimated_cost_micros",
+    }
+)
 _MAX_VALUE_LENGTH = 240
 _EXTERNAL_TRACE_ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,63}\Z")
 
@@ -65,6 +73,10 @@ def safe_preview(value: Any, *, max_length: int = _MAX_VALUE_LENGTH) -> str:
 
 
 def _redact_value(key: str, value: Any) -> Any:
+    if key in _SAFE_NUMERIC_METRIC_KEYS and (
+        value is None or (isinstance(value, int) and not isinstance(value, bool))
+    ):
+        return value
     if _SENSITIVE_KEY_PATTERN.search(key):
         return "[REDACTED]"
     if isinstance(value, str):

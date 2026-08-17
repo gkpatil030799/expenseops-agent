@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   AgentSseParser,
+  submitAgentFeedback,
   streamAgentTurn,
 } from "./api";
 import type { AgentStreamEvent } from "./contracts";
@@ -282,5 +283,78 @@ describe("streamAgentTurn", () => {
       }),
     ).rejects.toThrow(/out-of-order Agent response/i);
     expect(received).toEqual([first]);
+  });
+});
+
+describe("submitAgentFeedback", () => {
+  it("sends only the bounded feedback contract and validates the response", async () => {
+    const feedback = {
+      schema_version: "1.0",
+      public_id: "feedback-public-1",
+      message_public_id: "assistant/message 1",
+      conversation_public_id: "conversation-public-1",
+      run_public_id: "run-public-1",
+      rating: "not_helpful",
+      reason: "wrong_data",
+      created_at: "2026-08-16T16:00:00Z",
+      updated_at: "2026-08-16T16:00:00Z",
+    } as const;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        new Response(JSON.stringify(feedback), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        }),
+      ),
+    );
+
+    await expect(
+      submitAgentFeedback("assistant/message 1", {
+        rating: "not_helpful",
+        reason: "wrong_data",
+      }),
+    ).resolves.toEqual(feedback);
+
+    expect(vi.mocked(fetch)).toHaveBeenCalledWith(
+      "/api/agent/messages/assistant%2Fmessage%201/feedback",
+      expect.objectContaining({
+        method: "POST",
+        credentials: "same-origin",
+        body: JSON.stringify({ rating: "not_helpful", reason: "wrong_data" }),
+      }),
+    );
+    const options = vi.mocked(fetch).mock.calls[0][1] as RequestInit;
+    expect(JSON.parse(String(options.body))).toEqual({
+      rating: "not_helpful",
+      reason: "wrong_data",
+    });
+    expect(String(options.body)).not.toMatch(/structured_response|answer|transaction|prompt/i);
+  });
+
+  it("rejects a feedback response bound to a different message", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        new Response(
+          JSON.stringify({
+            schema_version: "1.0",
+            public_id: "feedback-public-1",
+            message_public_id: "different-message",
+            conversation_public_id: "conversation-public-1",
+            run_public_id: "run-public-1",
+            rating: "helpful",
+            reason: null,
+            created_at: "2026-08-16T16:00:00Z",
+            updated_at: "2026-08-16T16:00:00Z",
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        ),
+      ),
+    );
+
+    await expect(
+      submitAgentFeedback("message-assistant-1", { rating: "helpful", reason: null }),
+    ).rejects.toBeInstanceOf(AgentProtocolError);
   });
 });

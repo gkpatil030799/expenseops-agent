@@ -1,6 +1,7 @@
 import {
   lazy,
   Suspense,
+  useCallback,
   useEffect,
   useMemo,
   useRef,
@@ -75,8 +76,17 @@ import type {
   SplitwiseUser,
   Transaction,
 } from "@/types";
-import type { AgentNavigationRequest } from "@/agent/AgentResponseRenderer";
-import type { AgentPageContext } from "@/agent/contracts";
+import {
+  agentPageContextKey,
+  baseAgentContext,
+  buildExpenseActivityContext,
+  buildExpenseReviewContext,
+  isAgentNavigationRequest,
+  sameAgentContextDescriptor,
+  type AgentContextDescriptor,
+  type AgentContextPublisher,
+  type AgentNavigationRequest,
+} from "@/agent/pageContext";
 
 const AgentExperience = lazy(() => import("@/agent/AgentExperience"));
 
@@ -162,6 +172,7 @@ function DashboardApp() {
     {},
   );
   const [expandedTransactions, setExpandedTransactions] = useState<Record<number, boolean>>({});
+  const [focusedTransactionId, setFocusedTransactionId] = useState<number | null>(null);
   const [currentSplitwiseUser, setCurrentSplitwiseUser] = useState<SplitwiseUser | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [transactionActionById, setTransactionActionById] = useState<Record<number, string>>({});
@@ -181,7 +192,11 @@ function DashboardApp() {
     window.matchMedia("(min-width: 1024px)").matches,
   );
   const agentLauncherRef = useRef<HTMLButtonElement | null>(null);
-  const lastAgentContext = useRef<AgentPageContext>({ schema_version: "1.0", surface: "expense_review", filters: {} });
+  const [agentSourceContext, setAgentSourceContext] = useState<AgentContextDescriptor>(() =>
+    baseContextForWorkspace(activeWorkspace, expenseTab),
+  );
+  const [clearedAgentContextKey, setClearedAgentContextKey] = useState<string | null>(null);
+  const [agentNavigationRequest, setAgentNavigationRequest] = useState<AgentNavigationRequest | null>(null);
 
   const pendingTotal = useMemo(
     () => transactions.reduce((total, tx) => total + Math.abs(tx.amount_cents), 0) / 100,
@@ -201,9 +216,74 @@ function DashboardApp() {
   );
   const memory = useMemo(() => memoryForTransactions(allTransactions), [allTransactions]);
   const agentEnabled = Boolean(accountContext?.features?.agent?.enabled);
-  if (activeWorkspace !== "agent") {
-    lastAgentContext.current = buildAgentPageContext(activeWorkspace, expenseTab, filters);
-  }
+  const currentAgentContextKey = useMemo(
+    () => agentPageContextKey(agentSourceContext.pageContext),
+    [agentSourceContext.pageContext],
+  );
+  const effectiveAgentPageContext = clearedAgentContextKey === currentAgentContextKey
+    ? null
+    : agentSourceContext.pageContext;
+
+  const publishAgentContext = useCallback<AgentContextPublisher>((descriptor) => {
+    setAgentSourceContext((current) =>
+      sameAgentContextDescriptor(current, descriptor) ? current : descriptor,
+    );
+  }, []);
+
+  const clearAgentContext = useCallback(() => {
+    setClearedAgentContextKey(currentAgentContextKey);
+  }, [currentAgentContextKey]);
+
+  const restoreAgentContext = useCallback(() => {
+    setClearedAgentContextKey(null);
+  }, []);
+
+  useEffect(() => {
+    setClearedAgentContextKey((current) =>
+      current && current !== currentAgentContextKey ? null : current,
+    );
+  }, [currentAgentContextKey]);
+
+  const expenseAgentContext = useMemo(() => {
+    if (expenseTab === "activity") {
+      const event = financialActivity?.events.find(
+        (value) => value.transaction_id === focusedTransactionId,
+      );
+      return buildExpenseActivityContext(
+        event?.transaction_id
+          ? {
+              publicId: event.transaction_id,
+              label: event.merchant_name || `Transaction ${event.transaction_id}`,
+            }
+          : null,
+      );
+    }
+    const transaction = pendingReviewTransactions.find(
+      (value) => value.id === focusedTransactionId,
+    );
+    return buildExpenseReviewContext({
+      merchant: filters.merchant,
+      startDate: filters.dateFrom,
+      endDate: filters.dateTo,
+      status: filters.status,
+      transaction: transaction
+        ? {
+            publicId: transaction.id,
+            label: [
+              transaction.merchant_name || transaction.name,
+              transaction.date,
+              formatTransactionAmount(transaction),
+            ].filter(Boolean).join(" · "),
+          }
+        : null,
+    });
+  }, [expenseTab, filters.dateFrom, filters.dateTo, filters.merchant, filters.status, financialActivity, focusedTransactionId, pendingReviewTransactions]);
+
+  useEffect(() => {
+    if (activeWorkspace === "expenses" && expenseTab !== "insights") {
+      publishAgentContext(expenseAgentContext);
+    }
+  }, [activeWorkspace, expenseAgentContext, expenseTab, publishAgentContext]);
 
   useEffect(() => {
     if (!authResolved || !accountContext || agentEnabled) return;
@@ -262,20 +342,29 @@ function DashboardApp() {
     const onPopState = () => {
       const params = new URLSearchParams(window.location.search);
       const workspace = params.get("workspace");
-      setActiveWorkspace(
+      const nextWorkspace: WorkspaceView =
         workspace === "household" ||
           workspace === "promotions" ||
           workspace === "settings" ||
           (workspace === "agent" && agentEnabled)
           ? workspace
-          : "expenses",
-      );
+          : "expenses";
       const tab = params.get("tab");
-      setExpenseTab(tab === "insights" || tab === "activity" ? tab : "review");
+      const nextTab = tab === "insights" || tab === "activity" ? tab : "review";
+      if (
+        nextWorkspace !== "agent"
+        && (nextWorkspace !== activeWorkspace || nextTab !== expenseTab)
+      ) {
+        setAgentNavigationRequest(null);
+        setFocusedTransactionId(null);
+        setAgentSourceContext(baseContextForWorkspace(nextWorkspace, nextTab));
+      }
+      setActiveWorkspace(nextWorkspace);
+      setExpenseTab(nextTab);
     };
     window.addEventListener("popstate", onPopState);
     return () => window.removeEventListener("popstate", onPopState);
-  }, [agentEnabled]);
+  }, [activeWorkspace, agentEnabled, expenseTab]);
 
   useEffect(() => {
     if (!accountContext) return;
@@ -520,15 +609,28 @@ function DashboardApp() {
   }
 
   function changeExpenseTab(tab: "review" | "insights" | "activity") {
+    if (activeWorkspace === "expenses" && expenseTab === tab) return;
     const params = new URLSearchParams(window.location.search); params.set("workspace", "expenses"); params.set("tab", tab);
-    window.history.pushState({}, "", `/?${params}`); setExpenseTab(tab);
+    window.history.pushState({}, "", `/?${params}`);
+    setAgentNavigationRequest(null);
+    setFocusedTransactionId(null);
+    setAgentSourceContext(baseContextForWorkspace("expenses", tab));
+    setActiveWorkspace("expenses");
+    setExpenseTab(tab);
   }
 
   function changeWorkspace(workspace: WorkspaceView) {
     if (workspace === "agent" && !agentEnabled) return;
+    if (workspace === activeWorkspace) return;
     const params = new URLSearchParams(window.location.search); params.set("workspace", workspace);
     if (workspace !== "expenses") params.delete("tab");
-    window.history.pushState({}, "", `/?${params}`); setActiveWorkspace(workspace);
+    window.history.pushState({}, "", `/?${params}`);
+    if (workspace !== "agent") {
+      setAgentNavigationRequest(null);
+      setFocusedTransactionId(null);
+      setAgentSourceContext(baseContextForWorkspace(workspace, expenseTab));
+    }
+    setActiveWorkspace(workspace);
   }
 
   function openAgentPanel() {
@@ -542,6 +644,21 @@ function DashboardApp() {
   }
 
   function navigateFromAgent(request: AgentNavigationRequest) {
+    if (!isAgentNavigationRequest(request)) return;
+    setAgentNavigationRequest(request);
+
+    if (request.target_surface === "home") {
+      const params = new URLSearchParams(window.location.search);
+      params.set("workspace", "expenses");
+      params.set("tab", "review");
+      window.history.pushState({}, "", `/?${params}`);
+      setFocusedTransactionId(null);
+      setAgentSourceContext(baseContextForWorkspace("expenses", "review"));
+      setExpenseTab("review");
+      setActiveWorkspace("expenses");
+      return;
+    }
+
     const expenseTabs = {
       expense_review: "review",
       expense_insights: "insights",
@@ -549,13 +666,44 @@ function DashboardApp() {
     } as const;
     if (request.target_surface in expenseTabs) {
       const tab = expenseTabs[request.target_surface as keyof typeof expenseTabs];
-      changeWorkspace("expenses");
-      changeExpenseTab(tab);
+      const transactionId = request.entity?.kind === "transaction"
+        ? Number(request.entity.public_id)
+        : null;
+      const params = new URLSearchParams(window.location.search);
+      params.set("workspace", "expenses");
+      params.set("tab", tab);
+      window.history.pushState({}, "", `/?${params}`);
+      setFocusedTransactionId(transactionId);
+      setAgentSourceContext(
+        tab === "activity"
+          ? buildExpenseActivityContext(transactionId ? { publicId: transactionId } : null)
+          : baseContextForWorkspace("expenses", tab),
+      );
+      setExpenseTab(tab);
+      setActiveWorkspace("expenses");
       return;
     }
-    if (request.target_surface === "deals") changeWorkspace("promotions");
-    else if (request.target_surface.startsWith("household_")) changeWorkspace("household");
-    else if (request.target_surface === "settings" || request.target_surface === "integrations") changeWorkspace("settings");
+
+    const workspaceBySurface = {
+      deals: "promotions",
+      household_today: "household",
+      household_errands: "household",
+      household_receipts: "household",
+      household_staples: "household",
+      household_history: "household",
+      settings: "settings",
+      integrations: "settings",
+    } as const;
+    const workspace = workspaceBySurface[
+      request.target_surface as keyof typeof workspaceBySurface
+    ];
+    if (!workspace) return;
+    const params = new URLSearchParams(window.location.search);
+    params.set("workspace", workspace);
+    params.delete("tab");
+    window.history.pushState({}, "", `/?${params}`);
+    setAgentSourceContext(baseAgentContext(request.target_surface));
+    setActiveWorkspace(workspace);
   }
 
   async function markPersonal(id: number) {
@@ -809,8 +957,10 @@ function DashboardApp() {
         <Suspense fallback={<AgentLoadingState />}>
           <AgentExperience
             mode="page"
-            pageContext={lastAgentContext.current}
-            contextLabel={agentContextLabel(lastAgentContext.current)}
+            pageContext={effectiveAgentPageContext}
+            contextLabel={agentSourceContext.label}
+            onClearContext={clearAgentContext}
+            onRestoreContext={restoreAgentContext}
             onNavigate={navigateFromAgent}
           />
         </Suspense>
@@ -834,13 +984,21 @@ function DashboardApp() {
         {activeWorkspace === "settings" ? (
           <AccountSettingsPage
             context={accountContext}
+            onAgentContextChange={publishAgentContext}
+            agentNavigationRequest={agentNavigationRequest}
             splitwiseTools={<GroupManagementPanel currentUserId={currentSplitwiseUser?.id ?? null} />}
             learnedBehaviorTools={<div className="space-y-5"><AgentMemoryPanel friends={memory.friends} groups={memory.groups} onSelectFriend={selectMemoryFriend} onSelectGroup={selectMemoryGroup} loading={busy !== null && allTransactions.length === 0}/><AIFallbackMemoryPanel memories={aiMemories} onDelete={deleteAIMemory} loading={busy !== null && aiMemories.length === 0}/></div>}
           />
         ) : activeWorkspace === "household" ? (
-          <HouseholdOpsPage />
+          <HouseholdOpsPage
+            onAgentContextChange={publishAgentContext}
+            agentNavigationRequest={agentNavigationRequest}
+          />
         ) : activeWorkspace === "promotions" ? (
-          <PromotionsPage />
+          <PromotionsPage
+            onAgentContextChange={publishAgentContext}
+            agentNavigationRequest={agentNavigationRequest}
+          />
         ) : (
           <>
         <Header active={expenseTab} onSync={syncTransactions} busy={busy} pendingCount={transactions.length} pendingTotal={pendingTotal} lastSyncLabel={lastSyncedAt ? relativeTime(lastSyncedAt) : lastSyncLabel} syncError={syncError} />
@@ -891,6 +1049,7 @@ function DashboardApp() {
                     payerIncluded={payerIncludedByTx[transaction.id] ?? true}
                     customValues={customValuesByTx[transaction.id] || {}}
                     expanded={Boolean(expandedTransactions[transaction.id])}
+                    agentFocused={focusedTransactionId === transaction.id}
                     onQueryChange={(value) =>
                       setFriendQueriesByTx((current) => ({ ...current, [transaction.id]: value }))
                     }
@@ -921,6 +1080,11 @@ function DashboardApp() {
                     }
                     onExpandedChange={(expanded) =>
                       setTransactionExpanded(transaction.id, expanded)
+                    }
+                    onAgentFocus={() =>
+                      setFocusedTransactionId((current) =>
+                        current === transaction.id ? null : transaction.id,
+                      )
                     }
                     allGroupsOpen={false}
                     onPersonal={() => markPersonal(transaction.id)}
@@ -955,7 +1119,7 @@ function DashboardApp() {
               onUndo={undoTransaction}
             />
           </section>
-        </div> : expenseTab === "insights" ? <InsightsDashboard/> : <ActivityTimeline page={financialActivity} loading={financialActivityLoading} error={financialActivityError} onRetry={() => setFinancialActivityReload((value) => value + 1)}/>}
+        </div> : expenseTab === "insights" ? <InsightsDashboard onAgentContextChange={publishAgentContext}/> : <ActivityTimeline page={financialActivity} loading={financialActivityLoading} error={financialActivityError} onRetry={() => setFinancialActivityReload((value) => value + 1)} focusedTransactionId={focusedTransactionId} onAgentFocus={setFocusedTransactionId}/>}
           </>
         )}
           </div>
@@ -968,8 +1132,10 @@ function DashboardApp() {
               <Suspense fallback={<AgentLoadingState />}>
                 <AgentExperience
                   mode="panel"
-                  pageContext={lastAgentContext.current}
-                  contextLabel={agentContextLabel(lastAgentContext.current)}
+                  pageContext={effectiveAgentPageContext}
+                  contextLabel={agentSourceContext.label}
+                  onClearContext={clearAgentContext}
+                  onRestoreContext={restoreAgentContext}
                   onClose={closeAgentPanel}
                   onNavigate={navigateFromAgent}
                 />
@@ -981,8 +1147,10 @@ function DashboardApp() {
               <Suspense fallback={<AgentLoadingState />}>
                 <AgentExperience
                   mode="panel"
-                  pageContext={lastAgentContext.current}
-                  contextLabel={agentContextLabel(lastAgentContext.current)}
+                  pageContext={effectiveAgentPageContext}
+                  contextLabel={agentSourceContext.label}
+                  onClearContext={clearAgentContext}
+                  onRestoreContext={restoreAgentContext}
                   onClose={closeAgentPanel}
                   onNavigate={navigateFromAgent}
                 />
@@ -1146,61 +1314,22 @@ function AgentFullscreenDialog({
   );
 }
 
-function buildAgentPageContext(
+function baseContextForWorkspace(
   workspace: WorkspaceView,
   expenseTab: "review" | "insights" | "activity",
-  filters: DashboardFilters,
-): AgentPageContext {
+): AgentContextDescriptor {
   if (workspace === "expenses") {
     const surface = {
       review: "expense_review",
       insights: "expense_insights",
       activity: "expense_activity",
     } as const;
-    return {
-      schema_version: "1.0",
-      surface: surface[expenseTab],
-      filters:
-        expenseTab === "review"
-          ? {
-              merchant: filters.merchant || null,
-              start_date: filters.dateFrom || null,
-              end_date: filters.dateTo || null,
-              status: filters.status || null,
-            }
-          : {},
-    };
+    return baseAgentContext(surface[expenseTab]);
   }
-  return {
-    schema_version: "1.0",
-    surface:
-      workspace === "household"
-        ? "household_today"
-        : workspace === "promotions"
-          ? "deals"
-          : workspace === "settings"
-            ? "settings"
-            : "home",
-    filters: {},
-  };
-}
-
-function agentContextLabel(context: AgentPageContext): string {
-  const labels: Record<AgentPageContext["surface"], string> = {
-    home: "ExpenseOps",
-    expense_review: "Expense Review",
-    expense_insights: "Expense Insights",
-    expense_activity: "Expense Activity",
-    household_today: "Household Today",
-    household_errands: "Household Errands",
-    household_receipts: "Household Receipts",
-    household_staples: "Household Staples",
-    household_history: "Household History",
-    deals: "Deals",
-    settings: "Settings",
-    integrations: "Integrations",
-  };
-  return labels[context.surface];
+  if (workspace === "household") return baseAgentContext("household_today");
+  if (workspace === "promotions") return baseAgentContext("deals");
+  if (workspace === "settings") return baseAgentContext("settings");
+  return baseAgentContext("home");
 }
 
 function AuthLoading() {
@@ -1445,11 +1574,15 @@ function ActivityTimeline({
   loading,
   error,
   onRetry,
+  focusedTransactionId,
+  onAgentFocus,
 }: {
   page: FinancialActivityPage | null;
   loading: boolean;
   error: string;
   onRetry: () => void;
+  focusedTransactionId: number | null;
+  onAgentFocus: (transactionId: number | null) => void;
 }) {
   const events = page?.events || [];
   return (
@@ -1490,7 +1623,11 @@ function ActivityTimeline({
             return (
               <div
                 key={event.id}
-                className="group flex w-full gap-3 rounded-lg border border-transparent px-2 py-2 text-left transition hover:border-slate-200 hover:bg-slate-50"
+                className={`group flex w-full gap-3 rounded-lg border px-2 py-2 text-left transition hover:border-slate-200 hover:bg-slate-50 ${
+                  event.transaction_id === focusedTransactionId
+                    ? "border-indigo-300 bg-indigo-50/60 ring-1 ring-indigo-200"
+                    : "border-transparent"
+                }`}
               >
                 <span className="relative mt-1 flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-white shadow-sm ring-1 ring-slate-200">
                   <span
@@ -1530,6 +1667,21 @@ function ActivityTimeline({
                     <span className="mt-1 block truncate text-xs text-slate-500">
                       Support ID: {event.correlation_id}
                     </span>
+                  ) : null}
+                  {event.transaction_id ? (
+                    <button
+                      type="button"
+                      className="mt-2 inline-flex min-h-11 items-center gap-2 rounded-control px-3 text-xs font-semibold text-indigo-700 hover:bg-indigo-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-600"
+                      onClick={() => onAgentFocus(
+                        focusedTransactionId === event.transaction_id ? null : event.transaction_id,
+                      )}
+                      aria-pressed={focusedTransactionId === event.transaction_id}
+                      aria-label={`Use ${event.merchant_name || `transaction ${event.transaction_id}`} as Agent context`}
+                      data-testid={`agent-context-activity-transaction-${event.id}`}
+                    >
+                      <Bot className="size-4" aria-hidden="true" />
+                      {focusedTransactionId === event.transaction_id ? "In Agent context" : "Ask Agent"}
+                    </button>
                   ) : null}
                 </span>
               </div>
@@ -1965,6 +2117,7 @@ function TransactionCard({
   payerIncluded,
   customValues,
   expanded,
+  agentFocused,
   onQueryChange,
   onGroupQueryChange,
   onSearch,
@@ -1979,6 +2132,7 @@ function TransactionCard({
   onPayerIncludedChange,
   onCustomValueChange,
   onExpandedChange,
+  onAgentFocus,
   allGroupsOpen,
   onPersonal,
   onDraft,
@@ -2002,6 +2156,7 @@ function TransactionCard({
   payerIncluded: boolean;
   customValues: Record<number, string>;
   expanded: boolean;
+  agentFocused: boolean;
   onQueryChange: (value: string) => void;
   onGroupQueryChange: (value: string) => void;
   onSearch: () => void;
@@ -2016,6 +2171,7 @@ function TransactionCard({
   onPayerIncludedChange: (included: boolean) => void;
   onCustomValueChange: (userId: number, value: string) => void;
   onExpandedChange: (expanded: boolean) => void;
+  onAgentFocus: () => void;
   allGroupsOpen: boolean;
   onPersonal: () => void;
   onDraft: () => void;
@@ -2055,7 +2211,7 @@ function TransactionCard({
     <Card
       data-testid={`transaction-card-${transaction.id}`}
       className={`overflow-hidden border border-ui-border bg-white transition hover:border-slate-300 hover:shadow-primary ${
-        isExpanded ? "ring-1 ring-indigo-100" : ""
+        agentFocused ? "ring-2 ring-indigo-300" : isExpanded ? "ring-1 ring-indigo-100" : ""
       }`}
     >
       <CardHeader className="gap-3 p-4 pb-3">
@@ -2089,6 +2245,18 @@ function TransactionCard({
             {transaction.agent_question || "Review this transaction."}
           </p>
           <div className="flex shrink-0 flex-wrap items-center gap-2">
+            <Button
+              type="button"
+              variant={agentFocused ? "secondary" : "ghost"}
+              className="min-h-11"
+              onClick={onAgentFocus}
+              aria-pressed={agentFocused}
+              aria-label={`Use ${title} as Agent context`}
+              data-testid={`agent-context-transaction-${transaction.id}`}
+            >
+              <Bot className="size-4" aria-hidden="true" />
+              {agentFocused ? "In Agent context" : "Ask Agent"}
+            </Button>
             <Button
               variant="outline"
               className="border-slate-300 text-slate-800 hover:bg-slate-100 hover:text-ink"

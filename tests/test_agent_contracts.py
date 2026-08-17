@@ -14,6 +14,8 @@ from app.agent.contracts import (
     AgentCapabilities,
     AgentConversationCreate,
     AgentEmptyStateBlock,
+    AgentFeedbackOut,
+    AgentFeedbackRequest,
     AgentMessageCreate,
     AgentMessageOut,
     AgentPageContext,
@@ -794,3 +796,34 @@ def test_agent_tool_context_is_server_only_and_not_part_of_model_metadata():
     assert "workspace_id" not in str(metadata)
     assert "user_id" not in str(metadata)
     assert "request_id" not in str(metadata)
+
+
+def test_beta_feedback_contract_is_closed_bounded_and_negative_reasons_are_typed():
+    negative = AgentFeedbackRequest(
+        rating="not_helpful",
+        reason="wrong_data",
+    )
+    assert negative.model_dump() == {
+        "rating": "not_helpful",
+        "reason": "wrong_data",
+    }
+    assert AgentFeedbackRequest(rating="helpful").reason is None
+
+    for payload in (
+        {"rating": "helpful", "reason": "too_slow"},
+        {"rating": "not_helpful", "reason": "freeform answer text"},
+        {"rating": "helpful", "comment": "copy the answer here"},
+    ):
+        with pytest.raises(ValidationError):
+            AgentFeedbackRequest.model_validate(payload)
+
+    value = AgentFeedbackOut(
+        public_id="feedback-1",
+        message_public_id="message-1",
+        conversation_public_id="conversation-1",
+        run_public_id="run-1",
+        rating="helpful",
+        created_at=datetime(2026, 8, 16, tzinfo=UTC),
+        updated_at=datetime(2026, 8, 16, tzinfo=UTC),
+    )
+    assert value.schema_version == AGENT_CONTRACT_VERSION

@@ -167,6 +167,11 @@ class ReceiptSummaryItem(HouseholdReceiptToolModel):
     unmatched_line_count: int = Field(ge=0)
     total_line_count: int = Field(ge=0)
     transaction_linked: bool
+    confirmed_household_item_ids: list[str] = Field(
+        default_factory=list,
+        max_length=MAX_RECEIPT_LINE_RESULTS,
+    )
+    confirmed_household_item_ids_truncated: bool = False
 
 
 class ReceiptLineItem(HouseholdReceiptToolModel):
@@ -176,6 +181,7 @@ class ReceiptLineItem(HouseholdReceiptToolModel):
     line_total_cents: int | None = None
     match_status: Literal["matched", "possible", "unmatched", "ignored"]
     household_item_name: str | None = Field(default=None, min_length=1, max_length=255)
+    household_item_public_id: str | None = Field(default=None, min_length=1, max_length=128)
     confirmed_acquisition: bool
 
 
@@ -207,7 +213,9 @@ def register_household_receipt_tools(registry: AgentToolRegistry) -> None:
             name="get_household_replenishment",
             description=(
                 "Read bounded household due estimates, safe replenishment-learning summaries, "
-                "or confirmed acquisition history from the authenticated ExpenseOps workspace."
+                "or confirmed acquisition history from the authenticated ExpenseOps workspace. "
+                "Pair with deals for a due-item offer question, errands for exact stored links, "
+                "or receipts only when confirmed acquisition evidence is relevant."
             ),
             effect=ToolEffect.READ,
             input_model=HouseholdReplenishmentInput,
@@ -220,12 +228,16 @@ def register_household_receipt_tools(registry: AgentToolRegistry) -> None:
             name="get_receipts",
             description=(
                 "Read bounded recent receipts, receipts needing review, or one safe receipt "
-                "detail from the authenticated ExpenseOps workspace."
+                "detail from the authenticated ExpenseOps workspace. Recent and needs-review "
+                "list rows include bounded tenant-verified confirmed household-item links. "
+                "Use recent when one question combines review status with recent confirmed "
+                "acquisitions; pair with replenishment only for exact ID-linked questions."
             ),
             effect=ToolEffect.READ,
             input_model=ReceiptsInput,
             output_model=ReceiptsOutput,
             handler=_get_receipts,
+            version="1.1",
         )
     )
 
@@ -496,6 +508,11 @@ def _get_receipts(context: AgentToolContext, values: ReceiptsInput) -> dict:
             receipt.transaction_id for receipt in receipts if receipt.transaction_id is not None
         ],
     )
+    confirmed_household_links = _confirmed_receipt_household_item_ids(
+        context.db,
+        workspace_id=context.workspace_id,
+        receipt_ids=receipt_ids,
+    )
     return {
         "view": values.view,
         "receipts": [
@@ -503,6 +520,7 @@ def _get_receipts(context: AgentToolContext, values: ReceiptsInput) -> dict:
                 receipt,
                 counts.get(receipt.id, (0, 0, 0, 0)),
                 safe_transactions=safe_transactions,
+                confirmed_household_links=confirmed_household_links.get(receipt.id, ([], False)),
             )
             for receipt in receipts
         ],
@@ -566,8 +584,18 @@ def _receipt_detail(context: AgentToolContext, values: ReceiptsInput) -> dict:
         workspace_id=context.workspace_id,
         transaction_ids=[receipt.transaction_id] if receipt.transaction_id is not None else [],
     )
+    confirmed_household_links = _confirmed_receipt_household_item_ids(
+        context.db,
+        workspace_id=context.workspace_id,
+        receipt_ids=[receipt.id],
+    )
     detail = {
-        **_receipt_summary_dict(receipt, counts, safe_transactions=safe_transactions),
+        **_receipt_summary_dict(
+            receipt,
+            counts,
+            safe_transactions=safe_transactions,
+            confirmed_household_links=confirmed_household_links.get(receipt.id, ([], False)),
+        ),
         "lines": [
             {
                 "name": line.raw_name,
@@ -576,6 +604,11 @@ def _receipt_detail(context: AgentToolContext, values: ReceiptsInput) -> dict:
                 "line_total_cents": line.line_total_cents,
                 "match_status": _safe_match_status(line, household_names),
                 "household_item_name": household_names.get(line.household_item_id),
+                "household_item_public_id": (
+                    str(line.household_item_id)
+                    if line.household_item_id in household_names
+                    else None
+                ),
                 "confirmed_acquisition": line.id in confirmed_line_ids,
             }
             for line in lines
@@ -895,13 +928,74 @@ def _confirmed_receipt_line_ids(
     )
 
 
+def _confirmed_receipt_household_item_ids(
+    db: Session,
+    *,
+    workspace_id: int,
+    receipt_ids: list[int],
+) -> dict[int, tuple[list[int], bool]]:
+    """Return bounded, tenant-verified receipt-to-item acquisition links."""
+
+    if not receipt_ids:
+        return {}
+    pairs = (
+        select(
+            PurchaseReceiptItem.receipt_id.label("receipt_id"),
+            HouseholdItemAcquisition.household_item_id.label("household_item_id"),
+        )
+        .join(
+            HouseholdItemAcquisition,
+            HouseholdItemAcquisition.receipt_item_id == PurchaseReceiptItem.id,
+        )
+        .join(PurchaseReceipt, PurchaseReceipt.id == PurchaseReceiptItem.receipt_id)
+        .join(HouseholdItem, HouseholdItem.id == HouseholdItemAcquisition.household_item_id)
+        .where(
+            PurchaseReceipt.workspace_id == workspace_id,
+            PurchaseReceipt.id.in_(receipt_ids),
+            HouseholdItemAcquisition.workspace_id == workspace_id,
+            HouseholdItemAcquisition.confirmed.is_(True),
+            HouseholdItemAcquisition.voided_at.is_(None),
+            HouseholdItem.workspace_id == workspace_id,
+        )
+        .distinct()
+        .subquery()
+    )
+    ranked = select(
+        pairs.c.receipt_id,
+        pairs.c.household_item_id,
+        func.row_number()
+        .over(
+            partition_by=pairs.c.receipt_id,
+            order_by=pairs.c.household_item_id,
+        )
+        .label("position"),
+    ).subquery()
+    rows = db.execute(
+        select(ranked.c.receipt_id, ranked.c.household_item_id, ranked.c.position)
+        .where(ranked.c.position <= MAX_RECEIPT_LINE_RESULTS + 1)
+        .order_by(ranked.c.receipt_id, ranked.c.position)
+    )
+    grouped: dict[int, list[int]] = {}
+    truncated: set[int] = set()
+    for receipt_id, item_id, position in rows:
+        if int(position) > MAX_RECEIPT_LINE_RESULTS:
+            truncated.add(int(receipt_id))
+            continue
+        grouped.setdefault(int(receipt_id), []).append(int(item_id))
+    return {
+        receipt_id: (item_ids, receipt_id in truncated) for receipt_id, item_ids in grouped.items()
+    }
+
+
 def _receipt_summary_dict(
     receipt: PurchaseReceipt,
     counts: tuple[int, int, int, int],
     *,
     safe_transactions: set[int],
+    confirmed_household_links: tuple[list[int], bool] | None = None,
 ) -> dict:
     matched, ignored, unmatched, total = counts
+    confirmed_household_item_ids, links_truncated = confirmed_household_links or ([], False)
     return {
         "public_id": str(receipt.id),
         "merchant": _clean_optional(receipt.merchant_raw),
@@ -915,6 +1009,8 @@ def _receipt_summary_dict(
         "unmatched_line_count": unmatched,
         "total_line_count": total,
         "transaction_linked": receipt.transaction_id in safe_transactions,
+        "confirmed_household_item_ids": [str(item_id) for item_id in confirmed_household_item_ids],
+        "confirmed_household_item_ids_truncated": links_truncated,
     }
 
 

@@ -319,6 +319,12 @@ def test_turn_endpoint_hides_runtime_failure_details(monkeypatch):
 
 def test_turn_endpoint_stops_before_orchestration_when_rate_limited(monkeypatch):
     limiter = RecordingRateLimiter(HTTPException(status_code=429, detail="Too many requests"))
+    events: list[tuple[str, dict[str, Any]]] = []
+    monkeypatch.setattr(
+        agent_routes,
+        "log_event",
+        lambda _logger, event, **metadata: events.append((event, metadata)),
+    )
     client, orchestrator, _limiter = _client(monkeypatch, limiter=limiter)
 
     response = client.post(
@@ -330,6 +336,9 @@ def test_turn_endpoint_stops_before_orchestration_when_rate_limited(monkeypatch)
     assert response.json() == {"detail": "Too many requests"}
     assert limiter.calls == [("agent-turn:29:17", 10, 60)]
     assert orchestrator.calls == []
+    assert events == [("agent_rate_limited", {"operation": "turn"})]
+    assert "29" not in str(events)
+    assert "17" not in str(events)
 
 
 def test_turn_endpoint_is_indistinguishable_when_read_agent_is_disabled(monkeypatch):

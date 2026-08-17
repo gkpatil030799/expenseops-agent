@@ -4,6 +4,7 @@ import hashlib
 import json
 import logging
 import re
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -12,7 +13,12 @@ from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app.agent.contracts import AgentActionPreview, AgentPageContext, AgentStructuredResponse
+from app.agent.contracts import (
+    AgentActionPreview,
+    AgentFeedbackOut,
+    AgentPageContext,
+    AgentStructuredResponse,
+)
 from app.agent.tooling import (
     AgentToolContext,
     AgentToolDispatchResult,
@@ -29,6 +35,7 @@ from app.models import (
     AgentMessage,
     AgentRun,
     AgentToolCall,
+    new_agent_public_id,
     utc_now,
 )
 from app.services.managed_auth_service import record_audit
@@ -61,6 +68,13 @@ class AgentConflictError(AgentFoundationError):
 
 class AgentFeatureDisabledError(AgentFoundationError):
     pass
+
+
+@dataclass(frozen=True, slots=True)
+class AgentMessageFeedbackState:
+    eligible: bool
+    run_public_id: str | None
+    feedback: AgentFeedbackOut | None
 
 
 class UnifiedAgentService:
@@ -401,6 +415,189 @@ class UnifiedAgentService:
             or 0
         )
 
+    def feedback_states_for_messages(
+        self,
+        conversation_public_id: str,
+        *,
+        owner_user_id: int,
+        messages: list[AgentMessage],
+    ) -> dict[str, AgentMessageFeedbackState]:
+        """Project server-owned feedback eligibility for a bounded message page."""
+
+        workspace_id = self._require_enabled_scope(owner_user_id)
+        conversation = self.get_conversation(
+            conversation_public_id,
+            owner_user_id=owner_user_id,
+        )
+        message_ids = {message.public_id for message in messages if message.role == "assistant"}
+        runs_by_message: dict[str, AgentRun | None] = {}
+        if message_ids:
+            runs = self.db.scalars(
+                select(AgentRun).where(
+                    AgentRun.workspace_id == workspace_id,
+                    AgentRun.owner_user_id == owner_user_id,
+                    AgentRun.conversation_id == conversation.id,
+                    AgentRun.metadata_json["assistant_message_public_id"]
+                    .as_string()
+                    .in_(message_ids),
+                )
+            )
+            for run in runs:
+                message_public_id = (run.metadata_json or {}).get("assistant_message_public_id")
+                if not isinstance(message_public_id, str) or message_public_id not in message_ids:
+                    continue
+                # A canonical assistant message belongs to exactly one run. If
+                # corrupt legacy metadata says otherwise, fail eligibility closed.
+                runs_by_message[message_public_id] = (
+                    run if message_public_id not in runs_by_message else None
+                )
+
+        states: dict[str, AgentMessageFeedbackState] = {}
+        for message in messages:
+            run = runs_by_message.get(message.public_id)
+            eligible = (
+                message.role == "assistant"
+                and message.status == "completed"
+                and run is not None
+                and run.status == "completed"
+            )
+            feedback = (
+                _feedback_out_from_message(
+                    message,
+                    conversation_public_id=conversation.public_id,
+                    run_public_id=run.public_id,
+                )
+                if eligible and run is not None
+                else None
+            )
+            states[message.public_id] = AgentMessageFeedbackState(
+                eligible=eligible,
+                run_public_id=run.public_id if run is not None else None,
+                feedback=feedback,
+            )
+        return states
+
+    def upsert_message_feedback(
+        self,
+        message_public_id: str,
+        *,
+        owner_user_id: int,
+        rating: str,
+        reason: str | None,
+    ) -> AgentFeedbackOut:
+        """Idempotently store one closed beta rating on its assistant message."""
+
+        workspace_id = self._require_enabled_scope(owner_user_id)
+        if rating not in {"helpful", "not_helpful"}:
+            raise AgentFoundationError("invalid_feedback", "Feedback rating is invalid")
+        if reason not in {None, "wrong_data", "didnt_understand", "too_slow", "other"}:
+            raise AgentFoundationError("invalid_feedback", "Feedback reason is invalid")
+        if rating == "helpful" and reason is not None:
+            raise AgentFoundationError(
+                "invalid_feedback",
+                "A helpful rating cannot include a negative reason",
+            )
+
+        message = self.db.scalar(
+            select(AgentMessage)
+            .where(
+                AgentMessage.workspace_id == workspace_id,
+                AgentMessage.owner_user_id == owner_user_id,
+                AgentMessage.public_id == message_public_id,
+            )
+            .with_for_update()
+        )
+        if message is None:
+            raise AgentNotFoundError("message_not_found", "Agent message not found")
+        matching_runs = list(
+            self.db.scalars(
+                select(AgentRun)
+                .where(
+                    AgentRun.workspace_id == workspace_id,
+                    AgentRun.owner_user_id == owner_user_id,
+                    AgentRun.conversation_id == message.conversation_id,
+                    AgentRun.status == "completed",
+                    AgentRun.metadata_json["assistant_message_public_id"].as_string()
+                    == message.public_id,
+                )
+                .limit(2)
+            )
+        )
+        run = matching_runs[0] if len(matching_runs) == 1 else None
+        if message.role != "assistant" or message.status != "completed" or run is None:
+            raise AgentConflictError(
+                "feedback_not_eligible",
+                "Feedback is available only for a completed assistant answer",
+            )
+        conversation = self.db.scalar(
+            select(AgentConversation).where(
+                AgentConversation.id == message.conversation_id,
+                AgentConversation.workspace_id == workspace_id,
+                AgentConversation.owner_user_id == owner_user_id,
+            )
+        )
+        if conversation is None:
+            raise AgentNotFoundError("conversation_not_found", "Agent conversation not found")
+
+        existing = _feedback_out_from_message(
+            message,
+            conversation_public_id=conversation.public_id,
+            run_public_id=run.public_id,
+        )
+        if existing is not None and existing.rating == rating and existing.reason == reason:
+            log_event(
+                logger,
+                "agent_feedback_replayed",
+                message_id=message.public_id,
+                rating=rating,
+            )
+            return existing
+
+        now = utc_now()
+        created_at = existing.created_at if existing is not None else now
+        public_id = existing.public_id if existing is not None else new_agent_public_id()
+        feedback = AgentFeedbackOut(
+            public_id=public_id,
+            message_public_id=message.public_id,
+            conversation_public_id=conversation.public_id,
+            run_public_id=run.public_id,
+            rating=rating,
+            reason=reason,
+            created_at=created_at,
+            updated_at=now,
+        )
+        metadata = dict(message.metadata_json or {})
+        metadata["feedback"] = {
+            "schema_version": feedback.schema_version,
+            "public_id": feedback.public_id,
+            "run_public_id": feedback.run_public_id,
+            "rating": feedback.rating,
+            "reason": feedback.reason,
+            "created_at": feedback.created_at.isoformat(),
+            "updated_at": feedback.updated_at.isoformat(),
+        }
+        message.metadata_json = _safe_json(metadata)
+        record_audit(
+            self.db,
+            workspace_id=workspace_id,
+            user_id=owner_user_id,
+            event_type="agent_feedback_recorded",
+            resource_type="agent_message",
+            resource_id=message.public_id,
+            metadata={"rating": rating, "reason": reason},
+        )
+        self.db.commit()
+        self.db.refresh(message)
+        log_event(
+            logger,
+            "agent_feedback_recorded",
+            message_id=message.public_id,
+            rating=rating,
+            reason=reason,
+            updated=existing is not None,
+        )
+        return feedback
+
     def create_run(
         self,
         conversation_public_id: str,
@@ -509,7 +706,9 @@ class UnifiedAgentService:
             raise AgentConflictError("run_state_conflict", "Agent run is not queued")
         self.db.commit()
         self.db.expire(run)
-        return self._get_run(public_id, owner_user_id=owner_user_id)
+        started = self._get_run(public_id, owner_user_id=owner_user_id)
+        log_event(logger, "agent_run_started", run_id=started.public_id)
+        return started
 
     def complete_run(
         self,
@@ -523,6 +722,17 @@ class UnifiedAgentService:
         assistant_message_public_id: str | None = None,
         provider_request_id: str | None = None,
         provider_request_count: int | None = None,
+        sdk_turn_count: int | None = None,
+        sdk_runtime_latency_ms: int | None = None,
+        provider_orchestration_latency_ms_estimate: int | None = None,
+        total_tool_latency_ms: int | None = None,
+        tool_call_count: int | None = None,
+        evidence_set_count: int | None = None,
+        failed_tool_call_count: int | None = None,
+        completion_state: str | None = None,
+        composition_latency_ms: int | None = None,
+        canonical_response_bytes: int | None = None,
+        response_payload_bytes: int | None = None,
     ) -> AgentRun:
         workspace_id = self._require_enabled_scope(owner_user_id)
         run = self._get_run(public_id, owner_user_id=owner_user_id)
@@ -539,6 +749,17 @@ class UnifiedAgentService:
             assistant_message_public_id=assistant_message_public_id,
             provider_request_id=provider_request_id,
             provider_request_count=provider_request_count,
+            sdk_turn_count=sdk_turn_count,
+            sdk_runtime_latency_ms=sdk_runtime_latency_ms,
+            provider_orchestration_latency_ms_estimate=(provider_orchestration_latency_ms_estimate),
+            total_tool_latency_ms=total_tool_latency_ms,
+            tool_call_count=tool_call_count,
+            evidence_set_count=evidence_set_count,
+            failed_tool_call_count=failed_tool_call_count,
+            completion_state=completion_state,
+            composition_latency_ms=composition_latency_ms,
+            canonical_response_bytes=canonical_response_bytes,
+            response_payload_bytes=response_payload_bytes,
         )
         result = self.db.execute(
             update(AgentRun)
@@ -574,6 +795,22 @@ class UnifiedAgentService:
             latency_ms=completed.latency_ms,
             input_tokens=completed.input_tokens,
             output_tokens=completed.output_tokens,
+            total_tokens=completed.total_tokens,
+            estimated_cost_micros=completed.estimated_cost_micros,
+            provider_request_count=completed.metadata_json.get("provider_request_count"),
+            sdk_turn_count=completed.metadata_json.get("sdk_turn_count"),
+            sdk_runtime_latency_ms=completed.metadata_json.get("sdk_runtime_latency_ms"),
+            provider_orchestration_latency_ms_estimate=completed.metadata_json.get(
+                "provider_orchestration_latency_ms_estimate"
+            ),
+            total_tool_latency_ms=completed.metadata_json.get("total_tool_latency_ms"),
+            tool_call_count=completed.metadata_json.get("tool_call_count"),
+            evidence_set_count=completed.metadata_json.get("evidence_set_count"),
+            failed_tool_call_count=completed.metadata_json.get("failed_tool_call_count"),
+            completion_state=completed.metadata_json.get("completion_state"),
+            composition_latency_ms=completed.metadata_json.get("composition_latency_ms"),
+            canonical_response_bytes=completed.metadata_json.get("canonical_response_bytes"),
+            response_payload_bytes=completed.metadata_json.get("response_payload_bytes"),
         )
         return completed
 
@@ -586,17 +823,49 @@ class UnifiedAgentService:
         error_message: str,
         latency_ms: int | None = None,
         assistant_message_public_id: str | None = None,
+        input_tokens: int | None = None,
+        output_tokens: int | None = None,
+        estimated_cost_micros: int | None = None,
         provider_request_id: str | None = None,
         provider_request_count: int | None = None,
+        sdk_turn_count: int | None = None,
+        sdk_runtime_latency_ms: int | None = None,
+        provider_orchestration_latency_ms_estimate: int | None = None,
+        total_tool_latency_ms: int | None = None,
+        tool_call_count: int | None = None,
+        evidence_set_count: int | None = None,
+        failed_tool_call_count: int | None = None,
+        completion_state: str | None = None,
+        composition_latency_ms: int | None = None,
+        canonical_response_bytes: int | None = None,
+        response_payload_bytes: int | None = None,
     ) -> AgentRun:
         workspace_id = self._require_enabled_scope(owner_user_id)
         run = self._get_run(public_id, owner_user_id=owner_user_id)
         now = utc_now()
+        normalized_input_tokens = _nonnegative(input_tokens)
+        normalized_output_tokens = _nonnegative(output_tokens)
+        total_tokens = (
+            (normalized_input_tokens or 0) + (normalized_output_tokens or 0)
+            if input_tokens is not None or output_tokens is not None
+            else None
+        )
         metadata = _run_metadata(
             run.metadata_json,
             assistant_message_public_id=assistant_message_public_id,
             provider_request_id=provider_request_id,
             provider_request_count=provider_request_count,
+            sdk_turn_count=sdk_turn_count,
+            sdk_runtime_latency_ms=sdk_runtime_latency_ms,
+            provider_orchestration_latency_ms_estimate=(provider_orchestration_latency_ms_estimate),
+            total_tool_latency_ms=total_tool_latency_ms,
+            tool_call_count=tool_call_count,
+            evidence_set_count=evidence_set_count,
+            failed_tool_call_count=failed_tool_call_count,
+            completion_state=completion_state,
+            composition_latency_ms=composition_latency_ms,
+            canonical_response_bytes=canonical_response_bytes,
+            response_payload_bytes=response_payload_bytes,
         )
         self.db.execute(
             update(AgentToolCall)
@@ -628,6 +897,10 @@ class UnifiedAgentService:
                 error_code=_safe_error_code(error_code),
                 error_message=_safe_error_message(error_message),
                 latency_ms=_nonnegative(latency_ms),
+                input_tokens=normalized_input_tokens,
+                output_tokens=normalized_output_tokens,
+                total_tokens=total_tokens,
+                estimated_cost_micros=_nonnegative(estimated_cost_micros),
                 metadata_json=metadata,
                 completed_at=now,
                 updated_at=now,
@@ -645,6 +918,24 @@ class UnifiedAgentService:
             "agent_run_failed",
             run_id=failed.public_id,
             error_code=failed.error_code,
+            input_tokens=failed.input_tokens,
+            output_tokens=failed.output_tokens,
+            total_tokens=failed.total_tokens,
+            estimated_cost_micros=failed.estimated_cost_micros,
+            provider_request_count=failed.metadata_json.get("provider_request_count"),
+            sdk_turn_count=failed.metadata_json.get("sdk_turn_count"),
+            sdk_runtime_latency_ms=failed.metadata_json.get("sdk_runtime_latency_ms"),
+            provider_orchestration_latency_ms_estimate=failed.metadata_json.get(
+                "provider_orchestration_latency_ms_estimate"
+            ),
+            total_tool_latency_ms=failed.metadata_json.get("total_tool_latency_ms"),
+            tool_call_count=failed.metadata_json.get("tool_call_count"),
+            evidence_set_count=failed.metadata_json.get("evidence_set_count"),
+            failed_tool_call_count=failed.metadata_json.get("failed_tool_call_count"),
+            completion_state=failed.metadata_json.get("completion_state"),
+            composition_latency_ms=failed.metadata_json.get("composition_latency_ms"),
+            canonical_response_bytes=failed.metadata_json.get("canonical_response_bytes"),
+            response_payload_bytes=failed.metadata_json.get("response_payload_bytes"),
         )
         return failed
 
@@ -699,7 +990,13 @@ class UnifiedAgentService:
         self.db.commit()
         self.db.expire(run)
         cancelled = self._get_run(public_id, owner_user_id=owner_user_id)
-        log_event(logger, "agent_run_cancelled", run_id=cancelled.public_id)
+        log_event(
+            logger,
+            "agent_run_cancelled",
+            run_id=cancelled.public_id,
+            latency_ms=cancelled.latency_ms,
+            error_code=cancelled.error_code,
+        )
         return cancelled
 
     def record_tool_call(
@@ -1494,6 +1791,17 @@ def _run_metadata(
     assistant_message_public_id: str | None,
     provider_request_id: str | None,
     provider_request_count: int | None,
+    sdk_turn_count: int | None = None,
+    sdk_runtime_latency_ms: int | None = None,
+    provider_orchestration_latency_ms_estimate: int | None = None,
+    total_tool_latency_ms: int | None = None,
+    tool_call_count: int | None = None,
+    evidence_set_count: int | None = None,
+    failed_tool_call_count: int | None = None,
+    completion_state: str | None = None,
+    composition_latency_ms: int | None = None,
+    canonical_response_bytes: int | None = None,
+    response_payload_bytes: int | None = None,
 ) -> dict[str, Any]:
     metadata = dict(current or {})
     metadata.update({"provider": "openai", "runtime": "openai_agents_sdk"})
@@ -1511,7 +1819,57 @@ def _run_metadata(
         )
     if provider_request_count is not None:
         metadata["provider_request_count"] = _nonnegative(provider_request_count)
+    integer_metrics = {
+        "sdk_turn_count": sdk_turn_count,
+        "sdk_runtime_latency_ms": sdk_runtime_latency_ms,
+        "provider_orchestration_latency_ms_estimate": (provider_orchestration_latency_ms_estimate),
+        "total_tool_latency_ms": total_tool_latency_ms,
+        "tool_call_count": tool_call_count,
+        "evidence_set_count": evidence_set_count,
+        "failed_tool_call_count": failed_tool_call_count,
+        "composition_latency_ms": composition_latency_ms,
+        "canonical_response_bytes": canonical_response_bytes,
+        "response_payload_bytes": response_payload_bytes,
+    }
+    for name, value in integer_metrics.items():
+        if value is not None:
+            metadata[name] = _nonnegative(value)
+    if completion_state is not None:
+        if completion_state not in {"complete", "partial", "failed"}:
+            raise AgentFoundationError(
+                "invalid_run_metrics",
+                "Agent completion state is invalid",
+            )
+        metadata["completion_state"] = completion_state
     return _safe_json(metadata)
+
+
+def _feedback_out_from_message(
+    message: AgentMessage,
+    *,
+    conversation_public_id: str,
+    run_public_id: str,
+) -> AgentFeedbackOut | None:
+    raw = (message.metadata_json or {}).get("feedback")
+    if not isinstance(raw, dict) or raw.get("run_public_id") != run_public_id:
+        return None
+    try:
+        return AgentFeedbackOut.model_validate(
+            {
+                "schema_version": raw.get("schema_version"),
+                "public_id": raw.get("public_id"),
+                "message_public_id": message.public_id,
+                "conversation_public_id": conversation_public_id,
+                "run_public_id": run_public_id,
+                "rating": raw.get("rating"),
+                "reason": raw.get("reason"),
+                "created_at": raw.get("created_at"),
+                "updated_at": raw.get("updated_at"),
+            }
+        )
+    except ValueError:
+        log_event(logger, "agent_feedback_metadata_invalid", message_id=message.public_id)
+        return None
 
 
 def _require_matching_turn_context(

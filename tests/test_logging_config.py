@@ -13,6 +13,7 @@ from app.logging_config import (
     configure_logging,
     log_event,
     normalize_external_trace_id,
+    redact_metadata,
     reset_trace_id,
     safe_preview,
     set_trace_id,
@@ -77,6 +78,28 @@ def test_log_event_redacts_sensitive_keys_but_not_safe_response_status():
     assert "[REDACTED]" in line
     assert "response_status=400" in line
     assert "status_code=400" in line
+
+
+def test_exact_numeric_token_and_cost_metrics_are_visible_but_token_strings_remain_redacted():
+    safe = redact_metadata(
+        {
+            "input_tokens": 120,
+            "output_tokens": 30,
+            "total_tokens": 150,
+            "estimated_cost_micros": 96,
+            "access_token": "secret-token",
+        }
+    )
+    assert safe == {
+        "input_tokens": 120,
+        "output_tokens": 30,
+        "total_tokens": 150,
+        "estimated_cost_micros": 96,
+        "access_token": "[REDACTED]",
+    }
+    assert redact_metadata({"input_tokens": "malicious nonnumeric value"}) == {
+        "input_tokens": "[REDACTED]"
+    }
 
 
 def test_safe_preview_collapses_whitespace_and_caps_length():

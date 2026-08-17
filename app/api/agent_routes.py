@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+
 from fastapi import APIRouter, HTTPException, Query, status
 from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel
@@ -9,6 +11,8 @@ from app.agent.contracts import (
     AgentConversationCreate,
     AgentConversationDetail,
     AgentConversationOut,
+    AgentFeedbackOut,
+    AgentFeedbackRequest,
     AgentMessageCreate,
     AgentMessageOut,
     AgentStructuredResponse,
@@ -20,15 +24,18 @@ from app.agent.service import (
     AgentConflictError,
     AgentFeatureDisabledError,
     AgentFoundationError,
+    AgentMessageFeedbackState,
     AgentNotFoundError,
     UnifiedAgentService,
 )
 from app.api.deps import CurrentUser, CurrentWorkspace, DbSession
 from app.config import get_settings
+from app.logging_config import log_event
 from app.models import AgentConversation, AgentMessage
 from app.rate_limit import rate_limiter
 
 router = APIRouter(prefix="/api/agent", tags=["agent"])
+logger = logging.getLogger(__name__)
 
 
 @router.get("/capabilities", response_model=AgentCapabilities)
@@ -120,11 +127,23 @@ def get_conversation(
             conversation_public_id,
             owner_user_id=user.id,
         )
+        feedback_states = service.feedback_states_for_messages(
+            conversation_public_id,
+            owner_user_id=user.id,
+            messages=messages,
+        )
     except AgentFoundationError as exc:
         _raise_agent_error(exc)
     return AgentConversationDetail(
         conversation=_conversation_out(conversation),
-        messages=[_message_out(message, conversation.public_id) for message in messages],
+        messages=[
+            _message_out(
+                message,
+                conversation.public_id,
+                feedback_state=feedback_states.get(message.public_id),
+            )
+            for message in messages
+        ],
         messages_total=messages_total,
         messages_offset=message_offset,
         messages_has_more=message_offset + len(messages) < messages_total,
@@ -156,6 +175,36 @@ def append_user_message(
 
 
 @router.post(
+    "/messages/{message_public_id}/feedback",
+    response_model=AgentFeedbackOut,
+)
+def record_message_feedback(
+    message_public_id: str,
+    payload: AgentFeedbackRequest,
+    db: DbSession,
+    user: CurrentUser,
+    workspace: CurrentWorkspace,
+) -> AgentFeedbackOut:
+    """Record one closed, privacy-minimized rating for a completed answer."""
+
+    _check_agent_rate_limit(
+        f"agent-feedback:{workspace.id}:{user.id}",
+        limit=30,
+        window_seconds=60,
+        operation="feedback",
+    )
+    try:
+        return UnifiedAgentService(db).upsert_message_feedback(
+            message_public_id,
+            owner_user_id=user.id,
+            rating=payload.rating,
+            reason=payload.reason,
+        )
+    except AgentFoundationError as exc:
+        _raise_agent_error(exc)
+
+
+@router.post(
     "/conversations/{conversation_public_id}/turns",
     response_model=AgentTurnOut,
     status_code=status.HTTP_201_CREATED,
@@ -172,10 +221,11 @@ async def run_read_only_turn(
     settings = get_settings()
     if not settings.agent_enabled or not settings.agent_read_tools_enabled:
         raise HTTPException(status_code=404, detail="Agent resource not found")
-    rate_limiter.check(
+    _check_agent_rate_limit(
         f"agent-turn:{workspace.id}:{user.id}",
         limit=10,
         window_seconds=60,
+        operation="turn",
     )
     try:
         return await _build_read_only_orchestrator(db).run_turn(
@@ -207,10 +257,11 @@ async def stream_read_only_turn(
     settings = get_settings()
     if not settings.agent_enabled or not settings.agent_read_tools_enabled:
         raise HTTPException(status_code=404, detail="Agent resource not found")
-    rate_limiter.check(
+    _check_agent_rate_limit(
         f"agent-turn:{workspace.id}:{user.id}",
         limit=10,
         window_seconds=60,
+        operation="stream_turn",
     )
     orchestrator = _build_read_only_orchestrator(db)
     try:
@@ -272,7 +323,12 @@ def _conversation_out(value: AgentConversation) -> AgentConversationOut:
     )
 
 
-def _message_out(value: AgentMessage, conversation_public_id: str) -> AgentMessageOut:
+def _message_out(
+    value: AgentMessage,
+    conversation_public_id: str,
+    *,
+    feedback_state: AgentMessageFeedbackState | None = None,
+) -> AgentMessageOut:
     structured = (
         AgentStructuredResponse.model_validate(value.structured_response_json)
         if value.structured_response_json
@@ -285,6 +341,8 @@ def _message_out(value: AgentMessage, conversation_public_id: str) -> AgentMessa
         text=value.content,
         structured_response=structured,
         client_message_id=value.client_message_id,
+        feedback_eligible=feedback_state.eligible if feedback_state else False,
+        feedback=feedback_state.feedback if feedback_state else None,
         created_at=value.created_at,
     )
 
@@ -293,6 +351,21 @@ def _build_read_only_orchestrator(db: DbSession) -> ReadOnlyAgentOrchestrator:
     """Small construction seam for deterministic route and integration tests."""
 
     return ReadOnlyAgentOrchestrator(db, settings=get_settings())
+
+
+def _check_agent_rate_limit(
+    key: str,
+    *,
+    limit: int,
+    window_seconds: int,
+    operation: str,
+) -> None:
+    try:
+        rate_limiter.check(key, limit=limit, window_seconds=window_seconds)
+    except HTTPException as exc:
+        if exc.status_code == status.HTTP_429_TOO_MANY_REQUESTS:
+            log_event(logger, "agent_rate_limited", operation=operation)
+        raise
 
 
 def _semantic_sse(event: BaseModel) -> str:
