@@ -311,6 +311,9 @@ def test_production_release_preflights_topology_hobby_recovery_and_credentials()
     assert "APPLICATION_TABLES = frozenset(" in recovery
     assert '"20260813_0023"' in recovery
     assert '"20260815_0029"' in recovery
+    assert '"20260817_0031"' in recovery
+    assert 'CURRENT_REVISIONS = frozenset({"20260817_0032"})' in recovery
+    assert "tables = APPLICATION_TABLES - PROACTIVE_ATTENTION_TABLES" in recovery
     assert "relations != reviewed_relations" in recovery
     assert "source table inventory differs from the reviewed" in recovery
     assert "restored_rows = row_manifest(restored, restored_relations)" in recovery
@@ -493,6 +496,45 @@ def test_hobby_recovery_inventory_matches_the_bootstrap_allowlist():
     embedded_tables = set(ast.literal_eval(assignment.value.args[0]))
 
     assert embedded_tables == set(APPLICATION_TABLES)
+
+
+def test_hobby_recovery_inventory_is_revision_aware_for_attention_migration():
+    tree = ast.parse(_inline_hobby_recovery_program())
+    required_assignments = {
+        "APPLICATION_TABLES",
+        "AGENT_TABLES",
+        "PROACTIVE_ATTENTION_TABLES",
+        "PRE_AGENT_REVISIONS",
+        "AGENT_REVISIONS",
+        "CURRENT_REVISIONS",
+    }
+    selected_nodes: list[ast.stmt] = []
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and any(
+            isinstance(target, ast.Name) and target.id in required_assignments
+            for target in node.targets
+        ):
+            selected_nodes.append(node)
+        elif isinstance(node, ast.FunctionDef) and node.name == "expected_relations":
+            selected_nodes.append(node)
+
+    namespace: dict[str, object] = {"RecoveryGateError": RuntimeError}
+    exec(compile(ast.Module(body=selected_nodes, type_ignores=[]), "<recovery>", "exec"), namespace)
+    expected_relations = namespace["expected_relations"]
+    assert callable(expected_relations)
+
+    attention_tables = {
+        ("public", "proactive_attention_deliveries"),
+        ("public", "proactive_attention_preferences"),
+    }
+    revision_0030 = set(expected_relations("20260817_0030"))
+    revision_0031 = set(expected_relations("20260817_0031"))
+    revision_0032 = set(expected_relations("20260817_0032"))
+
+    assert revision_0030 == revision_0031
+    assert revision_0030.isdisjoint(attention_tables)
+    assert attention_tables <= revision_0032
+    assert revision_0032 - revision_0031 == attention_tables
 
 
 def test_railway_waiter_requires_success_and_fails_closed():

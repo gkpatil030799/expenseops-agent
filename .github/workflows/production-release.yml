@@ -549,6 +549,12 @@ jobs:
                   "proactive_attention_preferences",
               }
           )
+          PROACTIVE_ATTENTION_TABLES = frozenset(
+              {
+                  "proactive_attention_deliveries",
+                  "proactive_attention_preferences",
+              }
+          )
           PRE_AGENT_REVISIONS = frozenset(
               {
                   "20260813_0023",
@@ -563,8 +569,10 @@ jobs:
                   "20260815_0028",
                   "20260815_0029",
                   "20260817_0030",
+                  "20260817_0031",
               }
           )
+          CURRENT_REVISIONS = frozenset({"20260817_0032"})
 
 
           def sha256_file(path: Path) -> str:
@@ -590,6 +598,8 @@ jobs:
               if revision in PRE_AGENT_REVISIONS:
                   tables = APPLICATION_TABLES - AGENT_TABLES
               elif revision in AGENT_REVISIONS:
+                  tables = APPLICATION_TABLES - PROACTIVE_ATTENTION_TABLES
+              elif revision in CURRENT_REVISIONS:
                   tables = APPLICATION_TABLES
               else:
                   raise RecoveryGateError(
