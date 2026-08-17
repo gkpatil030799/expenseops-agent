@@ -65,6 +65,13 @@ class SpendingInsightsInput(ReadToolModel):
         max_length=3,
         pattern=r"^[A-Za-z]{3}$",
     )
+    comparison_mode: Literal["same_weekdays_last_week"] | None = Field(
+        default=None,
+        description=(
+            "Server-owned weekly comparison scope. Use null; ExpenseOps may set the closed "
+            "same-weekdays-last-week mode for an exact supported comparison request."
+        ),
+    )
 
     @model_validator(mode="after")
     def validate_range(self) -> SpendingInsightsInput:
@@ -77,22 +84,24 @@ class SpendingInsightsInput(ReadToolModel):
 
 
 class SpendingAggregate(ReadToolModel):
-    total_cents: int
-    personal_cents: int
-    shared_cents: int
-    classified_cents: int
-    unreviewed_cents: int
-    refund_cents: int
+    total_cents: int = Field(ge=0)
+    personal_cents: int = Field(ge=0)
+    shared_cents: int = Field(ge=0)
+    classified_cents: int = Field(ge=0)
+    unreviewed_cents: int = Field(ge=0)
+    credits_cents: int = Field(ge=0)
+    unknown_share_transactions: int = Field(ge=0)
+    unknown_credit_share_transactions: int = Field(ge=0)
     transaction_count: int = Field(ge=0)
-    average_cents: int
+    average_cents: int = Field(ge=0)
 
 
 class SpendingBreakdownItem(ReadToolModel):
     name: str = Field(min_length=1, max_length=255)
-    amount_cents: int
+    amount_cents: int = Field(ge=0)
     transaction_count: int = Field(ge=0)
     percentage: float = Field(ge=0, le=100)
-    previous_amount_cents: int | None = None
+    previous_amount_cents: int | None = Field(default=None, ge=0)
 
 
 class SpendingChange(ReadToolModel):
@@ -110,6 +119,7 @@ class SpendingInsightsOutput(ReadToolModel):
     previous_end_date: str = Field(pattern=r"^\d{4}-\d{2}-\d{2}$")
     currency_code: str = Field(min_length=3, max_length=8, pattern=r"^[A-Z]{3,8}$")
     spend_basis: Literal["card", "actual_share"]
+    comparison_mode: Literal["immediately_preceding", "same_weekdays_last_week"]
     summary: SpendingAggregate
     comparison: SpendingAggregate
     categories: list[SpendingBreakdownItem] = Field(max_length=MAX_SPENDING_BREAKDOWN_ITEMS)
@@ -118,6 +128,17 @@ class SpendingInsightsOutput(ReadToolModel):
     available_currencies: list[str] = Field(max_length=MAX_AVAILABLE_CURRENCIES)
     excluded_other_currency_transactions: int = Field(ge=0)
     pending_transactions_excluded: bool
+
+    @model_validator(mode="after")
+    def validate_credit_share_quality(self) -> SpendingInsightsOutput:
+        if self.spend_basis == "card" and (
+            self.summary.unknown_share_transactions
+            or self.comparison.unknown_share_transactions
+            or self.summary.unknown_credit_share_transactions
+            or self.comparison.unknown_credit_share_transactions
+        ):
+            raise ValueError("card-basis amounts cannot have unknown share allocations")
+        return self
 
 
 class TransactionSearchInput(ReadToolModel):
@@ -192,14 +213,15 @@ def build_read_tool_registry(settings: Settings) -> AgentToolRegistry:
         AgentTool(
             name="get_spending_insights",
             description=(
-                "Return canonical ExpenseOps spending totals, comparable-period totals, top "
-                "categories, top merchants, and deterministic notable changes for an explicit "
-                "date range."
+                "Return canonical ExpenseOps eligible purchase-spend totals with credits "
+                "reported separately, comparable-period totals, top categories, top merchants, "
+                "and deterministic notable changes for an explicit date range."
             ),
             effect=ToolEffect.READ,
             input_model=SpendingInsightsInput,
             output_model=SpendingInsightsOutput,
             handler=_get_spending_insights,
+            version="1.2",
         )
     )
     registry.register(
@@ -236,6 +258,7 @@ def _get_spending_insights(
         review_type=values.review_type or "all",
         spend_basis=values.spend_basis or "card",
         currency_code=values.currency_code,
+        comparison_mode=values.comparison_mode or "immediately_preceding",
     )
     scope = result["scope"]
     range_value = result["range"]
@@ -246,6 +269,7 @@ def _get_spending_insights(
         "previous_end_date": range_value["previous_end_date"],
         "currency_code": scope["currency"],
         "spend_basis": scope["spend_basis"],
+        "comparison_mode": range_value["comparison_mode"],
         "summary": result["summary"],
         "comparison": result["comparison"],
         "categories": result["category_breakdown"][:MAX_SPENDING_BREAKDOWN_ITEMS],

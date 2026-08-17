@@ -9,7 +9,7 @@ import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from contextlib import suppress
 from dataclasses import dataclass
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from decimal import ROUND_HALF_UP, Decimal
 from typing import Any, Literal, Protocol
 
@@ -75,6 +75,7 @@ from app.agent.contracts import (
     AgentTransactionSummary,
     AgentTurnOut,
     StrictAgentModel,
+    hydrate_persisted_agent_response,
 )
 from app.agent.read_tools import build_read_tool_registry
 from app.agent.service import (
@@ -128,6 +129,7 @@ MAX_AGENT_HISTORY_MESSAGES = 12
 MAX_AGENT_HISTORY_CHARS = 12_000
 MAX_AGENT_HISTORY_MESSAGE_CHARS = 2_000
 MAX_TOOL_SECONDS = 12
+NEAR_ZERO_SPENDING_COMPARISON_CENTS = 5_000
 MAX_TRANSACTION_ENTITY_ID = 2_147_483_647
 MAX_MULTI_EVIDENCE_BLOCKS = 12
 MAX_MULTI_TRANSACTION_ROWS = 8
@@ -530,10 +532,16 @@ class ReadToolExecutor:
         sequence = self.call_count
         self.call_count += 1
         forced_arguments = self.forced_arguments_by_tool.get(tool_name)
+        provider_arguments = dict(arguments)
+        if tool_name == "get_spending_insights" and forced_arguments is None:
+            # comparison_mode is a server-owned semantic override. The provider
+            # schema carries the nullable field so forced calls validate through
+            # the same registry, but ordinary model calls cannot activate it.
+            provider_arguments["comparison_mode"] = None
         effective_arguments = (
             dict(forced_arguments)
             if forced_arguments is not None
-            else self.contextual_policy.apply(tool_name, arguments)
+            else self.contextual_policy.apply(tool_name, provider_arguments)
         )
         started = time.monotonic()
         await _emit_progress_safely(
@@ -1135,6 +1143,19 @@ class ReadOnlyAgentOrchestrator:
                     "invalid_tool_context",
                     "The authenticated workspace context is unavailable.",
                 )
+            current_date = self._now().astimezone(UTC).date()
+            forced_arguments_by_tool = dict(_explicit_forced_tool_plan(text))
+            for tool_name, arguments in _explicit_week_comparison_tool_plan(
+                text,
+                current_date=current_date,
+            ):
+                # The code-owned date/mode selectors outrank page dates, while
+                # validated page category/account/review/basis filters still fill
+                # missing selectors through the normal contextual precedence rule.
+                forced_arguments_by_tool[tool_name] = contextual_policy.apply(
+                    tool_name,
+                    arguments,
+                )
             executor = ReadToolExecutor(
                 registry=self.registry,
                 settings=self.settings,
@@ -1145,13 +1166,13 @@ class ReadOnlyAgentOrchestrator:
                 owner_user_id=owner_user_id,
                 progress=progress,
                 contextual_policy=contextual_policy,
-                forced_arguments_by_tool=dict(_explicit_forced_tool_plan(text)),
+                forced_arguments_by_tool=forced_arguments_by_tool,
             )
             runtime = self.runtime or OpenAIAgentsRuntime(self.settings)
             request = RuntimeRequest(
                 history=_bounded_history(history),
                 page_context=page_context,
-                current_date=self._now().astimezone(UTC).date(),
+                current_date=current_date,
                 exposed_tool_names=_sdk_tool_exposure(text, page_context),
             )
             # The request session has completed its pre-provider reads. End that
@@ -1162,6 +1183,11 @@ class ReadOnlyAgentOrchestrator:
             self.db.rollback()
             async with asyncio.timeout(MAX_AGENT_RUN_SECONDS):
                 runtime_result = await runtime.run(request, executor=executor)
+                await _ensure_explicit_week_comparison_evidence(
+                    text,
+                    current_date=request.current_date,
+                    executor=executor,
+                )
                 await _ensure_explicit_attention_evidence(text, executor)
                 await _ensure_explicit_household_deal_evidence(text, executor)
                 await _ensure_explicit_pair_evidence(text, executor)
@@ -1713,6 +1739,9 @@ def _sdk_tool_exposure(
     requested, so the SDK cannot select that tool for the turn.
     """
 
+    if _is_explicit_week_comparison_query(user_text):
+        return frozenset({"get_spending_insights"})
+
     attention_plan = _explicit_attention_tool_plan(user_text)
     if attention_plan:
         return frozenset(tool_name for tool_name, _arguments in attention_plan)
@@ -1837,6 +1866,45 @@ def _explicit_due_household_deal_tool_plan(
     )
 
 
+_EXPLICIT_WEEK_COMPARISON_PATTERNS = (
+    r"are\s+my\s+spendings?\s+increased\s+compared\s+to\s+last\s+week",
+    r"did\s+i\s+spend\s+more\s+this\s+week\s+than\s+last\s+week",
+    r"has\s+my\s+spending\s+increased\s+compared\s+with\s+last\s+week",
+    r"how\s+does\s+this\s+week['’]s\s+spending\s+compare\s+to\s+last\s+week",
+    r"am\s+i\s+spending\s+more\s+this\s+week",
+    r"compare\s+my\s+spending\s+with\s+last\s+week",
+)
+
+
+def _is_explicit_week_comparison_query(user_text: str) -> bool:
+    """Recognize only the six closed beta weekly-comparison phrasings."""
+
+    return any(
+        re.fullmatch(rf"\s*{pattern}\s*[?.!]*\s*", user_text, re.IGNORECASE) is not None
+        for pattern in _EXPLICIT_WEEK_COMPARISON_PATTERNS
+    )
+
+
+def _explicit_week_comparison_tool_plan(
+    user_text: str,
+    *,
+    current_date: date,
+) -> tuple[tuple[str, dict[str, Any]], ...]:
+    if not _is_explicit_week_comparison_query(user_text):
+        return ()
+    current_start = current_date - timedelta(days=current_date.weekday())
+    return (
+        (
+            "get_spending_insights",
+            {
+                "start_date": current_start.isoformat(),
+                "end_date": current_date.isoformat(),
+                "comparison_mode": "same_weekdays_last_week",
+            },
+        ),
+    )
+
+
 def _is_explicit_household_deal_pair_query(user_text: str) -> bool:
     """Recognize a positive request for both household and deal evidence.
 
@@ -1950,6 +2018,29 @@ async def _ensure_explicit_attention_evidence(
             if not exc.partial_recoverable:
                 raise
         terminal.add(tool_name)
+
+
+async def _ensure_explicit_week_comparison_evidence(
+    user_text: str,
+    *,
+    current_date: date,
+    executor: ReadToolExecutor,
+) -> None:
+    """Backfill the one closed weekly spending read without duplicating a terminal call."""
+
+    plan = _explicit_week_comparison_tool_plan(user_text, current_date=current_date)
+    if not plan:
+        return
+    bundle = build_run_evidence_bundle(executor.evidence, executor.failures)
+    terminal = {item.tool_name for item in (*bundle.evidence_sets, *bundle.failures)}
+    tool_name, arguments = plan[0]
+    if tool_name in terminal:
+        return
+    try:
+        await executor.invoke(tool_name, arguments)
+    except AgentRuntimeError as exc:
+        if not exc.partial_recoverable:
+            raise
 
 
 async def _ensure_explicit_household_deal_evidence(
@@ -2281,8 +2372,9 @@ def _bounded_history(messages: Sequence[AgentMessage]) -> tuple[RuntimeHistoryMe
         if message.role == "user":
             content = message.content or ""
         elif message.role == "assistant" and message.structured_response_json:
+            persisted_response = hydrate_persisted_agent_response(message.structured_response_json)
             content = json.dumps(
-                message.structured_response_json,
+                persisted_response.model_dump(mode="json"),
                 sort_keys=True,
                 separators=(",", ":"),
                 ensure_ascii=False,
@@ -2859,14 +2951,9 @@ def _spending_transaction_text(bundle: RunEvidenceBundle) -> str:
     transactions = bundle.latest("search_transactions")
     assert spending is not None and transactions is not None
     output = spending.output
-    currency = output["currency_code"]
-    total = int(output["summary"]["total_cents"])
-    previous = int(output["comparison"]["total_cents"])
     transaction_count = int(transactions.output.get("total_count") or 0)
-    text = (
-        f"Canonical spend was {_money(currency, total)}, compared with "
-        f"{_money(currency, previous)} in the comparable period. "
-    )
+    text, _change_percent = _spending_comparison_text(output)
+    text += " "
     if _transaction_scope_supports_spending(spending, transactions):
         return (
             text
@@ -3083,23 +3170,53 @@ def _spending_response(output: dict[str, Any]) -> AgentStructuredResponse:
     currency = output["currency_code"]
     total = int(summary["total_cents"])
     previous = int(comparison["total_cents"])
+    credits = int(summary["credits_cents"])
+    previous_credits = int(comparison["credits_cents"])
+    unknown_shares = int(summary["unknown_share_transactions"])
+    previous_unknown_shares = int(comparison["unknown_share_transactions"])
+    unknown_credit_shares = int(summary["unknown_credit_share_transactions"])
+    previous_unknown_credit_shares = int(comparison["unknown_credit_share_transactions"])
+    spend_basis = str(output["spend_basis"])
+    credits_label = "Card credits" if spend_basis == "card" else "Attributable credits"
     start = date.fromisoformat(output["start_date"])
     end = date.fromisoformat(output["end_date"])
     highlights = [
         f"Personal: {_money(currency, int(summary['personal_cents']))}",
         f"Shared: {_money(currency, int(summary['shared_cents']))}",
         f"Unreviewed: {_money(currency, int(summary['unreviewed_cents']))}",
+        f"{credits_label}: {_money(currency, credits)}",
     ]
+    if unknown_shares:
+        highlights.append(
+            f"{unknown_shares} shared purchase "
+            f"{'was' if unknown_shares == 1 else 'were'} excluded because the viewer's "
+            "actual share is unknown."
+        )
+    if previous_unknown_shares:
+        highlights.append(
+            f"{previous_unknown_shares} shared purchase "
+            f"{'was' if previous_unknown_shares == 1 else 'were'} excluded from the previous "
+            "period because the viewer's actual share is unknown."
+        )
+    if unknown_credit_shares:
+        highlights.append(
+            f"{unknown_credit_shares} shared credit "
+            f"{'was' if unknown_credit_shares == 1 else 'were'} excluded because its "
+            "actual-share allocation is unknown."
+        )
+    if previous_unknown_credit_shares:
+        highlights.append(
+            f"{previous_unknown_credit_shares} shared credit "
+            f"{'was' if previous_unknown_credit_shares == 1 else 'were'} excluded from the "
+            "previous period because its actual-share allocation is unknown."
+        )
     changes = output.get("notable_changes")
-    if isinstance(changes, list):
+    if isinstance(changes, list) and not (unknown_shares or previous_unknown_shares):
         for change in changes[:4]:
             detail = change.get("detail") if isinstance(change, dict) else None
             if isinstance(detail, str) and detail.strip():
                 highlights.append(detail[:500])
-    text = (
-        f"Total spend was {_money(currency, total)} from {start.isoformat()} to "
-        f"{end.isoformat()}. The prior comparable period was {_money(currency, previous)}."
-    )
+    text, change_percent = _spending_comparison_text(output)
     top_categories = [
         AgentSpendingBreakdownItem.model_validate(item)
         for item in output.get("categories", [])[:10]
@@ -3115,14 +3232,61 @@ def _spending_response(output: dict[str, Any]) -> AgentStructuredResponse:
                 start_date=start,
                 end_date=end,
                 currency_code=currency,
+                spend_basis=spend_basis,
                 total_cents=total,
                 previous_total_cents=previous,
-                change_percent=None,
+                credits_cents=credits,
+                previous_credits_cents=previous_credits,
+                unknown_share_transactions=unknown_shares,
+                previous_unknown_share_transactions=previous_unknown_shares,
+                unknown_credit_share_transactions=unknown_credit_shares,
+                previous_unknown_credit_share_transactions=previous_unknown_credit_shares,
+                change_percent=change_percent,
                 highlights=highlights[:10],
                 top_categories=top_categories,
                 top_merchants=top_merchants,
             ),
         ]
+    )
+
+
+def _spending_comparison_text(output: dict[str, Any]) -> tuple[str, float | None]:
+    currency = str(output["currency_code"])
+    total = int(output["summary"]["total_cents"])
+    previous = int(output["comparison"]["total_cents"])
+    start = date.fromisoformat(output["start_date"])
+    end = date.fromisoformat(output["end_date"])
+    previous_start = date.fromisoformat(output["previous_start_date"])
+    previous_end = date.fromisoformat(output["previous_end_date"])
+    spend_basis = str(output["spend_basis"])
+    basis_label = "Card spend" if spend_basis == "card" else "My actual share"
+    delta = total - previous
+    incomplete_actual_share = bool(
+        int(output["summary"]["unknown_share_transactions"])
+        or int(output["comparison"]["unknown_share_transactions"])
+    )
+    change_percent = (
+        round(delta / previous * 100, 1)
+        if previous >= NEAR_ZERO_SPENDING_COMPARISON_CENTS and not incomplete_actual_share
+        else None
+    )
+    direction_subject = (
+        "Within confirmed actual-share data, spending" if incomplete_actual_share else "Spending"
+    )
+    if delta > 0:
+        direction = f"{direction_subject} increased by {_money(currency, abs(delta))}"
+    elif delta < 0:
+        direction = f"{direction_subject} decreased by {_money(currency, abs(delta))}"
+    else:
+        direction = f"{direction_subject} did not change"
+    if change_percent is not None and delta:
+        direction += f" ({change_percent:+.1f}%)"
+    return (
+        f"{basis_label} for eligible purchases from {start.isoformat()} to {end.isoformat()} was "
+        f"{_money(currency, total)}. The comparable period from "
+        f"{previous_start.isoformat()} to {previous_end.isoformat()} was "
+        f"{_money(currency, previous)}. {direction}.",
+        change_percent,
     )
 
 
@@ -3623,7 +3787,7 @@ def _message_out(
     feedback_state: AgentMessageFeedbackState | None = None,
 ) -> AgentMessageOut:
     structured = (
-        AgentStructuredResponse.model_validate(value.structured_response_json)
+        hydrate_persisted_agent_response(value.structured_response_json)
         if value.structured_response_json
         else None
     )

@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from datetime import date, datetime
 from enum import StrEnum
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -189,10 +190,10 @@ class AgentTransactionListBlock(AgentResponseBlockBase):
 
 class AgentSpendingBreakdownItem(StrictAgentModel):
     name: str = Field(min_length=1, max_length=255)
-    amount_cents: int
+    amount_cents: int = Field(ge=0)
     transaction_count: int = Field(ge=0)
     percentage: float = Field(ge=0, le=100)
-    previous_amount_cents: int | None = None
+    previous_amount_cents: int | None = Field(default=None, ge=0)
 
 
 class AgentSpendingSummaryBlock(AgentResponseBlockBase):
@@ -201,8 +202,15 @@ class AgentSpendingSummaryBlock(AgentResponseBlockBase):
     start_date: date
     end_date: date
     currency_code: str = Field(min_length=3, max_length=8, pattern=r"^[A-Za-z]{3,8}$")
-    total_cents: int
-    previous_total_cents: int | None = None
+    spend_basis: Literal["card", "actual_share"]
+    total_cents: int = Field(ge=0)
+    previous_total_cents: int | None = Field(default=None, ge=0)
+    credits_cents: int = Field(ge=0)
+    previous_credits_cents: int = Field(ge=0)
+    unknown_share_transactions: int = Field(ge=0)
+    previous_unknown_share_transactions: int = Field(ge=0)
+    unknown_credit_share_transactions: int = Field(ge=0)
+    previous_unknown_credit_share_transactions: int = Field(ge=0)
     change_percent: float | None = None
     highlights: list[str] = Field(default_factory=list, max_length=10)
     top_categories: list[AgentSpendingBreakdownItem] = Field(default_factory=list, max_length=10)
@@ -212,6 +220,17 @@ class AgentSpendingSummaryBlock(AgentResponseBlockBase):
     def validate_date_range(self) -> AgentSpendingSummaryBlock:
         if self.start_date > self.end_date:
             raise ValueError("start_date must not be after end_date")
+        if self.spend_basis == "card" and (
+            self.unknown_share_transactions
+            or self.previous_unknown_share_transactions
+            or self.unknown_credit_share_transactions
+            or self.previous_unknown_credit_share_transactions
+        ):
+            raise ValueError("card-basis amounts cannot have unknown share allocations")
+        if (
+            self.unknown_share_transactions or self.previous_unknown_share_transactions
+        ) and self.change_percent is not None:
+            raise ValueError("incomplete actual-share comparisons cannot include a percentage")
         return self
 
 
@@ -575,6 +594,60 @@ AgentResponseBlock = Annotated[
 class AgentStructuredResponse(StrictAgentModel):
     schema_version: Literal["1.0"] = AGENT_CONTRACT_VERSION
     blocks: list[AgentResponseBlock] = Field(min_length=1, max_length=50)
+
+
+def hydrate_persisted_agent_response(
+    value: Mapping[str, Any],
+) -> AgentStructuredResponse:
+    """Hydrate saved responses without reviving retired net-spend semantics."""
+
+    if _contains_retired_spending_response(value):
+        return AgentStructuredResponse(
+            blocks=[
+                AgentTextBlock(
+                    text=(
+                        "This saved spending answer used retired net-spend semantics and is not "
+                        "shown as current financial truth."
+                    )
+                ),
+                AgentEmptyStateBlock(
+                    title="Recalculate this spending answer",
+                    message=(
+                        "Ask the question again to calculate eligible purchase spending with "
+                        "credits reported separately."
+                    ),
+                    suggested_navigation=None,
+                ),
+            ]
+        )
+    return AgentStructuredResponse.model_validate(value)
+
+
+def _contains_retired_spending_response(value: Mapping[str, Any]) -> bool:
+    blocks = value.get("blocks")
+    if not isinstance(blocks, list):
+        return False
+    for block in blocks:
+        if not isinstance(block, Mapping) or block.get("type") != "spending_summary":
+            continue
+        if "credits_cents" not in block:
+            return True
+        for name in ("total_cents", "previous_total_cents"):
+            amount = block.get(name)
+            if isinstance(amount, int) and not isinstance(amount, bool) and amount < 0:
+                return True
+        for collection_name in ("top_categories", "top_merchants"):
+            collection = block.get(collection_name)
+            if not isinstance(collection, list):
+                continue
+            for item in collection:
+                if not isinstance(item, Mapping):
+                    continue
+                for name in ("amount_cents", "previous_amount_cents"):
+                    amount = item.get(name)
+                    if isinstance(amount, int) and not isinstance(amount, bool) and amount < 0:
+                        return True
+    return False
 
 
 class AgentConversationOut(StrictAgentModel):

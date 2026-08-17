@@ -28,8 +28,15 @@ function supportedResponse() {
         start_date: "2026-07-01",
         end_date: "2026-07-31",
         currency_code: "USD",
+        spend_basis: "card",
         total_cents: 41_200,
         previous_total_cents: 32_600,
+        credits_cents: 8_000,
+        previous_credits_cents: 1_000,
+        unknown_share_transactions: 0,
+        previous_unknown_share_transactions: 0,
+        unknown_credit_share_transactions: 0,
+        previous_unknown_credit_share_transactions: 0,
         change_percent: 26.4,
         highlights: ["Personal: $250.00", "Shared: $162.00"],
         top_categories: [
@@ -296,6 +303,112 @@ describe("Agent structured-response validation", () => {
       "error",
       "empty",
     ]);
+  });
+
+  it.each([
+    "total_cents",
+    "previous_total_cents",
+    "credits_cents",
+    "previous_credits_cents",
+    "unknown_share_transactions",
+    "previous_unknown_share_transactions",
+    "unknown_credit_share_transactions",
+    "previous_unknown_credit_share_transactions",
+  ])(
+    "rejects a negative spending-summary %s",
+    (field) => {
+      const response = structuredClone(supportedResponse()) as {
+        blocks: Record<string, unknown>[];
+      };
+      response.blocks[1][field] = -1;
+
+      expect(() => parseAgentStructuredResponse(response)).toThrow(AgentProtocolError);
+    },
+  );
+
+  it.each(["amount_cents", "previous_amount_cents"])(
+    "rejects a negative spending-breakdown %s",
+    (field) => {
+      const response = structuredClone(supportedResponse()) as {
+        blocks: Record<string, unknown>[];
+      };
+      const categories = response.blocks[1].top_categories;
+      if (!Array.isArray(categories)) throw new Error("spending categories fixture is missing");
+      (categories[0] as Record<string, unknown>)[field] = -1;
+
+      expect(() => parseAgentStructuredResponse(response)).toThrow(AgentProtocolError);
+    },
+  );
+
+  it("requires the explicit positive-magnitude credits field on new spending summaries", () => {
+    const response = structuredClone(supportedResponse()) as {
+      blocks: Record<string, unknown>[];
+    };
+    delete response.blocks[1].credits_cents;
+
+    expect(() => parseAgentStructuredResponse(response)).toThrow(AgentProtocolError);
+  });
+
+  it("accepts actual-share spending with explicit current and prior unknown-credit counts", () => {
+    const response = structuredClone(supportedResponse()) as {
+      blocks: Record<string, unknown>[];
+    };
+    response.blocks[1].spend_basis = "actual_share";
+    response.blocks[1].unknown_share_transactions = 0;
+    response.blocks[1].previous_unknown_share_transactions = 3;
+    response.blocks[1].unknown_credit_share_transactions = 1;
+    response.blocks[1].previous_unknown_credit_share_transactions = 2;
+    response.blocks[1].change_percent = null;
+
+    expect(parseAgentStructuredResponse(response)).toBe(response);
+  });
+
+  it.each([undefined, "net"])("rejects spending summaries with spend_basis %s", (spendBasis) => {
+    const response = structuredClone(supportedResponse()) as {
+      blocks: Record<string, unknown>[];
+    };
+    response.blocks[1].spend_basis = spendBasis;
+
+    expect(() => parseAgentStructuredResponse(response)).toThrow(AgentProtocolError);
+  });
+
+  it("rejects unknown shared-credit counts on card-basis summaries", () => {
+    const response = structuredClone(supportedResponse()) as {
+      blocks: Record<string, unknown>[];
+    };
+    response.blocks[1].unknown_credit_share_transactions = 1;
+
+    expect(() => parseAgentStructuredResponse(response)).toThrow(AgentProtocolError);
+  });
+
+  it("rejects an exact percentage when an actual-share comparison omits purchases", () => {
+    const response = structuredClone(supportedResponse()) as {
+      blocks: Record<string, unknown>[];
+    };
+    response.blocks[1].spend_basis = "actual_share";
+    response.blocks[1].previous_unknown_share_transactions = 1;
+
+    expect(() => parseAgentStructuredResponse(response)).toThrow(AgentProtocolError);
+  });
+
+  it("accepts the server-adapted historical spending response without old financial values", () => {
+    const response = {
+      schema_version: "1.0",
+      blocks: [
+        {
+          type: "text",
+          text: "This saved spending answer used retired net-spend semantics and is not shown as current financial truth.",
+        },
+        {
+          type: "empty",
+          title: "Recalculate this spending answer",
+          message: "Ask the question again to calculate eligible purchase spending with credits reported separately.",
+          suggested_navigation: null,
+        },
+      ],
+    };
+
+    expect(parseAgentStructuredResponse(response)).toBe(response);
   });
 
   it("accepts original v1 domain bounds and a legacy integration without scope", () => {

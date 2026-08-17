@@ -39,12 +39,27 @@ describe("insights visualization rules", () => {
     ]);
   });
 
-  it("uses magnitude when refunds make a category negative", () => {
+  it("groups only the non-negative purchase-spend category series", () => {
     const grouped = groupSmallCategories([
       { name: "Food & Dining", amount_cents: 10_000 },
-      { name: "Health", amount_cents: -4_000 },
+      { name: "Health", amount_cents: 4_000 },
       { name: "Travel", amount_cents: 100 },
     ]);
     expect(grouped.map((item) => item.name)).toContain("Health");
+    expect(grouped.reduce((total, item) => total + item.amount_cents, 0)).toBe(14_100);
+  });
+
+  it("keeps Uncategorized visible while folding only genuinely small categories", () => {
+    const grouped = groupSmallCategories([
+      { name: "Food & Dining", amount_cents: 30_000 },
+      { name: "Uncategorized", amount_cents: 19_000 },
+      { name: "Travel", amount_cents: 1_000 },
+    ]);
+
+    expect(grouped).toEqual([
+      { name: "Food & Dining", amount_cents: 30_000 },
+      { name: "Uncategorized", amount_cents: 19_000 },
+      { name: "Other", amount_cents: 1_000 },
+    ]);
   });
 });

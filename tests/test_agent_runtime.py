@@ -143,6 +143,39 @@ def test_feedback_metadata_never_enters_provider_conversation_history():
     assert "private-run-reference" not in history[0].content
 
 
+def test_retired_net_spending_response_never_enters_provider_history_or_mutates_saved_json():
+    saved = {
+        "schema_version": "1.0",
+        "blocks": [
+            {"type": "text", "text": "Old net answer: USD 90.00 at Private Merchant."},
+            {
+                "type": "spending_summary",
+                "title": "Old spending",
+                "start_date": "2026-08-01",
+                "end_date": "2026-08-14",
+                "currency_code": "USD",
+                "total_cents": 9_000,
+            },
+        ],
+    }
+    message = AgentMessage(
+        workspace_id=1,
+        conversation_id=1,
+        owner_user_id=1,
+        role="assistant",
+        status="completed",
+        structured_response_json=saved,
+    )
+
+    history = runtime_module._bounded_history([message])
+
+    assert len(history) == 1
+    assert "retired net-spend semantics" in history[0].content
+    assert "Private Merchant" not in history[0].content
+    assert "9000" not in history[0].content
+    assert message.structured_response_json == saved
+
+
 @pytest.mark.parametrize(
     ("provider_error", "expected_code"),
     [
@@ -452,6 +485,166 @@ def _blocks(turn, block_type: type[Any]) -> list[Any]:
     return [block for block in response.blocks if isinstance(block, block_type)]
 
 
+def _spending_output(
+    *,
+    total_cents: int,
+    previous_total_cents: int,
+    spend_basis: str = "card",
+    credits_cents: int = 0,
+    previous_credits_cents: int = 0,
+    unknown_share_transactions: int = 0,
+    previous_unknown_share_transactions: int = 0,
+    unknown_credit_share_transactions: int = 0,
+    previous_unknown_credit_share_transactions: int = 0,
+) -> dict[str, Any]:
+    def aggregate(
+        total: int,
+        credits: int,
+        unknown_shares: int,
+        unknown_credits: int,
+    ) -> dict[str, int]:
+        return {
+            "total_cents": total,
+            "personal_cents": total,
+            "shared_cents": 0,
+            "classified_cents": total,
+            "unreviewed_cents": 0,
+            "credits_cents": credits,
+            "unknown_share_transactions": unknown_shares,
+            "unknown_credit_share_transactions": unknown_credits,
+            "transaction_count": int(total > 0),
+            "average_cents": total,
+        }
+
+    return {
+        "start_date": "2026-08-10",
+        "end_date": "2026-08-16",
+        "previous_start_date": "2026-08-03",
+        "previous_end_date": "2026-08-09",
+        "currency_code": "USD",
+        "spend_basis": spend_basis,
+        "comparison_mode": "immediately_preceding",
+        "summary": aggregate(
+            total_cents,
+            credits_cents,
+            unknown_share_transactions,
+            unknown_credit_share_transactions,
+        ),
+        "comparison": aggregate(
+            previous_total_cents,
+            previous_credits_cents,
+            previous_unknown_share_transactions,
+            previous_unknown_credit_share_transactions,
+        ),
+        "categories": [],
+        "merchants": [],
+        "notable_changes": [],
+    }
+
+
+@pytest.mark.parametrize(
+    ("total", "previous", "expected_copy", "expected_percent"),
+    [
+        (12_000, 10_000, "Spending increased by USD 20.00 (+20.0%).", 20.0),
+        (8_000, 10_000, "Spending decreased by USD 20.00 (-20.0%).", -20.0),
+        (0, 10_000, "Spending decreased by USD 100.00 (-100.0%).", -100.0),
+        (10_000, 10_000, "Spending did not change.", 0.0),
+    ],
+)
+def test_spending_comparison_copy_uses_ranges_direction_and_unsigned_delta(
+    total,
+    previous,
+    expected_copy,
+    expected_percent,
+):
+    response = runtime_module._spending_response(
+        _spending_output(total_cents=total, previous_total_cents=previous)
+    )
+    text = next(block for block in response.blocks if isinstance(block, AgentTextBlock))
+    summary = next(
+        block for block in response.blocks if isinstance(block, AgentSpendingSummaryBlock)
+    )
+
+    assert "Card spend for eligible purchases from 2026-08-10 to 2026-08-16" in text.text
+    assert "comparable period from 2026-08-03 to 2026-08-09" in text.text
+    assert expected_copy in text.text
+    assert summary.change_percent == expected_percent
+    assert summary.total_cents >= 0
+    assert summary.previous_total_cents is not None
+    assert summary.previous_total_cents >= 0
+
+
+def test_spending_comparison_suppresses_percentage_for_near_zero_prior_period():
+    response = runtime_module._spending_response(
+        _spending_output(total_cents=10_000, previous_total_cents=4_999)
+    )
+    text = next(block for block in response.blocks if isinstance(block, AgentTextBlock))
+    summary = next(
+        block for block in response.blocks if isinstance(block, AgentSpendingSummaryBlock)
+    )
+
+    assert "Spending increased by USD 50.01." in text.text
+    assert "%" not in text.text
+    assert summary.change_percent is None
+
+
+@pytest.mark.parametrize(
+    ("spend_basis", "basis_copy", "credits_copy"),
+    [
+        ("card", "Card spend", "Card credits: USD 5.00"),
+        ("actual_share", "My actual share", "Attributable credits: USD 5.00"),
+    ],
+)
+def test_spending_response_preserves_and_labels_basis(spend_basis, basis_copy, credits_copy):
+    response = runtime_module._spending_response(
+        _spending_output(
+            total_cents=10_000,
+            previous_total_cents=9_000,
+            spend_basis=spend_basis,
+            credits_cents=500,
+        )
+    )
+    text = next(block for block in response.blocks if isinstance(block, AgentTextBlock))
+    summary = next(
+        block for block in response.blocks if isinstance(block, AgentSpendingSummaryBlock)
+    )
+
+    assert basis_copy in text.text
+    assert credits_copy in summary.highlights
+    assert summary.spend_basis == spend_basis
+    assert summary.title == "Spending summary"
+
+
+def test_actual_share_comparison_is_qualified_when_prior_purchase_share_is_unknown():
+    output = _spending_output(
+        total_cents=10_000,
+        previous_total_cents=0,
+        spend_basis="actual_share",
+        previous_unknown_share_transactions=1,
+    )
+    output["notable_changes"] = [
+        {
+            "kind": "category",
+            "direction": "up",
+            "label": "Food & Dining",
+            "amount_cents": 10_000,
+            "detail": "+USD 100 vs previous period",
+        }
+    ]
+    response = runtime_module._spending_response(output)
+    text = next(block for block in response.blocks if isinstance(block, AgentTextBlock))
+    summary = next(
+        block for block in response.blocks if isinstance(block, AgentSpendingSummaryBlock)
+    )
+
+    assert "Within confirmed actual-share data, spending increased by USD 100.00" in text.text
+    assert "%" not in text.text
+    assert summary.change_percent is None
+    assert summary.previous_unknown_share_transactions == 1
+    assert any("excluded from the previous period" in item for item in summary.highlights)
+    assert not any("vs previous period" in item for item in summary.highlights)
+
+
 @pytest.mark.parametrize(
     ("provider_error", "expected_code"),
     [
@@ -580,6 +773,286 @@ def test_spending_request_uses_canonical_tool_numbers_not_model_numbers(agent_ru
             ("get_spending_insights", "completed")
         ]
         assert calls[0].result_metadata_json["output_schema_validated"] is True
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "are my spendings increased compared to last week ?",
+        "Did I spend more this week than last week?",
+        "Has my spending increased compared with last week?",
+        "How does this week's spending compare to last week?",
+        "Am I spending more this week?",
+        "compare my spending with last week",
+    ],
+)
+def test_day75_exact_week_comparison_queries_use_pinned_purchase_spend_evidence(
+    agent_runtime_db,
+    query,
+):
+    async def compare(request: RuntimeRequest, executor: ReadToolExecutor) -> RuntimeResult:
+        assert request.current_date == date(2026, 8, 16)
+        assert request.exposed_tool_names == frozenset({"get_spending_insights"})
+        await executor.invoke(
+            "get_spending_insights",
+            {
+                "start_date": "2026-08-03",
+                "end_date": "2026-08-09",
+                "merchant": "Provider-invented scope",
+                "spend_basis": "actual_share",
+            },
+        )
+        assert executor.evidence[-1].output["summary"]["total_cents"] >= 0
+        assert executor.evidence[-1].output["comparison"]["total_cents"] >= 0
+        return _draft()
+
+    runtime = FakeRuntime(compare)
+    with _scoped(agent_runtime_db) as db:
+        context = agent_runtime_db.contexts["owner"]
+        conversation = _conversation(db, context)
+        orchestrator = ReadOnlyAgentOrchestrator(
+            db,
+            settings=_settings(),
+            runtime=runtime,
+            now=lambda: datetime(2026, 8, 16, 12, tzinfo=UTC),
+        )
+        turn = asyncio.run(
+            orchestrator.run_turn(
+                conversation.public_id,
+                owner_user_id=context.user_id,
+                text=query,
+                client_message_id="day75-exact-week-" + str(abs(hash(query))),
+                page_context=None,
+            )
+        )
+
+        summary = _blocks(turn, AgentSpendingSummaryBlock)[0]
+        assert turn.run.status == "completed"
+        assert summary.spend_basis == "card"
+        assert summary.total_cents == 16_734
+        assert summary.previous_total_cents == 0
+        assert summary.total_cents >= 0
+        call = db.scalar(select(AgentToolCall))
+        assert call is not None
+        assert call.tool_name == "get_spending_insights"
+        assert call.tool_version == "1.2"
+        assert call.arguments_json["start_date"] == "2026-08-10"
+        assert call.arguments_json["end_date"] == "2026-08-16"
+        assert call.arguments_json["comparison_mode"] == "same_weekdays_last_week"
+        assert call.arguments_json["merchant"] is None
+        assert call.arguments_json["spend_basis"] is None
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "Compare my spending with last week for Restaurants",
+        "Compare my spending with last week from 2026-08-01 to 2026-08-07",
+        "Compare my actual-share spending with last week",
+        "Compare my spending with last month",
+        "Compare my spending with last week and list transactions",
+        "Do not compare my spending with last week",
+        "Compare my spending with last week in USD",
+        "Compare my spending with last week for account checking",
+    ],
+)
+def test_day75_week_comparison_normalizer_rejects_qualified_or_other_domain_requests(query):
+    assert not runtime_module._is_explicit_week_comparison_query(query)
+    assert (
+        runtime_module._explicit_week_comparison_tool_plan(
+            query,
+            current_date=date(2026, 8, 16),
+        )
+        == ()
+    )
+
+
+def test_day75_week_comparison_normalizer_accepts_case_whitespace_and_punctuation():
+    query = "  COMPARE   MY SPENDING WITH LAST WEEK!!!  "
+
+    plan = runtime_module._explicit_week_comparison_tool_plan(
+        query,
+        current_date=date(2026, 8, 16),
+    )
+
+    assert plan == (
+        (
+            "get_spending_insights",
+            {
+                "start_date": "2026-08-10",
+                "end_date": "2026-08-16",
+                "comparison_mode": "same_weekdays_last_week",
+            },
+        ),
+    )
+
+
+def test_day75_week_comparison_backfills_one_omitted_spending_read(agent_runtime_db):
+    async def omit_tool(request: RuntimeRequest, _executor: ReadToolExecutor) -> RuntimeResult:
+        assert request.exposed_tool_names == frozenset({"get_spending_insights"})
+        return _draft()
+
+    runtime = FakeRuntime(omit_tool)
+    with _scoped(agent_runtime_db) as db:
+        context = agent_runtime_db.contexts["owner"]
+        conversation = _conversation(db, context)
+        orchestrator = ReadOnlyAgentOrchestrator(
+            db,
+            settings=_settings(),
+            runtime=runtime,
+            now=lambda: datetime(2026, 8, 16, 12, tzinfo=UTC),
+        )
+
+        turn = asyncio.run(
+            orchestrator.run_turn(
+                conversation.public_id,
+                owner_user_id=context.user_id,
+                text="Did I spend more this week than last week?",
+                client_message_id="day75-week-backfill-1",
+            )
+        )
+
+        assert turn.run.status == "completed"
+        assert _blocks(turn, AgentSpendingSummaryBlock)[0].total_cents == 16_734
+        calls = list(db.scalars(select(AgentToolCall)))
+        assert len(calls) == 1
+        assert calls[0].tool_name == "get_spending_insights"
+        assert calls[0].arguments_json["start_date"] == "2026-08-10"
+        assert calls[0].arguments_json["end_date"] == "2026-08-16"
+        assert calls[0].arguments_json["comparison_mode"] == "same_weekdays_last_week"
+
+
+def test_day75_week_comparison_preserves_validated_page_filters_and_basis(agent_runtime_db):
+    async def wrong_provider_scope(
+        request: RuntimeRequest,
+        executor: ReadToolExecutor,
+    ) -> RuntimeResult:
+        assert request.exposed_tool_names == frozenset({"get_spending_insights"})
+        await executor.invoke(
+            "get_spending_insights",
+            {
+                "start_date": "2026-07-01",
+                "end_date": "2026-07-31",
+                "category": "Shopping",
+                "spend_basis": "card",
+            },
+        )
+        return _draft()
+
+    runtime = FakeRuntime(wrong_provider_scope)
+    page_context = AgentPageContext(
+        surface=AgentSurface.EXPENSE_INSIGHTS,
+        filters=AgentPageFilters(
+            start_date=date(2026, 8, 1),
+            end_date=date(2026, 8, 14),
+            account_id="runtime-checking",
+            category="Groceries",
+            currency_code="USD",
+            spend_basis="actual_share",
+        ),
+    )
+    with _scoped(agent_runtime_db) as db:
+        context = agent_runtime_db.contexts["owner"]
+        conversation = _conversation(db, context)
+        orchestrator = ReadOnlyAgentOrchestrator(
+            db,
+            settings=_settings(),
+            runtime=runtime,
+            now=lambda: datetime(2026, 8, 16, 12, tzinfo=UTC),
+        )
+        turn = asyncio.run(
+            orchestrator.run_turn(
+                conversation.public_id,
+                owner_user_id=context.user_id,
+                text="How does this week's spending compare to last week?",
+                client_message_id="day75-week-context-1",
+                page_context=page_context,
+            )
+        )
+
+        assert turn.run.status == "completed"
+        summary = _blocks(turn, AgentSpendingSummaryBlock)[0]
+        assert summary.spend_basis == "actual_share"
+        assert summary.total_cents == 3_000
+        call = db.scalar(select(AgentToolCall))
+        assert call is not None
+        assert call.arguments_json["start_date"] == "2026-08-10"
+        assert call.arguments_json["end_date"] == "2026-08-16"
+        assert call.arguments_json["comparison_mode"] == "same_weekdays_last_week"
+        assert call.arguments_json["account_id"] == "runtime-checking"
+        assert call.arguments_json["category"] == "Groceries"
+        assert call.arguments_json["currency_code"] == "USD"
+        assert call.arguments_json["spend_basis"] == "actual_share"
+
+
+def test_day75_qualified_custom_range_is_not_overridden(agent_runtime_db):
+    async def custom_range(_request: RuntimeRequest, executor: ReadToolExecutor) -> RuntimeResult:
+        await executor.invoke(
+            "get_spending_insights",
+            {
+                "start_date": "2026-08-01",
+                "end_date": "2026-08-07",
+                "category": "Food & Dining",
+                "comparison_mode": "same_weekdays_last_week",
+            },
+        )
+        return _draft()
+
+    runtime = FakeRuntime(custom_range)
+    with _scoped(agent_runtime_db) as db:
+        context = agent_runtime_db.contexts["owner"]
+        conversation = _conversation(db, context)
+        turn = _run_turn(
+            db,
+            context,
+            conversation,
+            runtime,
+            text="Compare my spending with last week from 2026-08-01 to 2026-08-07",
+            client_message_id="day75-week-qualified-1",
+        )
+
+        assert turn.run.status == "completed"
+        call = db.scalar(select(AgentToolCall))
+        assert call is not None
+        assert call.arguments_json["start_date"] == "2026-08-01"
+        assert call.arguments_json["end_date"] == "2026-08-07"
+        assert call.arguments_json["comparison_mode"] is None
+        assert call.arguments_json["category"] == "Food & Dining"
+
+
+def test_day75_week_comparison_backfill_respects_existing_tool_budget(agent_runtime_db):
+    async def exhaust_budget(
+        _request: RuntimeRequest,
+        executor: ReadToolExecutor,
+    ) -> RuntimeResult:
+        for limit in (1, 2, 3):
+            await executor.invoke("search_transactions", {"limit": limit})
+        return _draft()
+
+    runtime = FakeRuntime(exhaust_budget)
+    with _scoped(agent_runtime_db) as db:
+        context = agent_runtime_db.contexts["owner"]
+        conversation = _conversation(db, context)
+        orchestrator = ReadOnlyAgentOrchestrator(
+            db,
+            settings=_settings(),
+            runtime=runtime,
+            now=lambda: datetime(2026, 8, 16, 12, tzinfo=UTC),
+        )
+        turn = asyncio.run(
+            orchestrator.run_turn(
+                conversation.public_id,
+                owner_user_id=context.user_id,
+                text="Am I spending more this week?",
+                client_message_id="day75-week-budget-1",
+            )
+        )
+
+        assert turn.run.status == "failed"
+        assert turn.run.error_code == "tool_budget_exceeded"
+        calls = list(db.scalars(select(AgentToolCall)))
+        assert len(calls) == MAX_AGENT_TOOL_CALLS == 3
+        assert all(call.tool_name == "search_transactions" for call in calls)
 
 
 def test_merchant_search_returns_useful_canonical_transaction_fields(agent_runtime_db):
@@ -2232,6 +2705,73 @@ def test_idempotent_retry_reuses_one_run_assistant_message_and_provider_call(age
         assert db.scalar(select(func.count(AgentToolCall.id))) == 1
 
 
+def test_idempotent_replay_adapts_retired_spending_response_without_rewriting_history(
+    agent_runtime_db,
+):
+    async def spending(_request: RuntimeRequest, executor: ReadToolExecutor) -> RuntimeResult:
+        await executor.invoke(
+            "get_spending_insights",
+            {"start_date": "2026-08-01", "end_date": "2026-08-14"},
+        )
+        return _draft()
+
+    runtime = FakeRuntime(spending)
+    with _scoped(agent_runtime_db) as db:
+        context = agent_runtime_db.contexts["owner"]
+        conversation = _conversation(db, context)
+        first = _run_turn(
+            db,
+            context,
+            conversation,
+            runtime,
+            text="How much did I spend?",
+            client_message_id="legacy-spending-replay-1",
+        )
+        legacy = {
+            "schema_version": "1.0",
+            "blocks": [
+                {
+                    "type": "text",
+                    "text": "Old net answer was USD 90.00 at Private Merchant.",
+                },
+                {
+                    "type": "spending_summary",
+                    "title": "Old net spending",
+                    "start_date": "2026-08-01",
+                    "end_date": "2026-08-14",
+                    "currency_code": "USD",
+                    "total_cents": 9_000,
+                    "previous_total_cents": 8_000,
+                },
+            ],
+        }
+        assistant = db.scalar(
+            select(AgentMessage).where(AgentMessage.public_id == first.assistant_message.public_id)
+        )
+        assert assistant is not None
+        assistant.structured_response_json = legacy
+        db.commit()
+
+        replay = _run_turn(
+            db,
+            context,
+            conversation,
+            runtime,
+            text="How much did I spend?",
+            client_message_id="legacy-spending-replay-1",
+        )
+
+        response = replay.assistant_message.structured_response
+        assert response is not None
+        assert [block.type for block in response.blocks] == ["text", "empty"]
+        assert "retired net-spend semantics" in response.blocks[0].text
+        assert "Private Merchant" not in response.model_dump_json()
+        assert replay.run.public_id == first.run.public_id
+        assert runtime.calls == 1
+        db.refresh(assistant)
+        assert assistant.structured_response_json == legacy
+
+
 def test_idempotency_key_rejects_same_text_with_different_page_context(agent_runtime_db):
     async def search(_request: RuntimeRequest, executor: ReadToolExecutor) -> RuntimeResult:
         await executor.invoke("search_transactions", {"merchant": "Aldi", "limit": 5})
@@ -3310,6 +3850,7 @@ def test_day6_transaction_first_pair_completes_missing_spending_from_validated_s
             "merchant": None,
             "review_type": None,
             "spend_basis": "card",
+            "comparison_mode": None,
             "currency_code": "USD",
         }
 

@@ -34,13 +34,17 @@ import {
 } from "@/insightsVisualization";
 import { api } from "@/lib/api";
 
+export type SpendingBasis = "card" | "actual_share";
+
 type Summary = {
   total_cents: number;
   personal_cents: number;
   shared_cents: number;
   classified_cents: number;
   unreviewed_cents: number;
-  refund_cents: number;
+  credits_cents: number;
+  unknown_share_transactions: number;
+  unknown_credit_share_transactions: number;
   transaction_count: number;
   average_cents: number;
 };
@@ -73,7 +77,7 @@ type Insights = {
     currency: string;
     available_currencies: string[];
     excluded_other_currency_transactions: number;
-    spend_basis: string;
+    spend_basis: SpendingBasis;
     viewer_share_identity_connected: boolean;
     pending_transactions_excluded: boolean;
   };
@@ -99,6 +103,7 @@ type Insights = {
   merchants: string[];
   data_quality: {
     unknown_share_transactions: number;
+    unknown_credit_share_transactions: number;
     unreviewed_cents: number;
     pending_review_cents: number;
     uncategorized_cents: number;
@@ -137,7 +142,7 @@ export function InsightsDashboard({
   const [merchant, setMerchant] = useState("");
   const [merchantInput, setMerchantInput] = useState("");
   const [reviewType, setReviewType] = useState("all");
-  const [basis, setBasis] = useState("card");
+  const [basis, setBasis] = useState<SpendingBasis>("card");
   const [currency, setCurrency] = useState("");
   const [data, setData] = useState<Insights | null>(null);
   const [loading, setLoading] = useState(true);
@@ -276,7 +281,19 @@ export function InsightsDashboard({
 
       {loading && !data ? (
         <DashboardSkeleton />
-      ) : data && (data.summary.transaction_count || data.data_quality.unknown_share_transactions) ? (
+      ) : data && (
+        data.summary.transaction_count ||
+        data.comparison.transaction_count ||
+        data.summary.total_cents ||
+        data.comparison.total_cents ||
+        data.summary.credits_cents ||
+        data.comparison.credits_cents ||
+        data.summary.unknown_credit_share_transactions ||
+        data.comparison.unknown_credit_share_transactions ||
+        data.summary.unknown_share_transactions ||
+        data.comparison.unknown_share_transactions ||
+        data.data_quality.unknown_share_transactions
+      ) ? (
         <InsightsContent
           data={data}
           basis={basis}
@@ -308,7 +325,7 @@ type ControlsProps = {
   merchant: string;
   merchantInput: string;
   reviewType: string;
-  basis: string;
+  basis: SpendingBasis;
   currency: string;
   data: Insights | null;
   filtered: boolean;
@@ -321,7 +338,7 @@ type ControlsProps = {
   setMerchant: (value: string) => void;
   setMerchantInput: (value: string) => void;
   setReviewType: (value: string) => void;
-  setBasis: (value: string) => void;
+  setBasis: (value: SpendingBasis) => void;
   setCurrency: (value: string) => void;
   clearFilters: () => void;
 };
@@ -371,7 +388,7 @@ function InsightsControls(props: ControlsProps) {
           </ResponsiveSheet>
 
           <label className="sr-only" htmlFor="insights-spending-basis-mobile">Spending basis</label>
-          <select id="insights-spending-basis-mobile" className="h-11 max-w-28 rounded-lg border border-slate-200 bg-white px-2 text-xs font-semibold text-slate-700 hover:border-indigo-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500" value={props.basis} onChange={(event) => props.setBasis(event.target.value)}>
+          <select id="insights-spending-basis-mobile" className="h-11 max-w-28 rounded-lg border border-slate-200 bg-white px-2 text-xs font-semibold text-slate-700 hover:border-indigo-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500" value={props.basis} onChange={(event) => props.setBasis(event.target.value as SpendingBasis)}>
             <option value="card">Card spend</option>
             <option value="actual_share">My share</option>
           </select>
@@ -426,7 +443,7 @@ function InsightsControls(props: ControlsProps) {
             </details>
           </div>
           <label className="sr-only" htmlFor="insights-spending-basis-desktop">Spending basis</label>
-          <select id="insights-spending-basis-desktop" className="h-11 rounded-lg border border-slate-200 bg-white px-3 text-xs font-semibold text-slate-700 hover:border-indigo-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500" value={props.basis} onChange={(event) => props.setBasis(event.target.value)}>
+          <select id="insights-spending-basis-desktop" className="h-11 rounded-lg border border-slate-200 bg-white px-3 text-xs font-semibold text-slate-700 hover:border-indigo-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500" value={props.basis} onChange={(event) => props.setBasis(event.target.value as SpendingBasis)}>
             <option value="card">Card spend</option>
             <option value="actual_share">My actual share</option>
           </select>
@@ -486,7 +503,7 @@ function AdvancedFilterFields({ props, currencyOptions }: { props: ControlsProps
 
 type ContentProps = {
   data: Insights;
-  basis: string;
+  basis: SpendingBasis;
   category: string;
   trendMode: "total" | "split";
   topCount: number;
@@ -506,6 +523,14 @@ function InsightsContent(props: ContentProps) {
   const currentRange = formatRange(data.range.start_date, data.range.end_date);
   const previousRange = formatRange(data.range.previous_start_date, data.range.previous_end_date);
   const sharedItems = props.sharedMode === "people" ? data.shared_people : data.shared_groups;
+  const actualShareBasis = data.scope.spend_basis === "actual_share";
+  const incompletePurchaseComparison = actualShareBasis && Boolean(
+    data.summary.unknown_share_transactions || data.comparison.unknown_share_transactions,
+  );
+  const incompleteCreditComparison = actualShareBasis && Boolean(
+    data.summary.unknown_credit_share_transactions ||
+      data.comparison.unknown_credit_share_transactions,
+  );
   const dataNotes = [
     data.scope.excluded_other_currency_transactions
       ? `${data.scope.excluded_other_currency_transactions} transaction${data.scope.excluded_other_currency_transactions === 1 ? " is" : "s are"} excluded because this view is limited to ${currency}.`
@@ -513,8 +538,13 @@ function InsightsContent(props: ContentProps) {
     data.data_quality.unreviewed_cents
       ? `${money(data.data_quality.unreviewed_cents, currency)} is unreviewed and shown separately from Personal and Shared.`
       : "",
-    data.summary.refund_cents
-      ? `${money(Math.abs(data.summary.refund_cents), currency)} in refunds is included as a credit in Total spend.`
+    data.data_quality.uncategorized_cents
+      ? `${money(data.data_quality.uncategorized_cents, currency)} is included in Total spend as Uncategorized.`
+      : "",
+    data.summary.credits_cents
+      ? actualShareBasis
+        ? `${money(data.summary.credits_cents, currency)} in attributable credits is reported separately and excluded from Total spend.`
+        : `${money(data.summary.credits_cents, currency)} in card credits, including refunds, is reported separately and excluded from Total spend.`
       : "",
     data.data_quality.pending_transactions_excluded
       ? "Bank-pending transactions are excluded. Personal and Shared include only classified transactions."
@@ -531,13 +561,35 @@ function InsightsContent(props: ContentProps) {
         <span>Compared with {previousRange} · {currency} only · no currency conversion</span>
       </div>
 
-      {props.basis === "actual_share" && data.data_quality.unknown_share_transactions ? (
+      {actualShareBasis && (
+        data.summary.unknown_share_transactions || data.comparison.unknown_share_transactions
+      ) ? (
         <DataNotice tone="warning">
-          {data.data_quality.unknown_share_transactions} shared transaction{data.data_quality.unknown_share_transactions === 1 ? " has" : "s have"} no confirmed share and {data.data_quality.unknown_share_transactions === 1 ? "is" : "are"} excluded from this view.
+          {data.summary.unknown_share_transactions
+            ? `${data.summary.unknown_share_transactions} current-period shared purchase${data.summary.unknown_share_transactions === 1 ? " has" : "s have"} no confirmed viewer allocation and ${data.summary.unknown_share_transactions === 1 ? "is" : "are"} omitted from My actual share. `
+            : ""}
+          {data.comparison.unknown_share_transactions
+            ? `${data.comparison.unknown_share_transactions} prior-period shared purchase${data.comparison.unknown_share_transactions === 1 ? " has" : "s have"} no confirmed viewer allocation and ${data.comparison.unknown_share_transactions === 1 ? "is" : "are"} omitted from the comparison. `
+            : ""}
+          ExpenseOps will not guess a shared purchase allocation.
         </DataNotice>
       ) : null}
-      {props.basis === "actual_share" && !data.scope.viewer_share_identity_connected ? (
+      {actualShareBasis && !data.scope.viewer_share_identity_connected ? (
         <DataNotice tone="warning">Connect and verify your own Splitwise account to calculate My actual share. ExpenseOps will not guess from another payer.</DataNotice>
+      ) : null}
+      {actualShareBasis && (
+        data.summary.unknown_credit_share_transactions ||
+        data.comparison.unknown_credit_share_transactions
+      ) ? (
+        <DataNotice tone="warning">
+          {data.summary.unknown_credit_share_transactions
+            ? `${data.summary.unknown_credit_share_transactions} current-period shared credit${data.summary.unknown_credit_share_transactions === 1 ? "" : "s"} ${data.summary.unknown_credit_share_transactions === 1 ? "has" : "have"} no confirmed viewer allocation and ${data.summary.unknown_credit_share_transactions === 1 ? "is" : "are"} omitted from Attributable credits. `
+            : ""}
+          {data.comparison.unknown_credit_share_transactions
+            ? `${data.comparison.unknown_credit_share_transactions} prior-period shared credit${data.comparison.unknown_credit_share_transactions === 1 ? "" : "s"} ${data.comparison.unknown_credit_share_transactions === 1 ? "has" : "have"} no confirmed viewer allocation and ${data.comparison.unknown_credit_share_transactions === 1 ? "is" : "are"} omitted from the comparison. `
+            : ""}
+          ExpenseOps will not guess a shared credit allocation.
+        </DataNotice>
       ) : null}
       {dataNotes.length ? (
         <details className="group rounded-xl border border-slate-200 bg-white">
@@ -561,20 +613,24 @@ function InsightsContent(props: ContentProps) {
             featured
             comparisonRange={previousRange}
             currency={currency}
+            suppressPercentage={incompletePurchaseComparison}
           />
-          <Kpi label="Personal" value={data.summary.personal_cents} previous={data.comparison.personal_cents} comparisonRange={previousRange} currency={currency} />
-          <Kpi label="Shared" value={data.summary.shared_cents} previous={data.comparison.shared_cents} comparisonRange={previousRange} currency={currency} />
-          <Kpi label="Unreviewed" value={data.summary.unreviewed_cents} previous={data.comparison.unreviewed_cents} comparisonRange={previousRange} currency={currency} />
-          <Kpi label="Transactions" raw={String(data.summary.transaction_count)} previousRaw={data.comparison.transaction_count} comparisonRange={previousRange} currency={currency} />
+          <Kpi label="Personal" value={data.summary.personal_cents} previous={data.comparison.personal_cents} comparisonRange={previousRange} currency={currency} suppressPercentage={incompletePurchaseComparison} />
+          <Kpi label="Shared" value={data.summary.shared_cents} previous={data.comparison.shared_cents} comparisonRange={previousRange} currency={currency} suppressPercentage={incompletePurchaseComparison} />
+          <Kpi label="Unreviewed" value={data.summary.unreviewed_cents} previous={data.comparison.unreviewed_cents} comparisonRange={previousRange} currency={currency} suppressPercentage={incompletePurchaseComparison} />
+          {data.summary.credits_cents || data.comparison.credits_cents ? (
+            <Kpi label={actualShareBasis ? "Attributable credits" : "Card credits"} value={data.summary.credits_cents} previous={data.comparison.credits_cents} comparisonRange={previousRange} currency={currency} suppressPercentage={incompleteCreditComparison} />
+          ) : null}
+          <Kpi label={actualShareBasis ? "Confirmed transactions" : "Transactions"} raw={String(data.summary.transaction_count)} previousRaw={data.comparison.transaction_count} comparisonRange={previousRange} currency={currency} />
         </div>
         <details className="mt-2 text-xs text-slate-600">
           <summary className="flex min-h-11 cursor-pointer items-center rounded-md font-medium hover:text-slate-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500">How this total is calculated</summary>
-          <p className="mt-1">Total {money(data.summary.total_cents, currency)} = Personal {money(data.summary.personal_cents, currency)} + Shared {money(data.summary.shared_cents, currency)} + Unreviewed {money(data.summary.unreviewed_cents, currency)}. Refunds are already netted.</p>
+          <p className="mt-1">Total {money(data.summary.total_cents, currency)} = Personal {money(data.summary.personal_cents, currency)} + Shared {money(data.summary.shared_cents, currency)} + Unreviewed {money(data.summary.unreviewed_cents, currency)}. Credits, including refunds, are reported separately and are not netted into Total spend.</p>
         </details>
       </section>
 
       <ChartCard title="What changed" eyebrow={`Compared with ${previousRange}`}>
-        <Changes items={data.notable_changes} />
+        <Changes items={data.notable_changes} incomplete={incompletePurchaseComparison} />
       </ChartCard>
 
       <div className="grid items-start gap-5 xl:grid-cols-[minmax(0,1.35fr)_minmax(22rem,0.65fr)]">
@@ -603,7 +659,10 @@ function InsightsContent(props: ContentProps) {
             currency={currency}
           />
         </ChartCard>
-        <ChartCard title="Personal and shared" eyebrow="Classified card spend">
+        <ChartCard
+          title="Personal and shared"
+          eyebrow={actualShareBasis ? "Classified actual share" : "Classified card spend"}
+        >
           <StackedSplit values={data.personal_shared} onSelect={props.setReviewType} currency={currency} />
         </ChartCard>
       </div>
@@ -644,6 +703,7 @@ function Kpi({
   featured = false,
   comparisonRange,
   currency,
+  suppressPercentage = false,
 }: {
   label: string;
   value?: number;
@@ -653,6 +713,7 @@ function Kpi({
   featured?: boolean;
   comparisonRange: string;
   currency: string;
+  suppressPercentage?: boolean;
 }) {
   const current = value ?? Number(raw || 0);
   const prior = previous ?? previousRaw;
@@ -664,7 +725,10 @@ function Kpi({
         <p className={`mt-2 font-semibold tabular-nums text-slate-950 ${featured ? "text-4xl sm:text-[2.75rem]" : "text-2xl"}`}>{raw || money(value || 0, currency)}</p>
         <div className="mt-2 text-xs text-slate-600">
           {comparison ? (
-            <p className="inline-flex rounded-full bg-slate-100 px-2 py-1">{comparison.primary}{comparison.secondary ? ` ${comparison.secondary}` : ""}</p>
+            <p className="inline-flex rounded-full bg-slate-100 px-2 py-1">
+              {suppressPercentage ? `Confirmed allocations only: ${comparison.primary}` : comparison.primary}
+              {comparison.secondary && !suppressPercentage ? ` ${comparison.secondary}` : ""}
+            </p>
           ) : (
             <p>No comparison available</p>
           )}
@@ -707,7 +771,7 @@ function Bars({
   interactive?: boolean;
   currency: string;
 }) {
-  const max = Math.max(1, ...items.map((value) => Math.abs(value.amount_cents)));
+  const max = Math.max(1, ...items.map((value) => value.amount_cents));
   return (
     <div className="space-y-2" role="list">
       {items.map((item) => {
@@ -719,7 +783,7 @@ function Bars({
             </span>
             {showCounts && item.transaction_count ? <span className="mt-0.5 block text-xs text-slate-500">{item.transaction_count} transaction{item.transaction_count === 1 ? "" : "s"}</span> : null}
             <span className="mt-1.5 block h-2 overflow-hidden rounded-full bg-slate-100">
-              <span className="block h-full rounded-full bg-indigo-600" style={{ width: `${Math.max(2, Math.abs(item.amount_cents) / max * 100)}%` }} />
+              <span className="block h-full rounded-full bg-indigo-600" style={{ width: `${Math.max(2, item.amount_cents / max * 100)}%` }} />
             </span>
             {comparison && meaningfulChange(item.amount_cents, item.previous_amount_cents || 0, total) ? <span className="mt-1 block text-xs text-slate-500">{signedMoney(item.amount_cents - (item.previous_amount_cents || 0), currency)} vs previous period</span> : null}
           </>
@@ -739,15 +803,15 @@ function Bars({
 function Donut({ items, total, onSelect, currency }: { items: Breakdown[]; total: number; onSelect: (name: string) => void; currency: string }) {
   const [activeName, setActiveName] = useState<string | null>(null);
   const grouped = groupSmallCategories(items);
-  const groupedTotal = grouped.reduce((sum, item) => sum + Math.abs(item.amount_cents), 0);
+  const groupedTotal = grouped.reduce((sum, item) => sum + item.amount_cents, 0);
   let offset = 0;
   const gradient = grouped.map((item) => {
     const start = offset;
-    offset += groupedTotal ? Math.abs(item.amount_cents) / groupedTotal * 100 : 0;
+    offset += groupedTotal ? item.amount_cents / groupedTotal * 100 : 0;
     return `${categoryColor(item.name)} ${start}% ${offset}%`;
   }).join(",");
   const activeItem = grouped.find((item) => item.name === activeName);
-  const activePercentage = activeItem && groupedTotal ? Math.round(Math.abs(activeItem.amount_cents) / groupedTotal * 100) : 0;
+  const activePercentage = activeItem && groupedTotal ? Math.round(activeItem.amount_cents / groupedTotal * 100) : 0;
 
   return (
     <div className="grid items-center gap-5 sm:grid-cols-[180px_1fr]">
@@ -760,7 +824,7 @@ function Donut({ items, total, onSelect, currency }: { items: Breakdown[]; total
       </div>
       <div className="space-y-1">
         {grouped.map((item) => {
-          const percentage = groupedTotal ? Math.round(Math.abs(item.amount_cents) / groupedTotal * 100) : 0;
+          const percentage = groupedTotal ? Math.round(item.amount_cents / groupedTotal * 100) : 0;
           const label = item.name === "Other" ? "Other categories" : item.name;
           const content = <><span className="flex min-w-0 items-center gap-2"><span className="h-2.5 w-2.5 shrink-0 rounded-sm" style={{ backgroundColor: categoryColor(item.name) }} /><span className="truncate">{label}</span></span><span className="shrink-0 tabular-nums text-slate-600">{money(item.amount_cents, currency)} · {percentage}%</span></>;
           return item.name === "Other" ? (
@@ -779,7 +843,7 @@ function LineChart({ values, split, granularity, currency }: { values: Trend[]; 
   const plottedValues = values.flatMap((value) => split
     ? [value.personal_cents, value.shared_cents]
     : [value.total_cents]);
-  const floor = Math.min(0, ...plottedValues);
+  const floor = 0;
   const rawCeiling = Math.max(0, ...plottedValues);
   const rangeTicks = axisTicks(Math.max(1, rawCeiling - floor));
   const ceiling = floor + (rangeTicks.at(-1) || 1);
@@ -860,8 +924,8 @@ function LineChart({ values, split, granularity, currency }: { values: Trend[]; 
 }
 
 function StackedSplit({ values, onSelect, currency }: { values: { personal: number; shared: number }; onSelect: (value: string) => void; currency: string }) {
-  const magnitudeTotal = Math.abs(values.personal) + Math.abs(values.shared);
-  const personal = magnitudeTotal ? Math.round(Math.abs(values.personal) / magnitudeTotal * 100) : 0;
+  const magnitudeTotal = values.personal + values.shared;
+  const personal = magnitudeTotal ? Math.round(values.personal / magnitudeTotal * 100) : 0;
   const shared = magnitudeTotal ? 100 - personal : 0;
   if (!magnitudeTotal) return <p className="py-8 text-center text-sm text-slate-600">No classified personal or shared spending in this period.</p>;
   return (
@@ -895,7 +959,7 @@ function CategoryTrend({ values, granularity, currency }: { values: { period: st
     return { ...value, categories };
   });
   const totals = normalized.map((value) => Object.values(value.categories).reduce((sum, amount) => sum + amount, 0));
-  const magnitudes = normalized.map((value) => Object.values(value.categories).reduce((sum, amount) => sum + Math.abs(amount), 0));
+  const magnitudes = normalized.map((value) => Object.values(value.categories).reduce((sum, amount) => sum + amount, 0));
   const max = Math.max(1, ...magnitudes);
   const activeValue = activeIndex === null ? null : normalized[activeIndex];
 
@@ -909,7 +973,7 @@ function CategoryTrend({ values, granularity, currency }: { values: { period: st
           return (
             <div key={value.period} data-category-period={value.period} tabIndex={0} onFocus={() => setActiveIndex(index)} onBlur={() => setActiveIndex(null)} onPointerEnter={() => setActiveIndex(index)} onClick={() => setActiveIndex(index)} onKeyDown={(event) => { if (event.key === "Escape") setActiveIndex(null); }} className="group relative z-10 flex h-full min-w-0 flex-1 cursor-crosshair flex-col justify-end rounded-sm outline-none focus-visible:ring-2 focus-visible:ring-indigo-500" aria-label={label}>
               <span className={`flex w-full flex-col-reverse overflow-hidden rounded-t transition-opacity motion-reduce:transition-none ${activeIndex !== null && activeIndex !== index ? "opacity-45" : "opacity-100"}`} style={{ height: `${magnitudes[index] / max * 100}%` }}>
-                {names.map((name) => <span key={name} className="transition-[filter] motion-reduce:transition-none group-hover:brightness-110" style={{ height: `${magnitudes[index] ? Math.abs(value.categories[name] || 0) / magnitudes[index] * 100 : 0}%`, backgroundColor: categoryColor(name) }} />)}
+                {names.map((name) => <span key={name} className="transition-[filter] motion-reduce:transition-none group-hover:brightness-110" style={{ height: `${magnitudes[index] ? (value.categories[name] || 0) / magnitudes[index] * 100 : 0}%`, backgroundColor: categoryColor(name) }} />)}
               </span>
               <span className="mt-1 truncate text-center text-[10px] text-slate-500">{dateLabel(value.period, granularity)}</span>
             </div>
@@ -943,7 +1007,24 @@ function CategoryTrend({ values, granularity, currency }: { values: { period: st
   );
 }
 
-function Changes({ items }: { items: Insights["notable_changes"] }) {
+function Changes({
+  items,
+  incomplete = false,
+}: {
+  items: Insights["notable_changes"];
+  incomplete?: boolean;
+}) {
+  if (incomplete) {
+    return (
+      <div className="flex items-center gap-3 rounded-xl border border-dashed border-amber-300 bg-amber-50 px-4 py-5">
+        <ChartNoAxesCombined className="h-5 w-5 text-amber-700" />
+        <div>
+          <p className="text-sm font-semibold text-amber-950">Comparison incomplete</p>
+          <p className="text-xs text-amber-900">Change analysis uses only confirmed allocations.</p>
+        </div>
+      </div>
+    );
+  }
   return (
     <div className="grid gap-2 sm:grid-cols-2">
       {items.length ? items.map((item) => {

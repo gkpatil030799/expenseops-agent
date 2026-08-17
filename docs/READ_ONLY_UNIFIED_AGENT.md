@@ -198,10 +198,58 @@ used by the Insights screen. Its model-facing output contains only the bounded s
 needed for an answer. A "why did this increase?" answer may summarize deterministic comparison
 and breakdown evidence; it may not invent a behavioral cause.
 
+Total Spend means eligible purchase spending. ExpenseOps stores Plaid-sign positive amounts as
+outgoing charges and negative amounts as inflows/credits. The canonical spending projection uses
+only positive eligible purchase rows for current and comparable totals, counts, averages,
+personal/shared/unreviewed amounts, category and merchant rankings, trends, and notable changes.
+Eligible negative rows are reported separately as a non-negative credit magnitude; the available
+source projection cannot reliably distinguish every merchant refund from another credit. In card
+basis, `credits_cents` includes the positive raw-card magnitude of every eligible credit. In
+`actual_share` basis, it includes only attributable personal and unreviewed whole-card credits;
+shared credits are omitted because no canonical viewer allocation exists, never guessed, and
+counted in `unknown_credit_share_transactions`. Both the current `summary` and prior
+`comparison` carry their own credit magnitude, `unknown_share_transactions` purchase count, and
+unknown-credit count; `data_quality` repeats the current counts for direct Insights clients. An
+actual-share comparison with an omitted purchase keeps the confirmed amounts and delta visible
+but labels the delta `Confirmed allocations only` and suppresses an exact percentage because
+period coverage is incomplete. Category deltas are hidden and What changed shows a neutral
+incomplete-comparison state rather than implying that no material change occurred.
+Transfers, card and loan payments, removed transactions, and pending transactions remain excluded
+from finalized spending analytics. Uncategorized eligible purchases remain in Total Spend.
+
+The six supported beta phrasings for “this week” versus “last week” use a code-owned calendar
+scope because the live provider did not resolve the original wording consistently. The current
+range is Monday through the current UTC date; the comparison is the same weekdays shifted exactly
+seven days earlier. This keeps Monday, midweek, and Sunday comparisons aligned. Only the closed
+phrasing set can activate this mode. Qualified category, account, currency, actual-share, custom
+date, negated, or cross-domain requests stay on the normal validated tool-selection path, while a
+validated page category/account/merchant/review/currency/basis may still narrow the closed weekly
+query. The persisted tool call records the explicit ISO ranges and comparison mode.
+
+This patch deliberately remains a bounded deterministic taxonomy, not a full categorization or
+merchant-intelligence system. Recognized provider/category tokens map to the existing broad product
+categories; unfamiliar or ambiguous labels remain visible under `Other`, and missing labels remain
+`Uncategorized`. Category filters use an exact normalized match against either the canonical parent
+or stored source category—there is no fuzzy or merchant-specific inference. New provider taxonomy
+labels may therefore need a reviewed mapping in a later categorization phase.
+
 The grounded `spending_summary` includes up to 10 canonical top-category and 10 top-merchant
 breakdown items (name, amount, transaction count, percentage, and prior-period amount). Those
 items are copied from the validated same-run tool result, so questions such as "What are my top
-merchants?" do not depend on model-repeated numbers.
+merchants?" do not depend on model-repeated numbers. Primary totals and breakdown amounts are
+non-negative purchase values. The flattened Agent block requires non-negative `credits_cents`,
+`previous_credits_cents`, `unknown_share_transactions`, `previous_unknown_share_transactions`,
+`unknown_credit_share_transactions`, and `previous_unknown_credit_share_transactions` fields so
+current and prior purchase/credit omissions remain independently visible. Its required
+`spend_basis` enum preserves whether the grounded values are card spend or the viewer's actual
+share, so the client labels both Total and Credits without guessing. `change_percent` is null when
+either actual-share purchase period is incomplete.
+
+Saved pre-Day-7.5 spending blocks are not deleted or silently reinterpreted. On read, a block that
+lacks `credits_cents` or violates the new non-negative purchase invariants is replaced in the API
+projection with the existing v1 blocks: text stating that retired net-spend semantics are not
+shown as current financial truth, followed by a `Recalculate this spending answer` empty state
+that asks the user to repeat the question. The stored historical JSON remains unchanged.
 
 ### `search_transactions`
 

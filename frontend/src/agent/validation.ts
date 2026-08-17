@@ -191,9 +191,32 @@ function parseSupportedBlock(value: unknown): void {
       requireString(block.start_date, 32);
       requireString(block.end_date, 32);
       requireString(block.currency_code, 8);
-      requireInteger(block.total_cents);
+      requireOneOf(block.spend_basis, ["card", "actual_share"]);
+      requireNonNegativeInteger(block.total_cents);
       requireNullableInteger(block.previous_total_cents);
+      requireNonNegativeInteger(block.credits_cents);
+      requireNonNegativeInteger(block.previous_credits_cents);
+      requireNonNegativeInteger(block.unknown_share_transactions);
+      requireNonNegativeInteger(block.previous_unknown_share_transactions);
+      requireNonNegativeInteger(block.unknown_credit_share_transactions);
+      requireNonNegativeInteger(block.previous_unknown_credit_share_transactions);
+      if (
+        block.spend_basis === "card" &&
+        (block.unknown_share_transactions !== 0 ||
+          block.previous_unknown_share_transactions !== 0 ||
+          block.unknown_credit_share_transactions !== 0 ||
+          block.previous_unknown_credit_share_transactions !== 0)
+      ) {
+        throw new AgentProtocolError();
+      }
       requireNullableFiniteNumber(block.change_percent);
+      if (
+        (block.unknown_share_transactions !== 0 ||
+          block.previous_unknown_share_transactions !== 0) &&
+        block.change_percent !== null
+      ) {
+        throw new AgentProtocolError();
+      }
       requireStringArray(block.highlights, 10, 1_000);
       parseBreakdowns(block.top_categories);
       parseBreakdowns(block.top_merchants);
@@ -481,14 +504,14 @@ function parseBreakdowns(value: unknown): void {
   value.forEach((item) => {
     const row = requireRecord(item);
     requireString(row.name, 255);
-    requireInteger(row.amount_cents);
+    requireNonNegativeInteger(row.amount_cents);
     requireNonNegativeInteger(row.transaction_count);
     requireFiniteNumber(row.percentage);
     if ((row.percentage as number) < 0 || (row.percentage as number) > 100) {
       throw new AgentProtocolError();
     }
     if (row.previous_amount_cents !== null && row.previous_amount_cents !== undefined) {
-      requireInteger(row.previous_amount_cents);
+      requireNonNegativeInteger(row.previous_amount_cents);
     }
   });
 }

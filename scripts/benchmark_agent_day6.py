@@ -100,9 +100,11 @@ def benchmark_scenarios() -> tuple[BenchmarkScenario, ...]:
             "merchant": None,
             "review_type": None,
             "spend_basis": "card",
+            "comparison_mode": "immediately_preceding",
             "currency_code": "USD",
         },
         _spending_output(),
+        tool_version="1.2",
     )
     transactions = SeedEvidence(
         "search_transactions",
@@ -607,7 +609,9 @@ def _aggregate(total: int, *, count: int) -> dict[str, Any]:
         "shared_cents": total - (total // 2),
         "classified_cents": total - 1_200,
         "unreviewed_cents": 1_200,
-        "refund_cents": 0,
+        "credits_cents": 0,
+        "unknown_share_transactions": 0,
+        "unknown_credit_share_transactions": 0,
         "transaction_count": count,
         "average_cents": total // max(1, count),
     }
@@ -621,6 +625,7 @@ def _spending_output() -> dict[str, Any]:
         "previous_end_date": "2026-07-31",
         "currency_code": "USD",
         "spend_basis": "card",
+        "comparison_mode": "immediately_preceding",
         "summary": _aggregate(18_000, count=4),
         "comparison": _aggregate(12_000, count=3),
         "categories": [

@@ -280,6 +280,28 @@ def test_spending_tool_reconciles_exactly_with_canonical_insights(read_tool_data
                 "currency_code": "usd",
             },
         )
+        raw_groceries = _execute(
+            build_read_tool_registry(_settings()),
+            db,
+            "get_spending_insights",
+            {
+                "start_date": "2026-08-01",
+                "end_date": "2026-08-31",
+                "category": "Groceries",
+                "currency_code": "usd",
+            },
+        )
+        mapped_food = _execute(
+            build_read_tool_registry(_settings()),
+            db,
+            "get_spending_insights",
+            {
+                "start_date": "2026-08-01",
+                "end_date": "2026-08-31",
+                "category": "Food & Dining",
+                "currency_code": "usd",
+            },
+        )
 
     assert output["summary"] == canonical["summary"]
     assert output["comparison"] == canonical["comparison"]
@@ -289,7 +311,8 @@ def test_spending_tool_reconciles_exactly_with_canonical_insights(read_tool_data
         for item in output["merchants"]
     ] == canonical["merchant_breakdown"][:10]
     assert output["notable_changes"] == canonical["notable_changes"][:4]
-    assert output["summary"]["total_cents"] == 12_750
+    assert output["summary"]["total_cents"] == 13_250
+    assert output["summary"]["credits_cents"] == 500
     assert output["comparison"]["total_cents"] == 2_500
     assert output["summary"]["total_cents"] == (
         output["summary"]["classified_cents"] + output["summary"]["unreviewed_cents"]
@@ -301,6 +324,10 @@ def test_spending_tool_reconciles_exactly_with_canonical_insights(read_tool_data
     assert output["available_currencies"] == ["EUR", "USD"]
     assert output["excluded_other_currency_transactions"] == 1
     assert output["pending_transactions_excluded"] is True
+    assert output["comparison_mode"] == "immediately_preceding"
+    assert build_read_tool_registry(_settings()).get("get_spending_insights").version == "1.2"
+    assert raw_groceries["summary"]["total_cents"] == 10_000
+    assert mapped_food["summary"]["total_cents"] == 13_250
 
 
 def test_spending_tool_preserves_personal_card_and_shared_actual_share_semantics(

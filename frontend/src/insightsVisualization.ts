@@ -57,14 +57,20 @@ export function meaningfulChange(current: number, previous: number, total: numbe
 }
 
 export function groupSmallCategories<T extends CategoryAmount>(items: T[], maxCategories = 7): T[] {
-  const total = items.reduce((sum, item) => sum + Math.abs(item.amount_cents), 0);
-  const major = items.filter((item, index) =>
-    item.name !== "Other" && item.name !== "Uncategorized" && index < maxCategories &&
-    (!total || Math.abs(item.amount_cents) / total * 100 >= SMALL_CATEGORY_PERCENT));
-  const grouped = items.filter((item) => !major.includes(item));
-  if (!grouped.length) return major;
+  const total = items.reduce((sum, item) => sum + item.amount_cents, 0);
+  const candidates = items.filter((item) => item.name !== "Uncategorized");
+  const uncategorized = items.filter((item) => item.name === "Uncategorized");
+  const major = candidates.filter((item, index) =>
+    item.name !== "Other" && index < maxCategories &&
+    (!total || item.amount_cents / total * 100 >= SMALL_CATEGORY_PERCENT));
+  const grouped = candidates.filter((item) => !major.includes(item));
+  if (!grouped.length) return [...major, ...uncategorized];
   const other = grouped.reduce((sum, item) => sum + item.amount_cents, 0);
-  return [...major, { ...grouped[0], name: "Other", amount_cents: other } as T];
+  return [
+    ...major,
+    ...uncategorized,
+    { ...grouped[0], name: "Other", amount_cents: other } as T,
+  ];
 }
 
 export function dateLabel(value: string, granularity: "day" | "week" | "month", long = false): string {

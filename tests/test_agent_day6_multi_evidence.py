@@ -55,6 +55,7 @@ _OUTPUT_MODELS = {
     "get_integration_status": IntegrationStatusToolOutput,
 }
 _TOOL_VERSIONS = {
+    "get_spending_insights": "1.2",
     "get_receipts": "1.1",
     "get_errands_and_plan": "1.1",
 }
@@ -531,7 +532,8 @@ def test_spending_and_transactions_reconcile_only_when_scopes_match():
         [spending, transactions],
         text="Why did Food & Dining increase, and which transactions drove it?",
     )
-    assert "Canonical spend was USD 180.00" in _text(aligned)
+    assert "Card spend for eligible purchases" in _text(aligned)
+    assert "was USD 180.00" in _text(aligned)
     assert "supporting detail" in _text(aligned)
 
     mismatched = replace(
