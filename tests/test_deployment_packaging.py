@@ -205,6 +205,28 @@ def test_production_release_is_manual_and_all_runtimes_precede_web():
     assert "AGENT_WRITE_ACTIONS_ENABLED" in workflow
     assert "AGENT_PROACTIVE_ENABLED" in workflow
     assert "AGENT_PURCHASING_ENABLED" in workflow
+    assert "expected_web_agent_write_actions_enabled:" in workflow
+    assert "expected_web_agent_proactive_enabled:" in workflow
+    assert "Verify approved Agent rollout flags" in workflow
+    assert "Verify the Agent remains read only" not in workflow
+    assert (
+        workflow.count('verify_service_flags "${RAILWAY_OUTBOX_SERVICE_ID}" false false false') == 1
+    )
+    assert (
+        workflow.count(
+            'verify_service_flags "${RAILWAY_GMAIL_RECEIPTS_SERVICE_ID}" false false false'
+        )
+        == 1
+    )
+    assert (
+        workflow.count(
+            'verify_service_flags "${RAILWAY_GMAIL_PROMOTIONS_SERVICE_ID}" false false false'
+        )
+        == 1
+    )
+    assert "${EXPECTED_WEB_AGENT_WRITE_ACTIONS_ENABLED}" in workflow
+    assert "${EXPECTED_WEB_AGENT_PROACTIVE_ENABLED}" in workflow
+    assert "Expected Agent rollout inputs must be true or false." in workflow
     assert "REQUESTED_RELEASE_SHA: ${{ inputs.release_sha }}" in workflow
     assert "RELEASE_PHASE: ${{ inputs.release_phase }}" in workflow
     assert "COMPATIBILITY_SHA_INPUT: ${{ inputs.compatibility_sha }}" in workflow

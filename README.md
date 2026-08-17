@@ -457,6 +457,12 @@ AGENT_PROACTIVE_ENABLED=false
 AGENT_PURCHASING_ENABLED=false
 ```
 
+Those are the safe bootstrap defaults. The protected production release keeps purchasing
+disabled everywhere and all three Agent flags disabled on non-web runtimes. Its explicit
+web write/proactive inputs must match the already reviewed Railway rollout state, allowing a
+release to preserve an approved controlled-action or proactive rollout without silently
+enabling, disabling, or weakening either kill switch.
+
 Keep Railway GitHub auto-deploy disabled for production. After review, run the
 protected **Production release** workflow for the compatibility SHA and then its
 hardening descendant. Preserve both commits when merging this cutover; a squash
