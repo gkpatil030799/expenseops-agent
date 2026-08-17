@@ -95,7 +95,11 @@ Railway upload can run.
    `/railway.gmail-receipts.json`, and Gmail promotions
    `/railway.gmail-promotions.json`. The shared `/railway.json` stays neutral.
 9. Explicitly set `AGENT_WRITE_ACTIONS_ENABLED`, `AGENT_PROACTIVE_ENABLED`, and
-   `AGENT_PURCHASING_ENABLED` to `false` on every runtime service.
+   `AGENT_PURCHASING_ENABLED` to `false` on the outbox and Gmail runtime services.
+   Keep `AGENT_PURCHASING_ENABLED=false` on web. For web write actions and proactive
+   attention, select the exact reviewed rollout state in the protected release inputs;
+   the workflow verifies those values against Railway without changing them. Both inputs
+   default to `false`, and enabling either still requires production-environment approval.
 10. Configure the protected GitHub `production` environment with the exact
     backup/migration credential and public-certificate contract described
     below. Keep the certificate private key and its password offline and

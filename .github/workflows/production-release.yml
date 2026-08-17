@@ -21,6 +21,22 @@ on:
         description: Previously deployed compatibility SHA (required for hardened cutover)
         required: false
         type: string
+      expected_web_agent_write_actions_enabled:
+        description: Approved AGENT_WRITE_ACTIONS_ENABLED state on the web service
+        required: true
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
+      expected_web_agent_proactive_enabled:
+        description: Approved AGENT_PROACTIVE_ENABLED state on the web service
+        required: true
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
 
 permissions:
   contents: read
@@ -1608,35 +1624,56 @@ jobs:
           test "${readiness_code}" = "503"
           unset deployments latest_success_message expected_message readiness_code
 
-      - name: Verify the Agent remains read only
+      - name: Verify approved Agent rollout flags
         env:
+          EXPECTED_WEB_AGENT_PROACTIVE_ENABLED: ${{ inputs.expected_web_agent_proactive_enabled }}
+          EXPECTED_WEB_AGENT_WRITE_ACTIONS_ENABLED: ${{ inputs.expected_web_agent_write_actions_enabled }}
           RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
         run: |
           set -Eeuo pipefail
-          for service_id in \
-            "${RAILWAY_OUTBOX_SERVICE_ID}" \
-            "${RAILWAY_GMAIL_RECEIPTS_SERVICE_ID}" \
-            "${RAILWAY_GMAIL_PROMOTIONS_SERVICE_ID}" \
-            "${RAILWAY_WEB_SERVICE_ID}"
-          do
+          verify_service_flags() {
+            local service_id="$1"
+            local expected_write="$2"
+            local expected_proactive="$3"
+            local expected_purchasing="$4"
+            local expected flag specification value variables
             variables="$(railway variable list \
               --project "${RAILWAY_PROJECT_ID}" \
               --environment "${RAILWAY_PRODUCTION_ENVIRONMENT_ID}" \
               --service "${service_id}" \
               --json)"
-            for flag in \
-              AGENT_WRITE_ACTIONS_ENABLED \
-              AGENT_PROACTIVE_ENABLED \
-              AGENT_PURCHASING_ENABLED
+            for specification in \
+              "AGENT_WRITE_ACTIONS_ENABLED=${expected_write}" \
+              "AGENT_PROACTIVE_ENABLED=${expected_proactive}" \
+              "AGENT_PURCHASING_ENABLED=${expected_purchasing}"
             do
+              flag="${specification%%=*}"
+              expected="${specification#*=}"
               value="$(jq -r --arg flag "${flag}" '.[$flag] // ""' <<<"${variables}")"
-              if [[ "${value,,}" != "false" ]]; then
-                echo "${flag} must be explicitly false on service ${service_id}." >&2
+              if [[ "${value,,}" != "${expected}" ]]; then
+                echo "${flag} must be explicitly ${expected} on service ${service_id}." >&2
                 exit 1
               fi
             done
+          }
+          for expected in \
+            "${EXPECTED_WEB_AGENT_WRITE_ACTIONS_ENABLED}" \
+            "${EXPECTED_WEB_AGENT_PROACTIVE_ENABLED}"
+          do
+            case "${expected}" in
+              true|false) ;;
+              *) echo "Expected Agent rollout inputs must be true or false." >&2; exit 1 ;;
+            esac
           done
-          unset variables
+          verify_service_flags "${RAILWAY_OUTBOX_SERVICE_ID}" false false false
+          verify_service_flags "${RAILWAY_GMAIL_RECEIPTS_SERVICE_ID}" false false false
+          verify_service_flags "${RAILWAY_GMAIL_PROMOTIONS_SERVICE_ID}" false false false
+          verify_service_flags \
+            "${RAILWAY_WEB_SERVICE_ID}" \
+            "${EXPECTED_WEB_AGENT_WRITE_ACTIONS_ENABLED}" \
+            "${EXPECTED_WEB_AGENT_PROACTIVE_ENABLED}" \
+            false
+          unset expected
 
       - name: Verify database credentials are isolated by service
         env:
