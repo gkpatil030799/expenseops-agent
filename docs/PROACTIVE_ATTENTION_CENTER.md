@@ -71,7 +71,8 @@ The in-app center is pull-based and sends no notification. Telegram digest deliv
 6. enforces exact duplicate, cooldown, and daily-cap checks;
 7. requires exactly one enabled Telegram identity owned by the authenticated workspace/user and
    passes that chat ID explicitly (there is no process-level fallback);
-8. writes one delivery record only after a successful send.
+8. persists a unique pending claim before the send, and counts it toward cooldowns and daily caps
+   only after a confirmed successful delivery.
 
 The service persists a unique `pending` claim before contacting Telegram. Concurrent invocations
 therefore skip before sending. Success advances the claim to `sent`; a provider exception becomes
