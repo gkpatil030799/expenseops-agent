@@ -308,7 +308,14 @@ def test_parser_sends_original_image_with_private_cost_bounded_payload_and_no_oc
     assert image_input["type"] == "input_image"
     assert image_input["detail"] == "auto"
     assert image_input["image_url"].startswith("data:image/jpeg;base64,")
-    assert parser.last_observation == ReceiptParseObservation(0, 1000, 250)
+    observation = parser.last_observation
+    assert observation is not None
+    assert observation.latency_ms >= 0
+    assert observation.input_tokens == 1000
+    assert observation.output_tokens == 250
+    assert observation.request_count == 1
+    assert observation.retry_reason is None
+    assert observation.estimated_cost_micros is None
 
 
 def test_parser_retries_once_for_materially_incomplete_image_and_keeps_better_parse():
