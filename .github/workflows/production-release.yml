@@ -37,6 +37,14 @@ on:
         options:
           - "false"
           - "true"
+      expected_autonomous_classification_enabled:
+        description: Approved AUTONOMOUS_CLASSIFICATION_ENABLED state on every application service
+        required: true
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
 
 permissions:
   contents: read
@@ -69,6 +77,7 @@ jobs:
       RAILWAY_PROJECT_ID: ${{ vars.RAILWAY_PROJECT_ID }}
       RAILWAY_PRODUCTION_ENVIRONMENT_ID: ${{ vars.RAILWAY_PRODUCTION_ENVIRONMENT_ID }}
       RAILWAY_OUTBOX_SERVICE_ID: ${{ vars.RAILWAY_OUTBOX_SERVICE_ID }}
+      RAILWAY_CLASSIFICATION_FINALIZER_SERVICE_ID: ${{ vars.RAILWAY_CLASSIFICATION_FINALIZER_SERVICE_ID }}
       RAILWAY_GMAIL_RECEIPTS_SERVICE_ID: ${{ vars.RAILWAY_GMAIL_RECEIPTS_SERVICE_ID }}
       RAILWAY_GMAIL_PROMOTIONS_SERVICE_ID: ${{ vars.RAILWAY_GMAIL_PROMOTIONS_SERVICE_ID }}
       RAILWAY_WEB_SERVICE_ID: ${{ vars.RAILWAY_WEB_SERVICE_ID }}
@@ -185,26 +194,36 @@ jobs:
           test "${actual_sha}" = "${REQUESTED_RELEASE_SHA}"
           git merge-base --is-ancestor "${actual_sha}" origin/main
           test -z "$(git status --porcelain)"
-          for name in \
-            RAILWAY_PROJECT_ID \
-            RAILWAY_PRODUCTION_ENVIRONMENT_ID \
-            RAILWAY_OUTBOX_SERVICE_ID \
-            RAILWAY_GMAIL_RECEIPTS_SERVICE_ID \
-            RAILWAY_GMAIL_PROMOTIONS_SERVICE_ID \
-            RAILWAY_WEB_SERVICE_ID \
-            RAILWAY_POSTGRES_SERVICE_ID \
+          required_names=(
+            RAILWAY_PROJECT_ID
+            RAILWAY_PRODUCTION_ENVIRONMENT_ID
+            RAILWAY_OUTBOX_SERVICE_ID
+            RAILWAY_GMAIL_RECEIPTS_SERVICE_ID
+            RAILWAY_GMAIL_PROMOTIONS_SERVICE_ID
+            RAILWAY_WEB_SERVICE_ID
+            RAILWAY_POSTGRES_SERVICE_ID
             PRODUCTION_BASE_URL
+          )
+          if [[ "${RELEASE_PHASE}" != "rollback" ]]; then
+            required_names+=(RAILWAY_CLASSIFICATION_FINALIZER_SERVICE_ID)
+          fi
+          for name in "${required_names[@]}"
           do
             test -n "${!name:-}" || { echo "${name} is required" >&2; exit 1; }
           done
-          for id_name in \
-            RAILWAY_PROJECT_ID \
-            RAILWAY_PRODUCTION_ENVIRONMENT_ID \
-            RAILWAY_OUTBOX_SERVICE_ID \
-            RAILWAY_GMAIL_RECEIPTS_SERVICE_ID \
-            RAILWAY_GMAIL_PROMOTIONS_SERVICE_ID \
-            RAILWAY_WEB_SERVICE_ID \
+          required_ids=(
+            RAILWAY_PROJECT_ID
+            RAILWAY_PRODUCTION_ENVIRONMENT_ID
+            RAILWAY_OUTBOX_SERVICE_ID
+            RAILWAY_GMAIL_RECEIPTS_SERVICE_ID
+            RAILWAY_GMAIL_PROMOTIONS_SERVICE_ID
+            RAILWAY_WEB_SERVICE_ID
             RAILWAY_POSTGRES_SERVICE_ID
+          )
+          if [[ "${RELEASE_PHASE}" != "rollback" ]]; then
+            required_ids+=(RAILWAY_CLASSIFICATION_FINALIZER_SERVICE_ID)
+          fi
+          for id_name in "${required_ids[@]}"
           do
             if [[ ! "${!id_name}" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]]; then
               echo "${id_name} must be a lowercase Railway UUID." >&2
@@ -223,6 +242,9 @@ jobs:
             "${RAILWAY_WEB_SERVICE_ID}"
             "${RAILWAY_POSTGRES_SERVICE_ID}"
           )
+          if [[ "${RELEASE_PHASE}" != "rollback" ]]; then
+            service_ids+=("${RAILWAY_CLASSIFICATION_FINALIZER_SERVICE_ID}")
+          fi
           unique_service_count="$(printf '%s\n' "${service_ids[@]}" | sort -u | wc -l | tr -d ' ')"
           if [[ "${unique_service_count}" != "${#service_ids[@]}" ]]; then
             echo "Each release component must use a distinct Railway service ID." >&2
@@ -307,6 +329,7 @@ jobs:
               ;;
           esac
           echo "RELEASE_SHA=${actual_sha}" >> "${GITHUB_ENV}"
+          unset required_names required_ids service_ids
 
       - name: Set up Node.js for the pinned Railway CLI
         uses: actions/setup-node@1e60f620b9541d16bece96c5465dc8ee9832be0b # v4.0.3
@@ -319,6 +342,7 @@ jobs:
       - name: Verify Railway service topology before any upload
         env:
           RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+          RELEASE_PHASE: ${{ inputs.release_phase }}
         run: |
           set -Eeuo pipefail
           environment_config="$(railway environment config \
@@ -335,15 +359,25 @@ jobs:
             ' <<<"${environment_config}" >/dev/null
           }
           verify_service_config "${RAILWAY_OUTBOX_SERVICE_ID}" /railway.outbox.json
+          if [[ "${RELEASE_PHASE}" != "rollback" ]]; then
+            verify_service_config \
+              "${RAILWAY_CLASSIFICATION_FINALIZER_SERVICE_ID}" \
+              /railway.classification-finalizer.json
+          fi
           verify_service_config \
             "${RAILWAY_GMAIL_RECEIPTS_SERVICE_ID}" /railway.gmail-receipts.json
           verify_service_config \
             "${RAILWAY_GMAIL_PROMOTIONS_SERVICE_ID}" /railway.gmail-promotions.json
           verify_service_config "${RAILWAY_WEB_SERVICE_ID}" /railway.web.json
-          for private_service_id in \
-            "${RAILWAY_OUTBOX_SERVICE_ID}" \
-            "${RAILWAY_GMAIL_RECEIPTS_SERVICE_ID}" \
+          private_service_ids=(
+            "${RAILWAY_OUTBOX_SERVICE_ID}"
+            "${RAILWAY_GMAIL_RECEIPTS_SERVICE_ID}"
             "${RAILWAY_GMAIL_PROMOTIONS_SERVICE_ID}"
+          )
+          if [[ "${RELEASE_PHASE}" != "rollback" ]]; then
+            private_service_ids+=("${RAILWAY_CLASSIFICATION_FINALIZER_SERVICE_ID}")
+          fi
+          for private_service_id in "${private_service_ids[@]}"
           do
             jq --exit-status --arg id "${private_service_id}" '
               ((.services[$id].networking.serviceDomains // {}) | length) == 0
@@ -351,6 +385,7 @@ jobs:
               and ((.services[$id].networking.tcpProxies // {}) | length) == 0
             ' <<<"${environment_config}" >/dev/null
           done
+          unset private_service_ids
           jq --exit-status --arg id "${RAILWAY_WEB_SERVICE_ID}" '
             (
               ((.services[$id].networking.serviceDomains // {}) | length)
@@ -508,6 +543,11 @@ jobs:
                   "audit_events",
                   "auth_identities",
                   "auth_sessions",
+                  "classification_concept_aliases",
+                  "classification_concepts",
+                  "classification_decisions",
+                  "classification_settings",
+                  "classification_subcategories",
                   "data_consents",
                   "errand_household_items",
                   "errand_plan_stop_errands",
@@ -571,6 +611,15 @@ jobs:
                   "proactive_attention_preferences",
               }
           )
+          CLASSIFICATION_TABLES = frozenset(
+              {
+                  "classification_concept_aliases",
+                  "classification_concepts",
+                  "classification_decisions",
+                  "classification_settings",
+                  "classification_subcategories",
+              }
+          )
           PRE_AGENT_REVISIONS = frozenset(
               {
                   "20260813_0023",
@@ -588,7 +637,8 @@ jobs:
                   "20260817_0031",
               }
           )
-          CURRENT_REVISIONS = frozenset({"20260817_0032"})
+          ATTENTION_REVISIONS = frozenset({"20260817_0032"})
+          CURRENT_REVISIONS = frozenset({"20260817_0033"})
 
 
           def sha256_file(path: Path) -> str:
@@ -615,6 +665,8 @@ jobs:
                   tables = APPLICATION_TABLES - AGENT_TABLES
               elif revision in AGENT_REVISIONS:
                   tables = APPLICATION_TABLES - PROACTIVE_ATTENTION_TABLES
+              elif revision in ATTENTION_REVISIONS:
+                  tables = APPLICATION_TABLES - CLASSIFICATION_TABLES
               elif revision in CURRENT_REVISIONS:
                   tables = APPLICATION_TABLES
               else:
@@ -1626,9 +1678,11 @@ jobs:
 
       - name: Verify approved Agent rollout flags
         env:
+          EXPECTED_AUTONOMOUS_CLASSIFICATION_ENABLED: ${{ inputs.expected_autonomous_classification_enabled }}
           EXPECTED_WEB_AGENT_PROACTIVE_ENABLED: ${{ inputs.expected_web_agent_proactive_enabled }}
           EXPECTED_WEB_AGENT_WRITE_ACTIONS_ENABLED: ${{ inputs.expected_web_agent_write_actions_enabled }}
           RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+          RELEASE_PHASE: ${{ inputs.release_phase }}
         run: |
           set -Eeuo pipefail
           verify_service_flags() {
@@ -1656,9 +1710,25 @@ jobs:
               fi
             done
           }
+          verify_classification_flag() {
+            local service_id="$1"
+            local variables value
+            variables="$(railway variable list \
+              --project "${RAILWAY_PROJECT_ID}" \
+              --environment "${RAILWAY_PRODUCTION_ENVIRONMENT_ID}" \
+              --service "${service_id}" \
+              --json)"
+            value="$(jq -r '.AUTONOMOUS_CLASSIFICATION_ENABLED // ""' <<<"${variables}")"
+            if [[ "${value,,}" != "${EXPECTED_AUTONOMOUS_CLASSIFICATION_ENABLED}" ]]; then
+              echo "AUTONOMOUS_CLASSIFICATION_ENABLED does not match the approved release state on service ${service_id}." >&2
+              exit 1
+            fi
+            unset variables value
+          }
           for expected in \
             "${EXPECTED_WEB_AGENT_WRITE_ACTIONS_ENABLED}" \
-            "${EXPECTED_WEB_AGENT_PROACTIVE_ENABLED}"
+            "${EXPECTED_WEB_AGENT_PROACTIVE_ENABLED}" \
+            "${EXPECTED_AUTONOMOUS_CLASSIFICATION_ENABLED}"
           do
             case "${expected}" in
               true|false) ;;
@@ -1666,6 +1736,10 @@ jobs:
             esac
           done
           verify_service_flags "${RAILWAY_OUTBOX_SERVICE_ID}" false false false
+          if [[ "${RELEASE_PHASE}" != "rollback" ]]; then
+            verify_service_flags \
+              "${RAILWAY_CLASSIFICATION_FINALIZER_SERVICE_ID}" false false false
+          fi
           verify_service_flags "${RAILWAY_GMAIL_RECEIPTS_SERVICE_ID}" false false false
           verify_service_flags "${RAILWAY_GMAIL_PROMOTIONS_SERVICE_ID}" false false false
           verify_service_flags \
@@ -1673,7 +1747,41 @@ jobs:
             "${EXPECTED_WEB_AGENT_WRITE_ACTIONS_ENABLED}" \
             "${EXPECTED_WEB_AGENT_PROACTIVE_ENABLED}" \
             false
+          if [[ "${RELEASE_PHASE}" != "rollback" ]]; then
+            for service_id in \
+              "${RAILWAY_OUTBOX_SERVICE_ID}" \
+              "${RAILWAY_CLASSIFICATION_FINALIZER_SERVICE_ID}" \
+              "${RAILWAY_GMAIL_RECEIPTS_SERVICE_ID}" \
+              "${RAILWAY_GMAIL_PROMOTIONS_SERVICE_ID}" \
+              "${RAILWAY_WEB_SERVICE_ID}"
+            do
+              verify_classification_flag "${service_id}"
+            done
+          fi
           unset expected
+
+      - name: Verify autonomous classification finalizer configuration
+        if: ${{ inputs.release_phase != 'rollback' }}
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          variables="$(railway variable list \
+            --project "${RAILWAY_PROJECT_ID}" \
+            --environment "${RAILWAY_PRODUCTION_ENVIRONMENT_ID}" \
+            --service "${RAILWAY_CLASSIFICATION_FINALIZER_SERVICE_ID}" \
+            --json)"
+          classification_model="$(jq -r '.CLASSIFICATION_MODEL // ""' <<<"${variables}")"
+          openai_key="$(jq -r '.OPENAI_API_KEY // ""' <<<"${variables}")"
+          if [[ "${classification_model}" != "gpt-5.6-luna" ]]; then
+            echo "The classification finalizer must use the reviewed classification model." >&2
+            exit 1
+          fi
+          if [[ -z "${openai_key}" ]]; then
+            echo "The classification finalizer is missing OPENAI_API_KEY." >&2
+            exit 1
+          fi
+          unset variables classification_model openai_key
 
       - name: Verify receipt processing configuration
         env:
@@ -1712,6 +1820,7 @@ jobs:
       - name: Verify database credentials are isolated by service
         env:
           RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+          RELEASE_PHASE: ${{ inputs.release_phase }}
         run: |
           set -Eeuo pipefail
           database_target_fingerprints=()
@@ -1795,11 +1904,16 @@ jobs:
             unset variables candidate_url candidate_user forbidden_name identity_name identity_value
             unset app_environment database_target_fingerprint candidate_target_fingerprint
           }
-          for service_id in \
-            "${RAILWAY_OUTBOX_SERVICE_ID}" \
-            "${RAILWAY_GMAIL_RECEIPTS_SERVICE_ID}" \
-            "${RAILWAY_GMAIL_PROMOTIONS_SERVICE_ID}" \
+          runtime_service_ids=(
+            "${RAILWAY_OUTBOX_SERVICE_ID}"
+            "${RAILWAY_GMAIL_RECEIPTS_SERVICE_ID}"
+            "${RAILWAY_GMAIL_PROMOTIONS_SERVICE_ID}"
             "${RAILWAY_WEB_SERVICE_ID}"
+          )
+          if [[ "${RELEASE_PHASE}" != "rollback" ]]; then
+            runtime_service_ids+=("${RAILWAY_CLASSIFICATION_FINALIZER_SERVICE_ID}")
+          fi
+          for service_id in "${runtime_service_ids[@]}"
           do
             verify_database_user "${service_id}" expenseops_runtime
           done
@@ -1826,6 +1940,7 @@ jobs:
           fi
           unset database_target_fingerprints unique_database_target_count
           unset selected_postgres_target_fingerprint
+          unset runtime_service_ids
 
       - name: Apply migrations and reconcile grants before any Railway deployment
         if: ${{ inputs.release_phase != 'rollback' }}
@@ -1851,7 +1966,18 @@ jobs:
             "${RELEASE_SHA}" \
             outbox
 
-      - name: Deploy Gmail receipts cron after outbox succeeds
+      - name: Deploy classification finalizer after outbox succeeds
+        if: ${{ inputs.release_phase != 'rollback' }}
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+        run: |
+          bash "${EXPENSEOPS_RAILWAY_DEPLOY_HELPER}" \
+            "${RAILWAY_CLASSIFICATION_FINALIZER_SERVICE_ID}" \
+            /railway.classification-finalizer.json \
+            "${RELEASE_SHA}" \
+            classification-finalizer
+
+      - name: Deploy Gmail receipts cron after classification finalizer succeeds
         env:
           RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
         run: |

@@ -29,7 +29,17 @@ type Integrations = {
   openai: { connected: boolean; managed_by: string };
 };
 type OnboardingStatus = { complete: boolean };
-type ConsentPurpose = "gmail_receipts" | "gmail_promotions" | "model_receipt_processing";
+type ClassificationSettings = {
+  autonomous_enabled: boolean;
+  global_rollout_enabled: boolean;
+  effective_autonomous_enabled: boolean;
+};
+type ConsentPurpose =
+  | "gmail_receipts"
+  | "gmail_promotions"
+  | "model_receipt_processing"
+  | "model_transaction_classification"
+  | "structured_transaction_learning";
 type PrivacySummary = {
   policy_version: string;
   privacy_url: string;
@@ -65,6 +75,7 @@ export function AccountSettingsPage({ context, splitwiseTools, learnedBehaviorTo
   const [integrationError, setIntegrationError] = useState("");
   const [onboarding, setOnboarding] = useState<OnboardingStatus | null>(null);
   const [privacy, setPrivacy] = useState<PrivacySummary | null>(null);
+  const [classificationSettings, setClassificationSettings] = useState<ClassificationSettings | null>(null);
   const [deletionConfirmation, setDeletionConfirmation] = useState("");
   const [section, setSection] = useState<SettingsSection>("account");
   const [focusedIntegrationId, setFocusedIntegrationId] = useState<string | null>(null);
@@ -142,6 +153,12 @@ export function AccountSettingsPage({ context, splitwiseTools, learnedBehaviorTo
     setIntegrations(integrationValues);
     setMembers(memberValues);
     setOnboarding(onboardingValue);
+    const current = workspaceValues.find((workspace) => workspace.current);
+    if (current?.role === "owner") {
+      setClassificationSettings(await api<ClassificationSettings>("/api/classification/settings"));
+    } else {
+      setClassificationSettings(null);
+    }
   }
 
   useEffect(() => {
@@ -247,6 +264,16 @@ export function AccountSettingsPage({ context, splitwiseTools, learnedBehaviorTo
     }, granted ? "Data-use choice saved." : "Data-use permission withdrawn.");
   }
 
+  async function updateAutomaticClassification(enabled: boolean) {
+    await performAction("classification-autonomy", async () => {
+      const updated = await api<ClassificationSettings>("/api/classification/settings", {
+        method: "PATCH",
+        body: JSON.stringify({ autonomous_enabled: enabled }),
+      });
+      setClassificationSettings(updated);
+    }, enabled ? "Automatic internal classification preference enabled." : "Automatic internal classification disabled.");
+  }
+
   async function deleteAccount() {
     if (!privacy || deletionConfirmation !== privacy.deletion.confirmation) return;
     if (!window.confirm("Permanently disconnect your providers and delete your ExpenseOps account? This cannot be undone.")) return;
@@ -350,7 +377,8 @@ export function AccountSettingsPage({ context, splitwiseTools, learnedBehaviorTo
             <Card><CardHeader><CardTitle>Data-use choices</CardTitle><CardDescription>Choose what ExpenseOps may read and process before connecting Gmail. You can withdraw these permissions later.</CardDescription></CardHeader><CardContent className="grid gap-2">
               <ConsentToggle label="Receipt emails" detail="Read matching receipt and order emails to create correctable purchase records." checked={privacy?.consents.gmail_receipts || false} busy={busyAction === "consent-gmail_receipts"} onChange={(checked) => updateConsent("gmail_receipts", checked)} />
               <ConsentToggle label="Promotion emails" detail="Read promotional messages to extract relevant deals; unrelated mailbox content is not requested." checked={privacy?.consents.gmail_promotions || false} busy={busyAction === "consent-gmail_promotions"} onChange={(checked) => updateConsent("gmail_promotions", checked)} />
-              <ConsentToggle label="Configured model processing" detail="Allow relevant receipt or promotion text to be sent to the configured model provider when parsing needs it." checked={privacy?.consents.model_receipt_processing || false} busy={busyAction === "consent-model_receipt_processing"} onChange={(checked) => updateConsent("model_receipt_processing", checked)} />
+              <ConsentToggle label="Configured model processing" detail="Allow relevant receipt email or promotion text, and receipt photo or PDF bytes you submit, to be sent to the configured model provider when parsing needs it." checked={privacy?.consents.model_receipt_processing || false} busy={busyAction === "consent-model_receipt_processing"} onChange={(checked) => updateConsent("model_receipt_processing", checked)} />
+              <ConsentToggle label="Model-assisted transaction categories" detail="Allow bounded unresolved transaction merchant, description, and provider-category evidence to be sent to the configured model provider for category suggestions. Turning this off does not stop imports, deterministic classification, provider evidence, or linked-receipt classification." checked={privacy?.consents.model_transaction_classification || false} busy={busyAction === "consent-model_transaction_classification"} onChange={(checked) => updateConsent("model_transaction_classification", checked)} />
               <p className="text-xs leading-5 text-slate-600">Review the <a className="font-medium text-indigo-700 underline" href="/legal/privacy" target="_blank" rel="noreferrer">Privacy Policy</a> before connecting.</p>
             </CardContent></Card>
             <Card><CardContent className="grid gap-3 p-4 sm:p-5">
@@ -368,8 +396,13 @@ export function AccountSettingsPage({ context, splitwiseTools, learnedBehaviorTo
             {splitwiseTools || <UnavailableSettings title="Splitwise tools are unavailable" detail="Connect Splitwise in Workspace connections first." />}
           </SettingsPanel> : null}
 
-          {section === "learning" ? <SettingsPanel title="Learned behavior" description="Review saved people, groups, and fallback memories used to assist future decisions.">
-            {learnedBehaviorTools || <UnavailableSettings title="No learned behavior yet" detail="ExpenseOps will surface correctable memories after you review transactions." />}
+          {section === "learning" ? <SettingsPanel title="Learned behavior" description="Review saved people, groups, and correctable classification behavior used to assist future decisions.">
+            {canManageWorkspace && classificationSettings ? <Card><CardHeader><CardTitle>Automatic classification</CardTitle><CardDescription>This owner-managed workspace control affects internal categorization only. It cannot post expenses, buy anything, or perform external writes.</CardDescription></CardHeader><CardContent className="grid gap-3">
+              <ConsentToggle label="Automatic internal classification" detail="Categorize imported transactions and receipt items automatically. Turning this off stops autonomous classification, finalization, and backfill; ingestion and deterministic receipt-to-transaction matching continue." checked={classificationSettings.autonomous_enabled} busy={busyAction === "classification-autonomy"} onChange={updateAutomaticClassification} />
+              {!classificationSettings.global_rollout_enabled ? <p className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-900">The application rollout switch is currently off, so this workspace preference is not effective yet.</p> : null}
+              <p className="text-xs text-slate-600" role="status">Current effective state: <strong>{classificationSettings.effective_autonomous_enabled ? "On" : "Off"}</strong></p>
+            </CardContent></Card> : null}
+            {learnedBehaviorTools || <UnavailableSettings title="No learned behavior yet" detail="ExpenseOps will surface correctable memories after it classifies or you correct transactions." />}
           </SettingsPanel> : null}
 
           {section === "privacy" ? <SettingsPanel title="Privacy and account actions" description="Understand where data is used and access irreversible workspace actions.">

@@ -148,6 +148,16 @@ def test_readiness_membership_queries_reject_both_graph_directions():
     assert "OR membership.roleid = " in source
 
 
+def test_readiness_requires_append_only_runtime_privileges_for_decision_ledger():
+    source = getsource(readiness)
+
+    assert 'append_only_tables = [' in source
+    assert '"classification_decisions"' in source
+    assert "NOT has_table_privilege(current_user, c.oid, 'INSERT')" in source
+    assert "has_table_privilege(current_user, c.oid, 'UPDATE')" in source
+    assert "has_table_privilege(current_user, c.oid, 'DELETE')" in source
+
+
 def _routing_rows(proconfig: object = ("search_path=pg_catalog, pg_temp",)):
     return [
         {

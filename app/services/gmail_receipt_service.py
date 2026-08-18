@@ -11,7 +11,14 @@ from sqlalchemy.orm import Session
 
 from app.config import Settings, get_settings
 from app.job_tenancy import gmail_settings_for_session
-from app.models import GmailSyncCheckpoint, PurchaseReceipt, utc_now
+from app.models import (
+    GmailAccount,
+    GmailSyncCheckpoint,
+    PurchaseReceipt,
+    User,
+    WorkspaceMembership,
+    utc_now,
+)
 from app.services.data_lifecycle_service import gmail_consent_granted
 from app.services.gmail_client_service import GmailClient
 from app.services.receipt_ingestion_service import ReceiptIngestionService
@@ -107,7 +114,11 @@ class GmailReceiptService:
                 continue
             attachments = _message_receipt_attachments(message)
             selected = attachments[0] if attachments else None
-            ingestion = ReceiptIngestionService(self.db, self.settings)
+            ingestion = ReceiptIngestionService(
+                self.db,
+                self.settings,
+                owner_user_id=self._active_account_owner_user_id,
+            )
             if selected is not None and not _looks_like_structured_receipt(body):
                 content = _attachment_content(selected, message_id, token, self.gmail)
                 receipt = ingestion.ingest_attachment(
@@ -158,6 +169,28 @@ class GmailReceiptService:
     @property
     def _checkpoint_key(self) -> str:
         return f"{self.settings.gmail_user_id}:receipts"
+
+    @property
+    def _active_account_owner_user_id(self) -> int | None:
+        workspace_id = self.db.info.get("workspace_id")
+        if not isinstance(workspace_id, int):
+            return None
+        return self.db.scalar(
+            select(GmailAccount.user_id)
+            .join(User, User.id == GmailAccount.user_id)
+            .join(
+                WorkspaceMembership,
+                (WorkspaceMembership.workspace_id == GmailAccount.workspace_id)
+                & (WorkspaceMembership.user_id == GmailAccount.user_id),
+            )
+            .where(
+                GmailAccount.workspace_id == workspace_id,
+                GmailAccount.google_user_id == self.settings.gmail_user_id,
+                GmailAccount.enabled.is_(True),
+                User.status == "active",
+            )
+            .limit(1)
+        )
 
     def _access_token(self) -> str:
         return self.gmail.access_token()

@@ -30,6 +30,7 @@ import {
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { ClassificationCorrectionPanel } from "@/components/ClassificationCorrectionPanel";
 import { Input } from "@/components/ui/input";
 import { PageHeader } from "@/components/ui/page-header";
 import {
@@ -39,9 +40,11 @@ import {
   type AgentNavigationRequest,
 } from "@/agent/pageContext";
 import { api } from "@/lib/api";
+import { classificationCategoryLabel } from "@/classificationActivity";
 import type {
   Errand,
   ErrandPlan,
+  ClassificationActivityOut,
   HouseholdItem,
   PlaceCandidate,
   PlaceSearchResult,
@@ -197,6 +200,8 @@ export function HouseholdOpsPage({
   const [manualPlace, setManualPlace] = useState<ManualPlaceForm>(emptyManualPlaceForm);
   const [rememberPlace, setRememberPlace] = useState(true);
   const [learning, setLearning] = useState<ReplenishmentLearningSummary | null>(null);
+  const [classificationActivity, setClassificationActivity] = useState<ClassificationActivityOut | null>(null);
+  const [classificationActivityDate, setClassificationActivityDate] = useState(() => utcToday());
   const [receiptItemDraft, setReceiptItemDraft] = useState<ReceiptItemDraft | null>(null);
   const [receiptDecisionDrafts, setReceiptDecisionDrafts] = useState<Record<number, Record<number, ReceiptLineDecisionDraft>>>({});
   const [reviewingReceiptId, setReviewingReceiptId] = useState<number | null>(null);
@@ -379,6 +384,11 @@ export function HouseholdOpsPage({
         });
       }),
       load("predictions", api<ReplenishmentLearningSummary>("/api/replenishment/summary"), setLearning),
+      load(
+        "classification activity",
+        fetchClassificationActivity(classificationActivityDate),
+        setClassificationActivity,
+      ),
       load("receipt queue", api<ReceiptPage>("/api/replenishment/receipts?bucket=active&limit=25&include_meta=true"), (page) => { receiptPages.active = page; }),
       load("receipt history", api<ReceiptPage>("/api/replenishment/receipts?bucket=history&limit=25&include_meta=true"), (page) => { receiptPages.history = page; }),
       load("Gmail receipt status", api<GmailReceiptSyncStatus>("/api/replenishment/gmail/status"), setGmailSyncStatus),
@@ -412,6 +422,14 @@ export function HouseholdOpsPage({
     } finally {
       setBusy(null);
     }
+  }
+
+  async function selectClassificationActivityDate(activityDate: string) {
+    await run("classification-date", async () => {
+      const activity = await fetchClassificationActivity(activityDate);
+      setClassificationActivityDate(activityDate);
+      setClassificationActivity(activity);
+    });
   }
 
   async function saveErrand() {
@@ -723,7 +741,7 @@ export function HouseholdOpsPage({
   async function restoreReceipt(receipt: PurchaseReceipt) {
     await run(`receipt-restore-${receipt.id}`, async () => {
       await api(`/api/replenishment/receipts/${receipt.id}/restore`, { method: "POST" });
-      setNotice(`${receipt.merchant || "Receipt"} is back in the review queue.`);
+      setNotice(`${receipt.merchant || "Receipt"} is back in optional review.`);
       setLastIgnoredReceipt(null);
       setExpandedHistoryReceiptId(null);
       await loadHouseholdOps();
@@ -1098,15 +1116,23 @@ export function HouseholdOpsPage({
       <HouseholdNavigation active={householdView} onChange={setHouseholdView} receiptCount={receiptQueueTotal} />
 
       {householdView === "today" ? (
-        <TodayOverview
-          receiptCount={receiptQueueTotal}
-          unresolvedErrandCount={activeErrands.filter((errand) => errand.place_resolution_status !== "resolved").length}
-          activeErrandCount={activeErrands.length}
-          dueItemCount={dueItems.length}
-          plan={plan}
-          loading={busy === "initial"}
-          onChange={setHouseholdView}
-        />
+        <div className="space-y-5">
+          <TodayOverview
+            receiptCount={receiptQueueTotal}
+            unresolvedErrandCount={activeErrands.filter((errand) => errand.place_resolution_status !== "resolved").length}
+            activeErrandCount={activeErrands.length}
+            dueItemCount={dueItems.length}
+            plan={plan}
+            loading={busy === "initial"}
+            onChange={setHouseholdView}
+          />
+          {classificationActivity ? <ClassificationActivityOverview
+            activity={classificationActivity}
+            loadingDate={busy === "classification-date"}
+            onActivityDateChange={selectClassificationActivityDate}
+            onCorrected={loadHouseholdOps}
+          /> : null}
+        </div>
       ) : null}
 
       {householdView === "receipts" ? <Card>
@@ -1116,7 +1142,7 @@ export function HouseholdOpsPage({
               <Brain className="h-4 w-4" /> Learning from purchases
             </div>
             <CardTitle>Replenishment learning</CardTitle>
-            <CardDescription>Receipt matches and your feedback improve estimates; every purchase remains correctable.</CardDescription>
+            <CardDescription>ExpenseOps categorizes what it can automatically. Receipt matches, optional corrections, and confirmed purchases improve estimates; every result remains correctable.</CardDescription>
           </div>
           <div className="flex w-full flex-wrap gap-2 sm:w-auto sm:justify-end">
             <input
@@ -1172,7 +1198,7 @@ export function HouseholdOpsPage({
                       </div>
                     ))}
                   </div>
-                ) : <EmptyPanel icon={PackageCheck} title="Nothing predicted for this week" description="Confirm purchases over time to build a useful pattern." compact />}
+                ) : <EmptyPanel icon={PackageCheck} title="Nothing predicted for this week" description="ExpenseOps learns purchase timing from linked receipts and transaction history." compact />}
               </section>
 
               <section className="grid gap-3 sm:grid-cols-3">
@@ -1185,11 +1211,11 @@ export function HouseholdOpsPage({
                 <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
                   <div>
                     <div className="inline-flex items-center gap-2 text-sm font-semibold text-slate-900">
-                      <ReceiptText className="h-4 w-4 text-slate-500" /> Receipts needing attention
+                      <ReceiptText className="h-4 w-4 text-slate-500" /> Optional receipt review
                     </div>
-                    <p className="mt-1 text-xs text-slate-600">Completed receipts leave this queue automatically.</p>
+                    <p className="mt-1 text-xs text-slate-600">Automatic classification continues. Review only to correct uncertain, unmatched, or incorrectly categorized items.</p>
                   </div>
-                  <Badge variant="secondary">{receiptQueueTotal} to review</Badge>
+                  <Badge variant="secondary">{receiptQueueTotal} available</Badge>
                 </div>
                 {receiptQueue.length ? <div className="space-y-3">
                   <div className="divide-y divide-slate-100 overflow-hidden rounded-xl border border-slate-200">
@@ -1197,7 +1223,7 @@ export function HouseholdOpsPage({
                   </div>
                   {receiptQueueHasMore ? <div className="flex justify-center"><Button variant="outline" onClick={() => loadMoreReceipts("active")} disabled={busy !== null}>{busy === "receipts-more-active" ? "Loading…" : `Load more (${receiptQueue.length} of ${receiptQueueTotal})`}</Button></div> : null}
                   {receiptQueue.find((receipt) => receipt.id === reviewingReceiptId) ? <ReceiptReviewCard receipt={receiptQueue.find((receipt) => receipt.id === reviewingReceiptId)!} items={items} draft={receiptItemDraft} decisions={receiptDecisionDrafts[reviewingReceiptId!] || {}} busy={busy !== null} onDraft={setReceiptItemDraft} onMatch={stageReceiptMatch} onTrack={trackReceiptItem} onUndo={undoReceiptAcquisition} onSave={saveReceiptDecisions} onConfirm={(receipt) => receiptAction(receipt, "confirm")} onIgnore={(receipt) => receiptAction(receipt, "ignore")} onClose={() => setReviewingReceiptId(null)} /> : null}
-                </div> : <EmptyPanel icon={CheckCircle2} title="Receipt queue is clear" description="New Gmail or Telegram receipts will appear here when they need a decision." compact />}
+                </div> : <EmptyPanel icon={CheckCircle2} title="No optional receipt reviews" description="ExpenseOps will keep categorizing incoming receipts. Uncertain or failed items will appear here without blocking other processing." compact />}
 
               </section>
 
@@ -1371,7 +1397,7 @@ export function HouseholdOpsPage({
               ))}
             </div>
           ) : (
-            <EmptyPanel icon={PackageCheck} title="No staples are currently surfaced" description="Add purchase history and cadence data, then refresh recommendations." compact />
+            <EmptyPanel icon={PackageCheck} title="No staples are currently surfaced" description="ExpenseOps learns staples from incoming receipts; manually added items appear here too." compact />
           )}
 
           <div className="border-t border-slate-100 pt-5">
@@ -1447,17 +1473,131 @@ function HouseholdNavigation({ active, onChange, receiptCount }: { active: House
   </div>;
 }
 
+function ClassificationActivityOverview({ activity, loadingDate, onActivityDateChange, onCorrected }: { activity: ClassificationActivityOut; loadingDate: boolean; onActivityDateChange: (value: string) => Promise<void>; onCorrected: () => Promise<void> }) {
+  const decisionCount = activity.counts.transactions + activity.counts.receipt_items;
+  const isToday = activity.activity_date === utcToday();
+  const hasActivity = decisionCount
+    + activity.counts.receipt_matches
+    + activity.counts.new_household_items
+    + activity.counts.cadence_updates > 0;
+  return (
+    <Card data-testid="classification-activity-overview" className="overflow-hidden border-indigo-200 bg-indigo-50/30">
+      <CardHeader className="pb-3">
+        <div className="flex min-w-0 flex-col items-start justify-between gap-3 sm:flex-row">
+          <div className="min-w-0">
+            <div className="mb-1 inline-flex items-center gap-2 text-xs font-semibold uppercase tracking-wide text-indigo-700">
+              <Brain className="h-4 w-4" aria-hidden="true" /> Classification activity
+            </div>
+            <CardTitle>{isToday ? "Categorized today" : `Categorized on ${activity.activity_date}`}</CardTitle>
+            <CardDescription>
+              A read-only {activity.timezone} record of what ExpenseOps categorized, matched, or left uncertain. Everything remains correctable.
+            </CardDescription>
+          </div>
+          <div className="flex w-full flex-wrap items-end gap-2 sm:w-auto sm:justify-end">
+            <label className="grid min-w-0 flex-1 gap-1 text-xs font-medium text-slate-600 sm:flex-none">
+              Activity date (UTC)
+              <input
+                type="date"
+                className={`${controlClass} min-w-0 sm:w-40`}
+                value={activity.activity_date}
+                max={utcToday()}
+                disabled={loadingDate}
+                onChange={(event) => { if (event.target.value) void onActivityDateChange(event.target.value); }}
+              />
+            </label>
+            {activity.counts.uncertain ? <Badge variant="outline">{activity.counts.uncertain} optional review</Badge> : <Badge variant="secondary">Up to date</Badge>}
+          </div>
+        </div>
+      </CardHeader>
+      <CardContent className="space-y-4 pt-0">
+        {hasActivity ? (
+          <>
+            <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 xl:grid-cols-4" aria-label="Today's classification totals">
+              <ClassificationOverviewMetric label="Decisions" value={decisionCount} />
+              <ClassificationOverviewMetric label="Categories used" value={activity.counts.categories} />
+              <ClassificationOverviewMetric label="New categories" value={activity.counts.new_categories} />
+              <ClassificationOverviewMetric label="Receipt matches" value={activity.counts.receipt_matches} />
+              <ClassificationOverviewMetric label="New staples" value={activity.counts.new_household_items} />
+              <ClassificationOverviewMetric label="Cadence updates" value={activity.counts.cadence_updates} />
+              <ClassificationOverviewMetric label="Optional review" value={activity.counts.uncertain} />
+            </div>
+            {activity.categories.length ? (
+              <section aria-label="Categories used today">
+                <h3 className="text-xs font-semibold uppercase tracking-wide text-slate-600">Categories used</h3>
+                <div className="mt-2 flex flex-wrap gap-2">
+                  {activity.categories.map((category) => (
+                    <Badge key={category.parent_category} variant="secondary">
+                      {classificationCategoryLabel(category.parent_category)} · {category.total_count}
+                    </Badge>
+                  ))}
+                </div>
+              </section>
+            ) : null}
+            {activity.new_categories.length ? (
+              <section aria-label="New categories created today">
+                <h3 className="text-xs font-semibold uppercase tracking-wide text-slate-600">New categories created</h3>
+                <div className="mt-2 flex flex-wrap gap-2">
+                  {activity.new_categories.map((category) => (
+                    <Badge key={category.decision_public_id} variant="outline">
+                      {category.subcategory} · {classificationCategoryLabel(category.parent_category)}
+                    </Badge>
+                  ))}
+                </div>
+              </section>
+            ) : null}
+            {activity.uncertain.length ? (
+              <section aria-label="Optional classification review" className="rounded-xl border border-amber-200 bg-amber-50/70 p-3">
+                <h3 className="text-sm font-semibold text-amber-950">Optional review</h3>
+                <p className="mt-1 text-xs leading-5 text-amber-900">ExpenseOps kept these outcomes uncertain instead of guessing. Automatic processing is not blocked.</p>
+                <ul className="mt-2 space-y-1 text-sm text-amber-950">
+                  {activity.uncertain.slice(0, 3).map((row) => (
+                    <li key={`${row.kind}-${row.public_id}-${row.observed_at}`} className="[overflow-wrap:anywhere]">• {row.label}</li>
+                  ))}
+                </ul>
+              </section>
+            ) : null}
+            <ClassificationCorrectionPanel
+              transactions={activity.transactions}
+              receiptItems={activity.receipt_items}
+              onCorrected={onCorrected}
+            />
+            {activity.truncated_sections.length ? <p className="text-xs text-slate-600">This bounded summary has additional activity.</p> : null}
+          </>
+        ) : (
+          <p className="rounded-xl border border-dashed border-slate-200 bg-white/70 px-4 py-3 text-sm text-slate-600">
+            No classification activity has been recorded yet today.
+          </p>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+function ClassificationOverviewMetric({ label, value }: { label: string; value: number }) {
+  return <div className="min-w-0 rounded-xl border border-slate-200 bg-white p-3"><p className="text-xs leading-4 text-slate-600 [overflow-wrap:anywhere]">{label}</p><p className="mt-1 text-xl font-semibold tabular-nums text-slate-950">{value}</p></div>;
+}
+
+async function fetchClassificationActivity(activityDate: string): Promise<ClassificationActivityOut> {
+  const value = await api<unknown>(`/api/replenishment/classification-activity?activity_date=${encodeURIComponent(activityDate)}&view=summary&limit=10`);
+  const { parseClassificationActivityOut } = await import("@/agent/validation");
+  return parseClassificationActivityOut(value);
+}
+
+function utcToday(): string {
+  return new Date().toISOString().slice(0, 10);
+}
+
 function TodayOverview({ receiptCount, unresolvedErrandCount, activeErrandCount, dueItemCount, plan, loading, onChange }: { receiptCount: number; unresolvedErrandCount: number; activeErrandCount: number; dueItemCount: number; plan: ErrandPlan | null; loading: boolean; onChange: (value: HouseholdView) => void }) {
   if (loading) return <section aria-label="Loading household overview" role="status" className="space-y-3"><span className="sr-only">Loading household overview</span><div className="ui-skeleton h-40 rounded-xl" /><div className="ui-skeleton h-28 rounded-xl" /></section>;
 
-  const recommendation = receiptCount
-    ? { icon: ReceiptText, eyebrow: "Learning needs a decision", title: `Review ${receiptCount} receipt${receiptCount === 1 ? "" : "s"}`, detail: "Confirm which purchases should teach replenishment timing.", action: "Review receipts", view: "receipts" as HouseholdView }
-    : unresolvedErrandCount
-      ? { icon: MapPin, eyebrow: "Route is blocked", title: `Choose locations for ${unresolvedErrandCount} errand${unresolvedErrandCount === 1 ? "" : "s"}`, detail: "Every stop needs a concrete destination before it can be routed.", action: "Resolve locations", view: "errands" as HouseholdView }
-      : dueItemCount
-        ? { icon: ShoppingBasket, eyebrow: "Likely needed soon", title: `Review ${dueItemCount} staple${dueItemCount === 1 ? "" : "s"}`, detail: "These are timing estimates based on confirmed purchase history, not inventory claims.", action: "Review staples", view: "staples" as HouseholdView }
-        : activeErrandCount
-          ? { icon: Route, eyebrow: plan ? "Next trip is ready" : "Errands can be combined", title: plan ? "Review your next route" : `Plan ${activeErrandCount} active errand${activeErrandCount === 1 ? "" : "s"}`, detail: plan ? "Check the latest stops before you leave." : "Choose an origin and endpoint to reduce separate trips.", action: plan ? "Open route details" : "Build a route", view: "errands" as HouseholdView }
+  const recommendation = unresolvedErrandCount
+    ? { icon: MapPin, eyebrow: "Route is blocked", title: `Choose locations for ${unresolvedErrandCount} errand${unresolvedErrandCount === 1 ? "" : "s"}`, detail: "Every stop needs a concrete destination before it can be routed.", action: "Resolve locations", view: "errands" as HouseholdView }
+    : dueItemCount
+      ? { icon: ShoppingBasket, eyebrow: "Likely needed soon", title: `Review ${dueItemCount} staple${dueItemCount === 1 ? "" : "s"}`, detail: "These are timing estimates based on confirmed purchase history, not inventory claims.", action: "Review staples", view: "staples" as HouseholdView }
+      : activeErrandCount
+        ? { icon: Route, eyebrow: plan ? "Next trip is ready" : "Errands can be combined", title: plan ? "Review your next route" : `Plan ${activeErrandCount} active errand${activeErrandCount === 1 ? "" : "s"}`, detail: plan ? "Check the latest stops before you leave." : "Choose an origin and endpoint to reduce separate trips.", action: plan ? "Open route details" : "Build a route", view: "errands" as HouseholdView }
+        : receiptCount
+          ? { icon: ReceiptText, eyebrow: "Optional review", title: `${receiptCount} receipt${receiptCount === 1 ? " is" : "s are"} available to review`, detail: "ExpenseOps categorized what it could automatically. Review only to correct uncertain or unmatched items.", action: "Review details", view: "receipts" as HouseholdView }
           : null;
 
   if (!recommendation) {
@@ -1475,7 +1615,7 @@ function TodayOverview({ receiptCount, unresolvedErrandCount, activeErrandCount,
     </Card>
     <div className="flex flex-wrap gap-2 text-xs text-slate-700" aria-label="Household queue summary">
       <QueuePill icon={ListChecks} value={activeErrandCount} label="active errands" onClick={() => onChange("errands")} />
-      <QueuePill icon={ReceiptText} value={receiptCount} label="receipts to review" onClick={() => onChange("receipts")} />
+      <QueuePill icon={ReceiptText} value={receiptCount} label="optional receipt reviews" onClick={() => onChange("receipts")} />
       <QueuePill icon={ShoppingBasket} value={dueItemCount} label="staples surfaced" onClick={() => onChange("staples")} />
     </div>
     {plan ? <TodayRouteSummary plan={plan} onOpen={() => onChange("errands")} showAction={recommendation.view !== "errands"} /> : null}
@@ -1496,7 +1636,7 @@ function GmailSyncStatus({ status, busy }: { status: GmailReceiptSyncStatus | nu
 }
 
 function HouseholdHistory({ receipts, receiptTotal, receiptHasMore, errands, items, draft, expandedReceiptId, busy, onToggleReceipt, onDraft, onMatch, onTrack, onUndoReceipt, onRestoreReceipt, onLoadMoreReceipts, onRepeatErrand, onDeleteErrand }: { receipts: PurchaseReceipt[]; receiptTotal: number; receiptHasMore: boolean; errands: Errand[]; items: HouseholdItem[]; draft: ReceiptItemDraft | null; expandedReceiptId: number | null; busy: boolean; onToggleReceipt: (receiptId: number) => void; onDraft: React.Dispatch<React.SetStateAction<ReceiptItemDraft | null>>; onMatch: (receipt: PurchaseReceipt, line: PurchaseReceipt["items"][number], value: string) => void; onTrack: () => void; onUndoReceipt: (receipt: PurchaseReceipt, acquisitionId: number) => void; onRestoreReceipt: (receipt: PurchaseReceipt) => void; onLoadMoreReceipts: () => void; onRepeatErrand: (errand: Errand) => void; onDeleteErrand: (errand: Errand) => void }) {
-  return <div className="grid gap-5 xl:grid-cols-2"><Card><CardHeader><div className="mb-1 inline-flex items-center gap-2 text-xs font-semibold uppercase text-slate-500"><ReceiptText className="h-4 w-4" />Receipts</div><CardTitle>Receipt history</CardTitle><CardDescription>{receiptTotal} completed or ignored receipt{receiptTotal === 1 ? "" : "s"}. They stay available without occupying the review queue.</CardDescription></CardHeader><CardContent className="space-y-3">{receipts.length ? <div className="divide-y divide-slate-200 overflow-hidden rounded-lg border border-slate-200 bg-white">{receipts.map((receipt) => <ReceiptHistoryRow key={receipt.id} receipt={receipt} expanded={expandedReceiptId === receipt.id} busy={busy} items={items} draft={draft} onToggle={() => onToggleReceipt(receipt.id)} onDraft={onDraft} onMatch={onMatch} onTrack={onTrack} onUndo={onUndoReceipt} onRestore={() => onRestoreReceipt(receipt)} />)}</div> : <EmptyPanel icon={ReceiptText} title="No completed receipts yet" description="Confirmed and ignored receipts will appear here." compact />}{receiptHasMore ? <div className="flex justify-center"><Button variant="outline" onClick={onLoadMoreReceipts} disabled={busy}>{`Load more (${receipts.length} of ${receiptTotal})`}</Button></div> : null}</CardContent></Card><Card><CardHeader><div className="mb-1 inline-flex items-center gap-2 text-xs font-semibold uppercase text-slate-500"><ListChecks className="h-4 w-4" />Errands</div><CardTitle>Errand history</CardTitle><CardDescription>Repeat a past errand without rebuilding its destination.</CardDescription></CardHeader><CardContent>{errands.length ? <div className="divide-y divide-slate-200 overflow-hidden rounded-lg border border-slate-200 bg-white">{errands.map((errand) => <ErrandHistoryRow key={errand.id} errand={errand} busy={busy} onRepeat={() => onRepeatErrand(errand)} onDelete={() => onDeleteErrand(errand)} />)}</div> : <EmptyPanel icon={ListChecks} title="No completed errands yet" description="Completed and skipped errands will appear here." compact />}</CardContent></Card></div>;
+  return <div className="grid gap-5 xl:grid-cols-2"><Card><CardHeader><div className="mb-1 inline-flex items-center gap-2 text-xs font-semibold uppercase text-slate-500"><ReceiptText className="h-4 w-4" />Receipts</div><CardTitle>Receipt history</CardTitle><CardDescription>{receiptTotal} completed or ignored receipt{receiptTotal === 1 ? "" : "s"}. They stay available without appearing in optional review.</CardDescription></CardHeader><CardContent className="space-y-3">{receipts.length ? <div className="divide-y divide-slate-200 overflow-hidden rounded-lg border border-slate-200 bg-white">{receipts.map((receipt) => <ReceiptHistoryRow key={receipt.id} receipt={receipt} expanded={expandedReceiptId === receipt.id} busy={busy} items={items} draft={draft} onToggle={() => onToggleReceipt(receipt.id)} onDraft={onDraft} onMatch={onMatch} onTrack={onTrack} onUndo={onUndoReceipt} onRestore={() => onRestoreReceipt(receipt)} />)}</div> : <EmptyPanel icon={ReceiptText} title="No completed receipts yet" description="Confirmed and ignored receipts will appear here." compact />}{receiptHasMore ? <div className="flex justify-center"><Button variant="outline" onClick={onLoadMoreReceipts} disabled={busy}>{`Load more (${receipts.length} of ${receiptTotal})`}</Button></div> : null}</CardContent></Card><Card><CardHeader><div className="mb-1 inline-flex items-center gap-2 text-xs font-semibold uppercase text-slate-500"><ListChecks className="h-4 w-4" />Errands</div><CardTitle>Errand history</CardTitle><CardDescription>Repeat a past errand without rebuilding its destination.</CardDescription></CardHeader><CardContent>{errands.length ? <div className="divide-y divide-slate-200 overflow-hidden rounded-lg border border-slate-200 bg-white">{errands.map((errand) => <ErrandHistoryRow key={errand.id} errand={errand} busy={busy} onRepeat={() => onRepeatErrand(errand)} onDelete={() => onDeleteErrand(errand)} />)}</div> : <EmptyPanel icon={ListChecks} title="No completed errands yet" description="Completed and skipped errands will appear here." compact />}</CardContent></Card></div>;
 }
 
 function WhileOutPanel({
@@ -1753,7 +1893,7 @@ function ReceiptQueueRow({ receipt, selected, busy, onReview, onIgnore }: { rece
     ? "Processing failed"
     : receipt.parse_quality === "partial"
       ? "Partly read"
-      : "Needs review";
+      : "Optional review";
   return (
     <div className={`flex flex-col gap-3 p-4 transition sm:flex-row sm:items-center sm:justify-between ${selected ? "bg-indigo-50/60" : "bg-white hover:bg-slate-50/70"}`}>
       <div className="min-w-0">
@@ -1825,6 +1965,7 @@ function ReceiptItemsEditor({ receipt, items, draft, decisions, busy, onDraft, o
               : line.household_item_id?.toString() || "";
     return <div key={line.id} className={`grid gap-1 rounded-lg ${creatingThisItem ? "border border-indigo-200 bg-indigo-50/50 p-3" : staged ? "border border-indigo-100 bg-indigo-50/30 p-3" : ""}`}>
       <label className="grid gap-1 text-xs font-medium text-slate-700"><span className="truncate">{line.raw_name}</span><select className={controlClass} value={selectedValue} onChange={(event) => onMatch(receipt, line, event.target.value)} disabled={["ignored", "failed"].includes(receipt.parse_status) || busy} aria-label={`Match ${line.raw_name}`}><option value="">Unmatched — decide later</option>{items.map((item) => <option key={item.id} value={item.id}>Match to: {item.name}</option>)}<option value="create">＋ Track as a new household item…</option><option value="reject">Not a household item</option></select></label>
+      {line.spending_parent_category ? <p className="text-xs leading-5 text-slate-600 [overflow-wrap:anywhere]">Categorized as {classificationCategoryLabel(line.spending_parent_category)}{line.classification_subcategory_name ? ` / ${line.classification_subcategory_name}` : ""}{line.item_activity_type ? ` · ${classificationValueLabel(line.item_activity_type)}` : ""}{line.replenishment_eligibility ? ` · ${classificationValueLabel(line.replenishment_eligibility)}` : ""}</p> : null}
       {staged?.decision === "create" ? <p className="text-xs leading-5 text-indigo-700">Recommended: track as <strong>{staged.name}</strong>. It starts in Learning with no guessed cadence.</p> : null}
       {staged?.decision === "match" ? <p className="text-xs leading-5 text-amber-700">Suggested match to <strong>{stagedItem?.name || "the selected item"}</strong>—included only if you confirm this batch.</p> : null}
       {!staged && line.match_status === "matched" ? <p className="text-xs leading-5 text-emerald-700">Matched automatically to {line.household_item_name}.</p> : null}
@@ -1893,6 +2034,11 @@ function receiptClassificationLabel(classification: PurchaseReceipt["items"][num
     non_product_line: "non-product line",
     uncertain: "uncertain line",
   }[classification || "uncertain"];
+}
+
+function classificationValueLabel(value: string) {
+  const label = value.replace(/_/g, " ");
+  return label.charAt(0).toUpperCase() + label.slice(1);
 }
 
 function ItemEditor({ form, setForm, editing, busy, onSave, onCancel }: { form: ItemForm; setForm: React.Dispatch<React.SetStateAction<ItemForm>>; editing: boolean; busy: boolean; onSave: () => void; onCancel: () => void }) {

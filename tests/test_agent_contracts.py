@@ -19,6 +19,7 @@ from app.agent.contracts import (
     AgentMessageCreate,
     AgentMessageOut,
     AgentPageContext,
+    AgentReceiptLineSummary,
     AgentStructuredResponse,
     AgentSurface,
     hydrate_persisted_agent_response,
@@ -481,6 +482,27 @@ def test_v1_structured_response_still_hydrates_original_domain_bounds_and_fields
     assert dumped["blocks"][1]["total_line_count"] == 26
     assert dumped["blocks"][2]["total_count"] == 26
     assert dumped["blocks"][3]["integrations"][0]["scope"] is None
+
+
+def test_receipt_line_taxonomy_projection_is_complete_or_legacy_absent():
+    assert AgentReceiptLineSummary(name="Legacy line").parent_category is None
+    projected = AgentReceiptLineSummary(
+        name="Paper towels",
+        parent_category="household_home",
+        subcategory="Paper goods",
+        concept="Paper towels",
+        activity_type="household_consumable",
+        replenishment_eligibility="replenishable",
+        classification_confidence=0.94,
+    )
+    assert projected.activity_type == "household_consumable"
+
+    with pytest.raises(ValidationError, match="projection must be complete"):
+        AgentReceiptLineSummary(
+            name="Incomplete",
+            parent_category="household_home",
+            classification_confidence=0.9,
+        )
 
 
 def test_structured_response_rejects_unknown_blocks_and_extra_rendering_fields():

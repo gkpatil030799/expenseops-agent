@@ -128,6 +128,18 @@ class Settings(BaseSettings):
     receipt_max_attachment_bytes: int = Field(default=10_000_000, ge=100_000, le=25_000_000)
     receipt_auto_match_confidence: float = Field(default=0.9, ge=0.0, le=1.0)
     receipt_possible_match_confidence: float = Field(default=0.65, ge=0.0, le=1.0)
+    # Day 16 autonomous classification is a separate, reversible bookkeeping
+    # capability.  The global switch is an operator rollout kill switch; the
+    # remaining values are safe defaults for workspace-owned controls.
+    autonomous_classification_enabled: bool = False
+    autonomous_classification_grace_hours: int = Field(default=24, ge=1, le=168)
+    autonomous_category_creation_enabled: bool = True
+    autonomous_cadence_estimation_enabled: bool = True
+    classification_model: str = "gpt-5.6-luna"
+    classification_batch_size: int = Field(default=25, ge=1, le=50)
+    classification_finalizer_batch_size: int = Field(default=100, ge=1, le=500)
+    classification_finalizer_poll_seconds: int = Field(default=300, ge=30, le=3600)
+    classification_backfill_batch_size: int = Field(default=100, ge=1, le=500)
     gmail_receipt_sync_enabled: bool = False
     gmail_client_id: str = Field(default="", repr=False)
     gmail_client_secret: str = Field(default="", repr=False)

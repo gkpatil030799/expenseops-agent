@@ -70,6 +70,7 @@ def run_benchmark() -> ReceiptLearningBenchmark:
 
 
 def _run(db: Session) -> ReceiptLearningBenchmark:
+    db.info["workspace_id"] = 1
     receipts = _seeded_receipts()
     parser = _SequenceParser(receipts)
     service = ReceiptIngestionService(
@@ -219,11 +220,15 @@ def _seeded_receipts() -> list[ParsedReceipt]:
                     name=name,
                     quantity=1,
                     unit="each",
+                    line_total_cents=(
+                        total_cents // len(names)
+                        + (1 if index < total_cents % len(names) else 0)
+                    ),
                     confidence=0.95,
                     classification=("uncertain" if name == "HOME 24" else None),
                     classification_confidence=(0.4 if name == "HOME 24" else None),
                 )
-                for name in names
+                for index, name in enumerate(names)
             ],
         )
 

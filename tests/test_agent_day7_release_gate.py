@@ -150,6 +150,7 @@ def test_registry_exposes_no_secret_or_arbitrary_execution_capability():
     names = {item.name for item in metadata}
 
     assert names == {
+        "get_classification_activity",
         "get_spending_insights",
         "get_lifestyle_dining_insights",
         "search_transactions",

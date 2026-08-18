@@ -9,6 +9,7 @@ import {
   type AgentStreamEvent,
   type AgentStructuredResponse,
 } from "./contracts";
+import type { ClassificationActivityOut } from "../classificationActivity";
 import { isAgentNavigationRequest } from "./pageContext";
 
 export class AgentProtocolError extends Error {
@@ -73,6 +74,27 @@ export function parseAgentStructuredResponse(value: unknown): AgentStructuredRes
   }
   record.blocks.forEach(parseSupportedBlock);
   return value as AgentStructuredResponse;
+}
+
+export function parseClassificationActivityOut(value: unknown): ClassificationActivityOut {
+  const record = requireRecord(value);
+  const keys = [
+    "schema_version", "view", "activity_date", "timezone", "as_of", "counts",
+    "transactions", "receipt_items", "categories", "new_categories", "receipt_matches",
+    "new_household_items", "cadence_updates", "uncertain", "truncated_sections",
+  ];
+  requireAllowedKeys(record, keys);
+  requireKeys(record, keys);
+  requireSchema(record);
+  requireString(record.as_of, 128);
+  const { schema_version: _schemaVersion, as_of: _asOf, ...activity } = record;
+  parseClassificationActivityBlock({
+    ...activity,
+    type: "classification_activity_summary",
+    block_version: "1.0",
+    title: "Classification activity",
+  });
+  return value as ClassificationActivityOut;
 }
 
 export function parseAgentConversation(value: unknown): AgentConversation {
@@ -298,12 +320,38 @@ function parseSupportedBlock(value: unknown): void {
       if (!Array.isArray(block.items) || block.items.length > 100) throw new AgentProtocolError();
       block.items.forEach((item) => {
         const row = requireRecord(item);
+        requireAllowedKeys(row, [
+          "name", "quantity", "unit", "line_total_cents", "match_status",
+          "household_item_name", "parent_category", "subcategory", "concept",
+          "activity_type", "replenishment_eligibility", "classification_confidence",
+          "confirmed_acquisition",
+        ]);
         requireString(row.name, 500);
         requireNullableFiniteNumber(row.quantity);
         requireNullableString(row.unit, 64);
         requireNullableIntegerValue(row.line_total_cents);
         requireOneOf(row.match_status, ["matched", "possible", "unmatched", "ignored"]);
         requireNullableString(row.household_item_name, 255);
+        requireNullableString(row.subcategory, 128);
+        requireNullableString(row.concept, 255);
+        const taxonomyValues = [
+          row.parent_category,
+          row.activity_type,
+          row.replenishment_eligibility,
+          row.classification_confidence,
+        ];
+        const hasTaxonomy = taxonomyValues.some((value) => value !== null && value !== undefined);
+        if (hasTaxonomy) {
+          if (taxonomyValues.some((value) => value === null || value === undefined)) {
+            throw new AgentProtocolError();
+          }
+          requireOneOf(row.parent_category, CLASSIFICATION_PARENT_CATEGORIES);
+          requireOneOf(row.activity_type, CLASSIFICATION_ACTIVITY_TYPES);
+          requireOneOf(row.replenishment_eligibility, CLASSIFICATION_REPLENISHMENT);
+          requireNullableNumberRange(row.classification_confidence, 0, 1);
+        } else if (row.subcategory != null || row.concept != null) {
+          throw new AgentProtocolError();
+        }
         requireBoolean(row.confirmed_acquisition);
       });
       return;
@@ -361,6 +409,9 @@ function parseSupportedBlock(value: unknown): void {
         requireNullableString(row.message, 500);
         requireNullableString(row.last_successful_sync_at, 128);
       });
+      return;
+    case "classification_activity_summary":
+      parseClassificationActivityBlock(block);
       return;
     case "attention_summary":
       parseAttentionSummaryBlock(block);
@@ -444,6 +495,334 @@ export function parseAgentActionConfirmation(
   return value as AgentActionConfirmationBlock;
 }
 
+const CLASSIFICATION_VIEWS = [
+  "summary",
+  "categories",
+  "new_categories",
+  "matches",
+  "staples",
+  "cadence",
+  "uncertain",
+] as const;
+
+const CLASSIFICATION_SECTIONS = [
+  "transactions",
+  "receipt_items",
+  "categories",
+  "new_categories",
+  "receipt_matches",
+  "new_household_items",
+  "cadence_updates",
+  "uncertain",
+] as const;
+
+const CLASSIFICATION_PARENT_CATEGORIES = [
+  "food_dining",
+  "household_home",
+  "lifestyle_shopping",
+  "personal_care",
+  "health",
+  "transportation",
+  "travel",
+  "entertainment",
+  "subscriptions",
+  "pets",
+  "education_office",
+  "services",
+  "fees_taxes_discounts",
+  "other_uncertain",
+] as const;
+
+const CLASSIFICATION_ACTIVITY_TYPES = [
+  "grocery", "household_consumable", "routine_consumption", "one_time_purchase",
+  "restaurant_meal", "coffee_beverage", "food_delivery", "nightlife", "apparel",
+  "electronics", "pharmacy", "personal_care", "beauty", "pet_supply", "automotive",
+  "transportation", "travel", "entertainment", "subscription", "education_office",
+  "service", "tax", "tip", "discount", "fee", "refund", "non_product", "uncertain",
+] as const;
+
+const CLASSIFICATION_REPLENISHMENT = [
+  "replenishable",
+  "potentially_replenishable",
+  "not_replenishable",
+  "uncertain",
+] as const;
+
+const CLASSIFICATION_CONFIDENCE = ["low", "medium", "high"] as const;
+const CLASSIFICATION_STATES = ["provisional", "final", "corrected"] as const;
+const CLASSIFICATION_AUTHORITIES = [
+  "fallback",
+  "model_evidence",
+  "provider_evidence",
+  "receipt_evidence",
+  "deterministic_exact",
+  "confirmed_alias",
+  "user_correction",
+] as const;
+const CADENCE_SOURCES = [
+  "configured",
+  "learning",
+  "category_prior",
+  "model_prior",
+  "observed",
+  "quantity_adjusted",
+  "adaptive",
+] as const;
+
+function parseClassificationActivityBlock(block: Record<string, unknown>): void {
+  const keys = [
+    "type", "block_id", "block_version", "title", "view", "activity_date", "timezone",
+    "counts", "transactions", "receipt_items", "categories", "new_categories", "receipt_matches",
+    "new_household_items", "cadence_updates", "uncertain", "truncated_sections",
+  ];
+  requireAllowedKeys(block, keys);
+  requireKeys(block, keys.filter((key) => key !== "block_id"));
+  if (block.block_version !== "1.0") throw new AgentProtocolError();
+  requireString(block.title, 160);
+  requireOneOf(block.view, CLASSIFICATION_VIEWS);
+  requireString(block.activity_date, 32);
+  if (block.timezone !== "UTC") throw new AgentProtocolError();
+
+  const counts = requireRecord(block.counts);
+  requireAllowedKeys(counts, CLASSIFICATION_SECTIONS.slice());
+  requireKeys(counts, CLASSIFICATION_SECTIONS.slice());
+  CLASSIFICATION_SECTIONS.forEach((section) => requireNonNegativeInteger(counts[section]));
+
+  parseClassificationRows(block.transactions, 20, parseClassificationTransaction);
+  parseClassificationRows(block.receipt_items, 20, parseClassificationReceiptItem);
+  parseClassificationRows(block.categories, 20, parseClassificationCategory);
+  parseClassificationRows(block.new_categories, 20, parseClassificationNewCategory);
+  parseClassificationRows(block.receipt_matches, 20, parseClassificationReceiptMatch);
+  parseClassificationRows(block.new_household_items, 20, parseClassificationHouseholdItem);
+  parseClassificationRows(block.cadence_updates, 20, parseClassificationHouseholdItem);
+  parseClassificationRows(block.uncertain, 20, parseClassificationUncertain);
+
+  const rows: Record<(typeof CLASSIFICATION_SECTIONS)[number], unknown[]> = {
+    transactions: block.transactions as unknown[],
+    receipt_items: block.receipt_items as unknown[],
+    categories: block.categories as unknown[],
+    new_categories: block.new_categories as unknown[],
+    receipt_matches: block.receipt_matches as unknown[],
+    new_household_items: block.new_household_items as unknown[],
+    cadence_updates: block.cadence_updates as unknown[],
+    uncertain: block.uncertain as unknown[],
+  };
+  const view = block.view as (typeof CLASSIFICATION_VIEWS)[number];
+  const allowed = view === "summary"
+    ? new Set<string>(CLASSIFICATION_SECTIONS)
+    : new Set<string>({
+      categories: ["categories"],
+      new_categories: ["new_categories"],
+      matches: ["receipt_matches"],
+      staples: ["new_household_items"],
+      cadence: ["cadence_updates"],
+      uncertain: ["uncertain"],
+    }[view]);
+  for (const section of CLASSIFICATION_SECTIONS) {
+    if (!allowed.has(section) && rows[section].length) throw new AgentProtocolError();
+    if (rows[section].length > (counts[section] as number)) throw new AgentProtocolError();
+  }
+
+  if (!Array.isArray(block.truncated_sections) || block.truncated_sections.length > 8) {
+    throw new AgentProtocolError();
+  }
+  const truncated = block.truncated_sections.map((section) => {
+    requireOneOf(section, CLASSIFICATION_SECTIONS);
+    return section as (typeof CLASSIFICATION_SECTIONS)[number];
+  });
+  if (new Set(truncated).size !== truncated.length) throw new AgentProtocolError();
+  const expected = CLASSIFICATION_SECTIONS.filter(
+    (section) => allowed.has(section) && (counts[section] as number) > rows[section].length,
+  );
+  if (expected.length !== truncated.length || expected.some((section) => !truncated.includes(section))) {
+    throw new AgentProtocolError();
+  }
+}
+
+function parseClassificationRows(
+  value: unknown,
+  maximum: number,
+  parser: (record: Record<string, unknown>) => void,
+): void {
+  if (!Array.isArray(value) || value.length > maximum) throw new AgentProtocolError();
+  value.forEach((row) => parser(requireRecord(row)));
+}
+
+const CLASSIFICATION_DECISION_KEYS = [
+  "decision_public_id", "public_id", "source_available", "version", "parent_category",
+  "subcategory", "concept", "activity_type", "replenishment_eligibility", "confidence",
+  "confidence_band", "authority", "decision_state", "provenance_codes", "auto_finalize_at",
+  "finalized_at", "corrects_decision_public_id", "created_subcategory", "created_concept",
+  "created_household_item", "applied_at",
+] as const;
+
+function parseClassificationDecision(
+  row: Record<string, unknown>,
+  extraKeys: string[],
+): void {
+  const keys = [...CLASSIFICATION_DECISION_KEYS, ...extraKeys];
+  requireAllowedKeys(row, keys);
+  requireKeys(row, keys);
+  requireString(row.decision_public_id, 128);
+  requireString(row.public_id, 128);
+  requireBoolean(row.source_available);
+  requirePositiveInteger(row.version);
+  requireOneOf(row.parent_category, CLASSIFICATION_PARENT_CATEGORIES);
+  requireNullableString(row.subcategory, 128);
+  requireNullableString(row.concept, 255);
+  requireOneOf(row.activity_type, CLASSIFICATION_ACTIVITY_TYPES);
+  requireOneOf(row.replenishment_eligibility, CLASSIFICATION_REPLENISHMENT);
+  requireNullableNumberRange(row.confidence, 0, 1);
+  if (row.confidence === null || row.confidence === undefined) throw new AgentProtocolError();
+  requireOneOf(row.confidence_band, CLASSIFICATION_CONFIDENCE);
+  requireOneOf(row.authority, CLASSIFICATION_AUTHORITIES);
+  requireOneOf(row.decision_state, CLASSIFICATION_STATES);
+  if (!Array.isArray(row.provenance_codes) || row.provenance_codes.length < 1 || row.provenance_codes.length > 16) {
+    throw new AgentProtocolError();
+  }
+  row.provenance_codes.forEach((code) => {
+    const value = requireString(code, 64);
+    if (!/^[a-z0-9_]+$/.test(value)) throw new AgentProtocolError();
+  });
+  if (new Set(row.provenance_codes).size !== row.provenance_codes.length) throw new AgentProtocolError();
+  requireNullableString(row.auto_finalize_at, 128);
+  requireNullableString(row.finalized_at, 128);
+  requireNullableString(row.corrects_decision_public_id, 128);
+  requireBoolean(row.created_subcategory);
+  requireBoolean(row.created_concept);
+  requireBoolean(row.created_household_item);
+  requireString(row.applied_at, 128);
+}
+
+function parseClassificationTransaction(row: Record<string, unknown>): void {
+  parseClassificationDecision(row, ["merchant", "occurred_on"]);
+  requireString(row.merchant, 255);
+  requireNullableString(row.occurred_on, 32);
+}
+
+function parseClassificationReceiptItem(row: Record<string, unknown>): void {
+  parseClassificationDecision(row, [
+    "receipt_public_id", "merchant", "name", "household_item_public_id", "household_item_name",
+  ]);
+  requireString(row.receipt_public_id, 128);
+  requireNullableString(row.merchant, 255);
+  requireString(row.name, 500);
+  requireNullableString(row.household_item_public_id, 128);
+  requireNullableString(row.household_item_name, 255);
+  if ((row.household_item_public_id === null) !== (row.household_item_name === null)) {
+    throw new AgentProtocolError();
+  }
+}
+
+function parseClassificationCategory(row: Record<string, unknown>): void {
+  requireAllowedKeys(row, ["parent_category", "transaction_count", "receipt_item_count", "total_count"]);
+  requireKeys(row, ["parent_category", "transaction_count", "receipt_item_count", "total_count"]);
+  requireOneOf(row.parent_category, CLASSIFICATION_PARENT_CATEGORIES);
+  requireNonNegativeInteger(row.transaction_count);
+  requireNonNegativeInteger(row.receipt_item_count);
+  requirePositiveInteger(row.total_count);
+  if (row.total_count !== (row.transaction_count as number) + (row.receipt_item_count as number)) {
+    throw new AgentProtocolError();
+  }
+}
+
+function parseClassificationNewCategory(row: Record<string, unknown>): void {
+  const keys = [
+    "decision_public_id", "parent_category", "subcategory", "source_type", "authority",
+    "created_at",
+  ];
+  requireAllowedKeys(row, keys);
+  requireKeys(row, keys);
+  requireString(row.decision_public_id, 128);
+  requireOneOf(row.parent_category, CLASSIFICATION_PARENT_CATEGORIES);
+  requireString(row.subcategory, 128);
+  requireOneOf(row.source_type, ["transaction", "receipt_line"]);
+  requireOneOf(row.authority, CLASSIFICATION_AUTHORITIES);
+  requireString(row.created_at, 128);
+}
+
+function parseClassificationReceiptMatch(row: Record<string, unknown>): void {
+  const keys = [
+    "receipt_public_id", "merchant", "status", "confidence", "transaction_public_id",
+    "reason_code", "attempted_at", "matched_at",
+  ];
+  requireAllowedKeys(row, keys);
+  requireKeys(row, keys);
+  requireString(row.receipt_public_id, 128);
+  requireNullableString(row.merchant, 255);
+  requireOneOf(row.status, ["auto_matched", "ambiguous", "no_match"]);
+  requireNullableNumberRange(row.confidence, 0, 1);
+  if (row.confidence === null || row.confidence === undefined) throw new AgentProtocolError();
+  requireNullableString(row.transaction_public_id, 128);
+  requireOneOf(row.reason_code, [
+    "matched_by_receipt_evidence", "multiple_possible_transactions",
+    "no_eligible_transaction", "linked_transaction_unavailable",
+  ]);
+  requireString(row.attempted_at, 128);
+  requireNullableString(row.matched_at, 128);
+  if (
+    row.status !== "auto_matched" &&
+    (row.transaction_public_id !== null || row.matched_at !== null)
+  ) throw new AgentProtocolError();
+}
+
+function parseClassificationHouseholdItem(row: Record<string, unknown>): void {
+  const keys = [
+    "created_by_decision_public_id", "public_id", "name", "parent_category",
+    "replenishment_eligibility", "classification_confidence", "cadence_source",
+    "cadence_days", "cadence_min_days", "cadence_max_days", "cadence_confidence", "activity_at",
+  ];
+  requireAllowedKeys(row, keys);
+  requireKeys(row, keys);
+  requireNullableString(row.created_by_decision_public_id, 128);
+  requireString(row.public_id, 128);
+  requireString(row.name, 255);
+  requireOneOf(row.parent_category, CLASSIFICATION_PARENT_CATEGORIES);
+  requireOneOf(row.replenishment_eligibility, CLASSIFICATION_REPLENISHMENT);
+  requireNullableNumberRange(row.classification_confidence, 0, 1);
+  requireOneOf(row.cadence_source, CADENCE_SOURCES);
+  requireNullablePositiveInteger(row.cadence_days);
+  requireNullablePositiveInteger(row.cadence_min_days);
+  requireNullablePositiveInteger(row.cadence_max_days);
+  requireNullableNumberRange(row.cadence_confidence, 0, 1);
+  if (row.classification_confidence == null || row.cadence_confidence == null) {
+    throw new AgentProtocolError();
+  }
+  if (
+    row.cadence_min_days !== null && row.cadence_max_days !== null &&
+    (row.cadence_min_days as number) > (row.cadence_max_days as number)
+  ) throw new AgentProtocolError();
+  requireString(row.activity_at, 128);
+}
+
+function parseClassificationUncertain(row: Record<string, unknown>): void {
+  const keys = [
+    "kind", "public_id", "receipt_public_id", "label", "reasons", "confidence_band",
+    "decision_state", "observed_at",
+  ];
+  requireAllowedKeys(row, keys);
+  requireKeys(row, keys);
+  requireOneOf(row.kind, ["transaction", "receipt_item", "receipt_match"]);
+  requireString(row.public_id, 128);
+  requireNullableString(row.receipt_public_id, 128);
+  requireString(row.label, 500);
+  if (!Array.isArray(row.reasons) || row.reasons.length < 1 || row.reasons.length > 6) {
+    throw new AgentProtocolError();
+  }
+  row.reasons.forEach((reason) => requireOneOf(reason, [
+    "low_confidence", "provisional", "other_uncertain", "replenishment_uncertain",
+    "ambiguous_receipt_match", "no_receipt_match",
+  ]));
+  if (new Set(row.reasons).size !== row.reasons.length) throw new AgentProtocolError();
+  if (row.confidence_band !== null) requireOneOf(row.confidence_band, CLASSIFICATION_CONFIDENCE);
+  if (row.decision_state !== null) requireOneOf(row.decision_state, CLASSIFICATION_STATES);
+  requireString(row.observed_at, 128);
+  if (
+    (row.kind === "receipt_item") !== (row.receipt_public_id !== null) ||
+    (row.kind === "receipt_match") !== (row.confidence_band === null && row.decision_state === null)
+  ) throw new AgentProtocolError();
+}
+
 const ATTENTION_DOMAINS = [
   "spending",
   "lifestyle",
@@ -453,6 +832,7 @@ const ATTENTION_DOMAINS = [
   "deals",
   "errands",
   "integrations",
+  "classification",
 ] as const;
 
 const ATTENTION_PRIORITIES = [
@@ -745,6 +1125,11 @@ function requireNullableNonNegativeInteger(value: unknown): void {
   requireNonNegativeInteger(value);
 }
 
+function requireNullablePositiveInteger(value: unknown): void {
+  if (value === null || value === undefined) return;
+  requirePositiveInteger(value);
+}
+
 function requireFiniteNumber(value: unknown): void {
   if (typeof value !== "number" || !Number.isFinite(value)) throw new AgentProtocolError();
 }
@@ -776,6 +1161,7 @@ function requireToolActivity(value: unknown): void {
     "deals",
     "errands",
     "integrations",
+    "classification",
   ]);
 }
 

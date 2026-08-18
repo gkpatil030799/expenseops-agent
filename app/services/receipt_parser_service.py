@@ -362,8 +362,8 @@ def _from_json(value: dict) -> ParsedReceipt:
                 name=_bounded_string(item["name"], 500),
                 quantity=_nullable_number(item["quantity"]),
                 unit=_nullable_string(item["unit"], 64),
-                unit_price_cents=_nullable_nonnegative_int(item["unit_price_cents"]),
-                line_total_cents=_nullable_nonnegative_int(item["line_total_cents"]),
+                unit_price_cents=_nullable_signed_int(item["unit_price_cents"]),
+                line_total_cents=_nullable_signed_int(item["line_total_cents"]),
                 brand=_nullable_string(item["brand"], 255),
                 category=_nullable_string(item["category"], 128),
                 confidence=_confidence(item["confidence"]),
@@ -480,14 +480,18 @@ def _arithmetic_status(
     parsed: ParsedReceipt,
 ) -> Literal["reconciled", "mismatch", "not_checkable"]:
     checks: list[bool] = []
-    product_lines = [
+    arithmetic_lines = [
         item
         for item in parsed.items
-        if item.classification != "non_product_line" and item.line_total_cents is not None
+        if item.line_total_cents is not None
+        and (
+            item.classification != "non_product_line"
+            or int(item.line_total_cents) < 0
+        )
     ]
-    if parsed.line_items_complete and parsed.items and len(product_lines) == len(parsed.items):
+    if parsed.line_items_complete and parsed.items and len(arithmetic_lines) == len(parsed.items):
         if parsed.subtotal_cents is not None:
-            line_subtotal = sum(int(item.line_total_cents or 0) for item in product_lines)
+            line_subtotal = sum(int(item.line_total_cents or 0) for item in arithmetic_lines)
             checks.append(
                 abs((line_subtotal - (parsed.discount_cents or 0)) - parsed.subtotal_cents) <= 2
             )
@@ -585,6 +589,18 @@ def _nullable_nonnegative_int(value: object) -> int | None:
     return value
 
 
+def _nullable_signed_int(value: object) -> int | None:
+    if value is None:
+        return None
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, int)
+        or not -2_147_483_648 <= value <= 2_147_483_647
+    ):
+        raise ValueError("Receipt money is invalid")
+    return value
+
+
 def _bounded_string(value: object, maximum: int) -> str:
     if not isinstance(value, str):
         raise ValueError("Expected string")
@@ -607,14 +623,17 @@ def _currency(value: object) -> str:
 
 _PROMPT = """Determine whether the input is a purchase receipt, then extract only visible facts.
 Set is_receipt=false for a non-receipt image and return null facts plus an empty items list.
-Extract only actual purchased line items from a receipt/order confirmation.
+Extract actual purchased line items and explicitly printed returned/refunded item rows from a
+receipt/order confirmation.
 Ignore advertisements, recommendations, payment card numbers, loyalty identifiers,
 and unrelated email text.
 Use integer cents for monetary values. Return null when a field is not visible; never invent it.
 Define subtotal_cents as the post-discount amount before tax and tip. Return discount_cents as a
 positive informational magnitude. Use 0 for tax/tip/discount only when the receipt makes absence
 clear; otherwise use null. Do not include coupon, discount, tax, tip, subtotal, or total rows as
-purchased items; represent those only in their top-level fields. Mark line_items_complete=false
+purchased items; represent those only in their top-level fields. Use negative cents for a visibly
+returned/refunded item row and classify it as non_product_line; never infer a return from context.
+Mark line_items_complete=false
 when an edge, blur, shadow, or obstruction may hide lines. Use only the closed quality warning
 codes in the schema.
 Mark non-household/service/refund lines with is_household_purchase=false. Confidence is 0..1.
@@ -660,6 +679,12 @@ _QUALITY_WARNINGS = frozenset(
 _NULLABLE_INTEGER = {
     "anyOf": [
         {"type": "integer", "minimum": 0, "maximum": 2_147_483_647},
+        {"type": "null"},
+    ]
+}
+_NULLABLE_SIGNED_INTEGER = {
+    "anyOf": [
+        {"type": "integer", "minimum": -2_147_483_648, "maximum": 2_147_483_647},
         {"type": "null"},
     ]
 }
@@ -741,8 +766,8 @@ _SCHEMA = {
                     "name": {"type": "string"},
                     "quantity": _NULLABLE_NUMBER,
                     "unit": _NULLABLE_STRING,
-                    "unit_price_cents": _NULLABLE_INTEGER,
-                    "line_total_cents": _NULLABLE_INTEGER,
+                    "unit_price_cents": _NULLABLE_SIGNED_INTEGER,
+                    "line_total_cents": _NULLABLE_SIGNED_INTEGER,
                     "brand": _NULLABLE_STRING,
                     "category": _NULLABLE_STRING,
                     "confidence": {"type": "number", "minimum": 0, "maximum": 1},

@@ -12,7 +12,12 @@ from typing import Literal
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.models import ExpenseTransaction, SplitwiseIntegration, TransactionStatus
+from app.models import (
+    ExpenseTransaction,
+    SpendingParentCategory,
+    SplitwiseIntegration,
+    TransactionStatus,
+)
 
 SpendBasis = Literal["card", "actual_share"]
 ReviewType = Literal["all", "personal", "shared"]
@@ -323,7 +328,7 @@ def _to_spend_row(
     basis: SpendBasis,
     viewer_splitwise_user_id: int | None,
 ) -> SpendRow | None:
-    category = (tx.category or "").strip()
+    provider_category = (tx.provider_category or tx.category or "").strip()
     classification = classify_spend_transaction(tx)
     if classification is SpendClassification.EXCLUDED:
         return None
@@ -354,14 +359,16 @@ def _to_spend_row(
         # later credit should be allocated. Never substitute the whole card credit
         # or a stale positive owed-share value for the viewer's unknown credit share.
         selected_credit = None
+    canonical_parent = _canonical_parent_category(tx)
+    source_category = _canonical_source_category(tx)
     return SpendRow(
         tx=tx,
         classification=classification,
         card_cents=card_cents,
         selected_cents=selected,
         selected_credit_cents=selected_credit,
-        parent_category=_parent_category(category),
-        source_category=category or "Uncategorized",
+        parent_category=canonical_parent or _parent_category(provider_category),
+        source_category=source_category or provider_category or "Uncategorized",
         merchant=(tx.merchant_name or tx.name or "Unknown merchant").strip(),
         review_type=review_type,
         people=people,
@@ -382,12 +389,45 @@ def _parent_category(category: str) -> str:
     return "Other"
 
 
+_CANONICAL_PARENT_LABELS: dict[str, str] = {
+    SpendingParentCategory.FOOD_DINING.value: "Food & Dining",
+    SpendingParentCategory.HOUSEHOLD_HOME.value: "Home & Bills",
+    SpendingParentCategory.LIFESTYLE_SHOPPING.value: "Lifestyle",
+    SpendingParentCategory.PERSONAL_CARE.value: "Lifestyle",
+    SpendingParentCategory.HEALTH.value: "Health",
+    SpendingParentCategory.TRANSPORTATION.value: "Transportation",
+    SpendingParentCategory.TRAVEL.value: "Travel",
+    SpendingParentCategory.ENTERTAINMENT.value: "Lifestyle",
+    SpendingParentCategory.SUBSCRIPTIONS.value: "Subscriptions",
+    SpendingParentCategory.PETS.value: "Lifestyle",
+    SpendingParentCategory.EDUCATION_OFFICE.value: "Lifestyle",
+    SpendingParentCategory.SERVICES.value: "Lifestyle",
+    SpendingParentCategory.FEES_TAXES_DISCOUNTS.value: "Other",
+    SpendingParentCategory.OTHER_UNCERTAIN.value: "Other",
+}
+
+
+def _canonical_parent_category(tx: ExpenseTransaction) -> str | None:
+    if tx.classification_applied_at is None:
+        return None
+    return _CANONICAL_PARENT_LABELS.get(tx.spending_parent_category)
+
+
+def _canonical_source_category(tx: ExpenseTransaction) -> str | None:
+    if tx.classification_applied_at is None:
+        return None
+    if tx.classification_subcategory_name:
+        return tx.classification_subcategory_name
+    activity = str(tx.classification_activity_type or "").replace("_", " ").strip()
+    return activity.title() if activity and activity != "uncertain" else None
+
+
 def classify_spend_transaction(tx: ExpenseTransaction) -> SpendClassification:
     """Classify one canonical bank row before any spending/share projection."""
 
     if tx.pending or tx.status == TransactionStatus.REMOVED.value:
         return SpendClassification.EXCLUDED
-    if _is_excluded_category(tx.category):
+    if _is_excluded_category(tx.provider_category or tx.category):
         return SpendClassification.EXCLUDED
     if tx.amount_cents > 0:
         return SpendClassification.PURCHASE

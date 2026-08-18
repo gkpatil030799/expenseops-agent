@@ -7,6 +7,7 @@ from typing import Literal
 
 from sqlalchemy.orm import Session
 
+from app.models import ClassificationActivityType
 from app.services.spending_insights_service import (
     SpendClassification,
     SpendingInsightsService,
@@ -125,6 +126,28 @@ class LifestyleDiningService:
 def classify_lifestyle_row(row: SpendRow) -> LifestyleSubtype | None:
     """Classify only when canonical category or bounded merchant evidence supports it."""
 
+    if row.tx.classification_applied_at is not None:
+        canonical_activity = row.tx.classification_activity_type
+        canonical = {
+            ClassificationActivityType.COFFEE_BEVERAGE.value: "coffee",
+            ClassificationActivityType.RESTAURANT_MEAL.value: "restaurants",
+            ClassificationActivityType.FOOD_DELIVERY.value: "delivery",
+            ClassificationActivityType.NIGHTLIFE.value: "nightlife",
+        }.get(canonical_activity)
+        if canonical is not None:
+            return canonical
+        if canonical_activity in {
+            ClassificationActivityType.GROCERY.value,
+            ClassificationActivityType.HOUSEHOLD_CONSUMABLE.value,
+            ClassificationActivityType.ONE_TIME_PURCHASE.value,
+            ClassificationActivityType.NON_PRODUCT.value,
+            ClassificationActivityType.REFUND.value,
+            ClassificationActivityType.TAX.value,
+            ClassificationActivityType.TIP.value,
+            ClassificationActivityType.DISCOUNT.value,
+            ClassificationActivityType.FEE.value,
+        }:
+            return None
     category = _normalize(row.source_category)
     merchant = _normalize(row.merchant)
     if _has_any(category, "grocery", "groceries", "supermarket"):

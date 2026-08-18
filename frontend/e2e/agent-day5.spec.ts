@@ -15,6 +15,7 @@ import {
   type MockAgentApp,
   type RecordedAgentStreamCall,
 } from "./fixtures/agent";
+import { emptyClassificationActivity } from "./fixtures/classification";
 
 const CONTEXTUAL_ANSWER = textResponse("This answer uses canonical ExpenseOps read evidence.");
 const READ_ONLY_ANSWER = textResponse(
@@ -367,6 +368,7 @@ async function mockHousehold(page: Page): Promise<void> {
           decision_reason: null,
         },
       },
+      "/api/replenishment/classification-activity": emptyClassificationActivity,
       "/api/replenishment/gmail/status": {
         configured: true,
         last_successful_sync_at: null,

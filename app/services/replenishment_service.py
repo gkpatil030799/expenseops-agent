@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 
 from app.config import Settings, get_settings
 from app.models import (
+    ClassificationDecisionRecord,
     Errand,
     ErrandHouseholdItem,
     ErrandPriority,
@@ -54,7 +55,13 @@ class ReplenishmentService:
         self.settings = settings or get_settings()
 
     def list_items(self) -> list[HouseholdItem]:
-        return list(self.db.execute(select(HouseholdItem).order_by(HouseholdItem.name)).scalars())
+        return list(
+            self.db.execute(
+                select(HouseholdItem)
+                .where(HouseholdItem.enabled.is_(True))
+                .order_by(HouseholdItem.name)
+            ).scalars()
+        )
 
     def get_item(self, item_id: int) -> HouseholdItem:
         item = self.db.get(HouseholdItem, item_id)
@@ -64,6 +71,13 @@ class ReplenishmentService:
 
     def create_item(self, values: dict) -> HouseholdItem:
         values.setdefault("cadence_source", HouseholdCadenceSource.CONFIGURED.value)
+        if values.get("cadence_days") is not None:
+            cadence_days = values["cadence_days"]
+            values.setdefault("cadence_confidence", 1.0)
+            values.setdefault("cadence_min_days", cadence_days)
+            values.setdefault("cadence_max_days", cadence_days)
+            values.setdefault("cadence_provenance_json", {"basis": "user_configured"})
+            values.setdefault("cadence_estimated_at", utc_now())
         item = HouseholdItem(**values)
         self.db.add(item)
         self.db.commit()
@@ -73,11 +87,25 @@ class ReplenishmentService:
     def update_item(self, item_id: int, values: dict) -> HouseholdItem:
         item = self.get_item(item_id)
         if "cadence_days" in values:
-            values["cadence_source"] = (
-                HouseholdCadenceSource.CONFIGURED.value
-                if values["cadence_days"] is not None
-                else HouseholdCadenceSource.LEARNING.value
-            )
+            cadence_days = values["cadence_days"]
+            if cadence_days is None:
+                values.update(
+                    cadence_source=HouseholdCadenceSource.LEARNING.value,
+                    cadence_confidence=0.0,
+                    cadence_min_days=None,
+                    cadence_max_days=None,
+                    cadence_provenance_json={},
+                    cadence_estimated_at=None,
+                )
+            else:
+                values.update(
+                    cadence_source=HouseholdCadenceSource.CONFIGURED.value,
+                    cadence_confidence=1.0,
+                    cadence_min_days=cadence_days,
+                    cadence_max_days=cadence_days,
+                    cadence_provenance_json={"basis": "user_configured"},
+                    cadence_estimated_at=utc_now(),
+                )
         for field, value in values.items():
             setattr(item, field, value)
         item.updated_at = utc_now()
@@ -87,7 +115,17 @@ class ReplenishmentService:
 
     def delete_item(self, item_id: int) -> None:
         item = self.get_item(item_id)
-        self.db.delete(item)
+        referenced_by_decision = self.db.scalar(
+            select(ClassificationDecisionRecord.id).where(
+                ClassificationDecisionRecord.workspace_id == item.workspace_id,
+                ClassificationDecisionRecord.household_item_id == item.id,
+            )
+        )
+        if referenced_by_decision is not None:
+            item.enabled = False
+            item.updated_at = utc_now()
+        else:
+            self.db.delete(item)
         self.db.commit()
 
     def mark_bought(self, item_id: int, *, now: datetime | None = None) -> HouseholdItem:

@@ -41,9 +41,10 @@ CONSENT_PURPOSES = {
     "gmail_receipts",
     "gmail_promotions",
     "model_receipt_processing",
+    "model_transaction_classification",
     "structured_transaction_learning",
 }
-POLICY_VERSION = "2026-08-13"
+POLICY_VERSION = "2026-08-17"
 
 
 class DataLifecycleService:

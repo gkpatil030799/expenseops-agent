@@ -2,6 +2,7 @@ import {
   AlertCircle,
   ArrowRight,
   BarChart3,
+  Brain,
   CheckCircle2,
   ClipboardList,
   Coffee,
@@ -21,11 +22,13 @@ import { useState, type ReactNode } from "react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { classificationCategoryLabel } from "@/classificationActivity";
 
 import type {
   AgentAttentionPriority,
   AgentAttentionSummaryBlock,
   AgentActionConfirmationBlock,
+  AgentClassificationActivityBlock,
   AgentEmptyStateBlock,
   AgentErrandSummaryBlock,
   AgentIntegrationStatusBlock,
@@ -109,6 +112,8 @@ export function AgentResponseRenderer({
             return <ErrandSummaryCard key={key} block={block} onNavigate={onNavigate} />;
           case "integration_status":
             return <IntegrationStatusCard key={key} block={block} onNavigate={onNavigate} />;
+          case "classification_activity_summary":
+            return <ClassificationActivityCard key={key} block={block} onNavigate={onNavigate} />;
           case "attention_summary":
             return <AttentionSummaryCard key={key} block={block} onNavigate={onNavigate} />;
           case "navigation":
@@ -329,6 +334,14 @@ function ReceiptSummaryCard({ block, onNavigate }: { block: AgentReceiptSummaryB
                   <p className="mt-0.5 text-xs text-slate-600 [overflow-wrap:anywhere]">
                     {[item.quantity != null ? `${item.quantity}${item.unit ? ` ${item.unit}` : ""}` : null, item.household_item_name ? `Matched to ${item.household_item_name}` : humanize(item.match_status)].filter(Boolean).join(" · ")}
                   </p>
+                  {item.parent_category ? (
+                    <p className="mt-0.5 text-xs leading-5 text-slate-600 [overflow-wrap:anywhere]">
+                      {`Category: ${classificationCategoryLabel(item.parent_category)}${item.subcategory ? ` / ${item.subcategory}` : ""}`}
+                      {` · Concept: ${item.concept || "Not assigned"}`}
+                      {` · Activity: ${item.activity_type ? humanize(item.activity_type) : "Uncertain"}`}
+                      {` · Replenishment: ${item.replenishment_eligibility ? humanize(item.replenishment_eligibility) : "Uncertain"}`}
+                    </p>
+                  ) : null}
                 </div>
                 {item.line_total_cents != null ? <span className="shrink-0 text-sm tabular-nums">{formatMinor(item.line_total_cents, block.currency_code)}</span> : null}
               </div>
@@ -336,7 +349,7 @@ function ReceiptSummaryCard({ block, onNavigate }: { block: AgentReceiptSummaryB
           </div>
         ) : null}
         {block.items_truncated ? <p className="text-xs text-slate-500">Showing {block.items.length} of {block.total_line_count} lines.</p> : null}
-        <EntityNavigationButton label="Review receipt" request={{ target_surface: "household_receipts", entity: { kind: "receipt", public_id: block.public_id } }} onNavigate={onNavigate} />
+        <EntityNavigationButton label="Open receipt details" request={{ target_surface: "household_receipts", entity: { kind: "receipt", public_id: block.public_id } }} onNavigate={onNavigate} />
       </CardContent>
     </Card>
   );
@@ -488,6 +501,244 @@ const ATTENTION_PRESENTATION: {
   },
 ];
 
+function ClassificationActivityCard({
+  block,
+  onNavigate,
+}: {
+  block: AgentClassificationActivityBlock;
+  onNavigate?: (request: AgentNavigationRequest) => void;
+}) {
+  const decisionCount = block.counts.transactions + block.counts.receipt_items;
+  return (
+    <Card
+      data-testid="agent-classification-activity"
+      className="min-w-0 overflow-hidden border-indigo-200 bg-gradient-to-br from-white to-indigo-50/60"
+    >
+      <CardHeader className="pb-3">
+        <CardHeading
+          icon={<Brain className="size-5" aria-hidden="true" />}
+          title={block.title}
+          subtitle={`${formatDate(block.activity_date)} · ${block.timezone}`}
+        />
+      </CardHeader>
+      <CardContent className="min-w-0 space-y-4 pt-0">
+        {block.view === "summary" ? (
+          <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 xl:grid-cols-5" aria-label="Classification activity totals">
+            <ClassificationMetric label="Decisions" value={decisionCount} />
+            <ClassificationMetric label="Categories used" value={block.counts.categories} />
+            <ClassificationMetric label="New categories" value={block.counts.new_categories} />
+            <ClassificationMetric label="Receipt matches" value={block.counts.receipt_matches} />
+            <ClassificationMetric label="Optional review" value={block.counts.uncertain} />
+          </div>
+        ) : null}
+
+        <ClassificationSection title="Transactions" visible={block.transactions.length > 0}>
+          {block.transactions.map((row) => (
+            <ClassificationRow
+              key={row.decision_public_id}
+              title={row.merchant}
+              detail={`${classificationCategoryLabel(row.parent_category)} · ${row.subcategory || humanize(row.activity_type)}`}
+              badge={humanize(row.decision_state)}
+              navigation={row.source_available ? {
+                target_surface: "expense_activity",
+                entity: { kind: "transaction", public_id: row.public_id },
+              } : null}
+              onNavigate={onNavigate}
+            />
+          ))}
+        </ClassificationSection>
+
+        <ClassificationSection title="Receipt items" visible={block.receipt_items.length > 0}>
+          {block.receipt_items.map((row) => (
+            <ClassificationRow
+              key={row.decision_public_id}
+              title={row.name}
+              detail={`${row.merchant ? `${row.merchant} · ` : ""}${classificationCategoryLabel(row.parent_category)}${row.household_item_name ? ` · Tracked as ${row.household_item_name}` : ""}`}
+              badge={humanize(row.decision_state)}
+              navigation={row.source_available ? {
+                target_surface: "household_receipts",
+                entity: { kind: "receipt", public_id: row.receipt_public_id },
+              } : null}
+              onNavigate={onNavigate}
+            />
+          ))}
+        </ClassificationSection>
+
+        <ClassificationSection title="Categories used" visible={block.categories.length > 0}>
+          {block.categories.map((row) => (
+            <ClassificationRow
+              key={row.parent_category}
+              title={classificationCategoryLabel(row.parent_category)}
+              detail={`${row.transaction_count} transaction${row.transaction_count === 1 ? "" : "s"} · ${row.receipt_item_count} receipt item${row.receipt_item_count === 1 ? "" : "s"}`}
+              badge={String(row.total_count)}
+            />
+          ))}
+        </ClassificationSection>
+
+        <ClassificationSection title="New categories created" visible={block.new_categories.length > 0}>
+          {block.new_categories.map((row) => (
+            <ClassificationRow
+              key={row.decision_public_id}
+              title={row.subcategory}
+              detail={`${classificationCategoryLabel(row.parent_category)} · From ${humanize(row.source_type)} evidence`}
+              badge={humanize(row.authority)}
+            />
+          ))}
+        </ClassificationSection>
+
+        <ClassificationSection title="Receipt matches" visible={block.receipt_matches.length > 0}>
+          {block.receipt_matches.map((row) => (
+            <ClassificationRow
+              key={`${row.receipt_public_id}-${row.attempted_at}`}
+              title={row.merchant || "Receipt"}
+              detail={classificationMatchLabel(row.status)}
+              badge={`${Math.round(row.confidence * 100)}%`}
+              navigation={{
+                target_surface: "household_receipts",
+                entity: { kind: "receipt", public_id: row.receipt_public_id },
+              }}
+              onNavigate={onNavigate}
+            />
+          ))}
+        </ClassificationSection>
+
+        <ClassificationSection title="New household staples" visible={block.new_household_items.length > 0}>
+          {block.new_household_items.map((row) => (
+            <ClassificationRow
+              key={row.public_id}
+              title={row.name}
+              detail={`${classificationCategoryLabel(row.parent_category)} · ${cadenceLabel(row)}`}
+              badge={humanize(row.replenishment_eligibility)}
+              navigation={{
+                target_surface: "household_staples",
+                entity: { kind: "household_item", public_id: row.public_id },
+              }}
+              onNavigate={onNavigate}
+            />
+          ))}
+        </ClassificationSection>
+
+        <ClassificationSection title="Cadence learned" visible={block.cadence_updates.length > 0}>
+          {block.cadence_updates.map((row) => (
+            <ClassificationRow
+              key={`${row.public_id}-${row.activity_at}`}
+              title={row.name}
+              detail={`${cadenceLabel(row)} · ${humanize(row.cadence_source)}`}
+              badge={`${Math.round(row.cadence_confidence * 100)}%`}
+              navigation={{
+                target_surface: "household_staples",
+                entity: { kind: "household_item", public_id: row.public_id },
+              }}
+              onNavigate={onNavigate}
+            />
+          ))}
+        </ClassificationSection>
+
+        <ClassificationSection title="Optional review" visible={block.uncertain.length > 0}>
+          {block.uncertain.map((row) => (
+            <ClassificationRow
+              key={`${row.kind}-${row.public_id}-${row.observed_at}`}
+              title={row.label}
+              detail={`${row.reasons.map(humanize).join(" · ")}. ExpenseOps left this correctable instead of guessing.`}
+              badge={row.confidence_band ? humanize(row.confidence_band) : humanize(row.kind)}
+              navigation={classificationUncertainNavigation(row)}
+              onNavigate={onNavigate}
+            />
+          ))}
+        </ClassificationSection>
+
+        {block.truncated_sections.length ? (
+          <p className="text-xs leading-5 text-slate-600">
+            This bounded view has more {block.truncated_sections.map(humanize).join(", ")} activity.
+          </p>
+        ) : null}
+      </CardContent>
+    </Card>
+  );
+}
+
+function ClassificationMetric({ label, value }: { label: string; value: number }) {
+  return (
+    <div className="min-w-0 rounded-control border border-slate-200 bg-white/90 p-3">
+      <p className="text-xs leading-4 text-slate-600 [overflow-wrap:anywhere]">{label}</p>
+      <p className="mt-1 text-xl font-semibold tabular-nums text-slate-950">{value}</p>
+    </div>
+  );
+}
+
+function ClassificationSection({
+  title,
+  visible,
+  children,
+}: {
+  title: string;
+  visible: boolean;
+  children: ReactNode;
+}) {
+  if (!visible) return null;
+  return (
+    <section aria-label={title}>
+      <h4 className="text-xs font-semibold uppercase tracking-wide text-slate-600">{title}</h4>
+      <div className="mt-2 divide-y divide-slate-200 overflow-hidden rounded-control border border-slate-200 bg-white/90">
+        {children}
+      </div>
+    </section>
+  );
+}
+
+function ClassificationRow({
+  title,
+  detail,
+  badge,
+  navigation,
+  onNavigate,
+}: {
+  title: string;
+  detail: string;
+  badge: string;
+  navigation?: AgentNavigationRequest | null;
+  onNavigate?: (request: AgentNavigationRequest) => void;
+}) {
+  return (
+    <div className="flex min-w-0 items-start gap-3 px-3 py-2.5">
+      <div className="min-w-0 flex-1">
+        <p className="text-sm font-semibold text-slate-900 [overflow-wrap:anywhere]">{title}</p>
+        <p className="mt-0.5 text-xs leading-5 text-slate-600 [overflow-wrap:anywhere]">{detail}</p>
+      </div>
+      <Badge variant="secondary" className="max-w-28 shrink-0 truncate">{badge}</Badge>
+      {navigation ? (
+        <EntityNavigationButton label={`Open ${title}`} request={navigation} onNavigate={onNavigate} />
+      ) : null}
+    </div>
+  );
+}
+
+function classificationMatchLabel(status: AgentClassificationActivityBlock["receipt_matches"][number]["status"]): string {
+  if (status === "auto_matched") return "Matched to a card transaction";
+  if (status === "ambiguous") return "More than one possible card transaction; optional review";
+  return "No eligible card transaction found; receipt processing continued";
+}
+
+function cadenceLabel(row: AgentClassificationActivityBlock["cadence_updates"][number]): string {
+  if (row.cadence_days != null) return `About every ${row.cadence_days} days`;
+  if (row.cadence_min_days != null && row.cadence_max_days != null) {
+    return `About every ${row.cadence_min_days}–${row.cadence_max_days} days`;
+  }
+  return "Cadence still learning";
+}
+
+function classificationUncertainNavigation(
+  row: AgentClassificationActivityBlock["uncertain"][number],
+): AgentNavigationRequest | null {
+  if (row.kind === "transaction") {
+    return { target_surface: "expense_activity", entity: { kind: "transaction", public_id: row.public_id } };
+  }
+  const receiptId = row.kind === "receipt_item" ? row.receipt_public_id : row.public_id;
+  return receiptId
+    ? { target_surface: "household_receipts", entity: { kind: "receipt", public_id: receiptId } }
+    : null;
+}
+
 function AttentionSummaryCard({
   block,
   onNavigate,
@@ -608,11 +859,13 @@ function AttentionNavigationButton({
 
 function attentionDomainLabel(domain: AgentAttentionSummaryBlock["checked_domains"][number]): string {
   if (domain === "spending") return "spending";
+  if (domain === "lifestyle") return "lifestyle";
   if (domain === "transactions") return "transactions";
   if (domain === "replenishment") return "household needs";
   if (domain === "receipts") return "receipts";
   if (domain === "deals") return "deals";
   if (domain === "errands") return "errands";
+  if (domain === "classification") return "classification activity";
   return "integrations";
 }
 

@@ -37,6 +37,7 @@ def db(tmp_path):
     )
     Base.metadata.create_all(engine)
     session = sessionmaker(bind=engine)()
+    session.info["workspace_id"] = 1
     try:
         yield session
     finally:
@@ -344,15 +345,17 @@ def test_ingestion_order_cannot_duplicate_logical_acquisition(db, plaid_first):
     if plaid_first:
         add_plaid()
     service = ReceiptIngestionService(db, config(), parser)
+    shared_artifact = "same receipt artifact"
     first = service.ingest_text(
-        source="gmail", source_external_id="gmail-order", text="gmail receipt"
+        source="gmail", source_external_id="gmail-order", text=shared_artifact
     )
     service.confirm(first.id)
     if not plaid_first:
         add_plaid()
     second = service.ingest_text(
-        source="telegram", source_external_id="telegram-order", text="telegram receipt"
+        source="telegram", source_external_id="telegram-order", text=shared_artifact
     )
+    assert second.id == first.id
     service.confirm(second.id)
     assert db.scalar(select(func.count(HouseholdItemAcquisition.id))) == 1
 

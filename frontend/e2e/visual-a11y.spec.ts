@@ -1,6 +1,8 @@
 import AxeBuilder from "@axe-core/playwright";
 import { expect, test, type Page } from "@playwright/test";
 
+import { emptyClassificationActivity } from "./fixtures/classification";
+
 const context = {
   user: {
     id: 1,
@@ -156,6 +158,7 @@ async function mockHouseholdOps(page: Page, options: { allClear?: boolean } = {}
     "/api/household/errand-plans/latest": plan,
     "/api/household/locations": [{ id: 1, label: "Home", address: "123 W Main Street", latitude: 33.4, longitude: -112.1, location_type: "home", created_at: "2026-08-01T12:00:00Z", updated_at: "2026-08-01T12:00:00Z" }],
     "/api/replenishment/summary": { this_week: [], learning: { confirmed_acquisitions: 0, items_with_history: 0, active_model: null }, accuracy: { evaluated_predictions: 0, confidence_level: "insufficient" } },
+    "/api/replenishment/classification-activity": emptyClassificationActivity,
     "/api/replenishment/receipts": [],
     "/api/replenishment/gmail/status": { configured: false, last_successful_sync_at: null, latest_receipt_at: null },
   };
@@ -168,7 +171,13 @@ async function mockHouseholdOps(page: Page, options: { allClear?: boolean } = {}
 }
 
 async function mockSettings(page: Page, role = "owner") {
-  const consents = { gmail_receipts: false, gmail_promotions: false, model_receipt_processing: false };
+  const consents = {
+    gmail_receipts: false,
+    gmail_promotions: false,
+    model_receipt_processing: false,
+    model_transaction_classification: false,
+    structured_transaction_learning: false,
+  };
   await page.route("**/api/**", (route) => {
     const pathname = new URL(route.request().url()).pathname;
     if (pathname === "/api/workspaces") return route.fulfill({ json: [{ id: 1, name: "Patil household", role, current: true }] });
@@ -185,6 +194,11 @@ async function mockSettings(page: Page, role = "owner") {
       openai: { connected: true, managed_by: "application" },
     } });
     if (pathname === "/api/integrations/onboarding") return route.fulfill({ json: { complete: true } });
+    if (pathname === "/api/classification/settings") return route.fulfill({ json: {
+      autonomous_enabled: true,
+      global_rollout_enabled: false,
+      effective_autonomous_enabled: false,
+    } });
     if (pathname === "/api/privacy" && route.request().method() === "GET") return route.fulfill({ json: {
       policy_version: "2026-08-13",
       privacy_url: "/legal/privacy",

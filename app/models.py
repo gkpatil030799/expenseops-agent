@@ -12,6 +12,7 @@ from sqlalchemy import (
     DateTime,
     Float,
     ForeignKey,
+    ForeignKeyConstraint,
     Index,
     Integer,
     String,
@@ -393,10 +394,110 @@ class ReceiptLineClassification(StrEnum):
     UNCERTAIN = "uncertain"
 
 
+class SpendingParentCategory(StrEnum):
+    FOOD_DINING = "food_dining"
+    HOUSEHOLD_HOME = "household_home"
+    LIFESTYLE_SHOPPING = "lifestyle_shopping"
+    PERSONAL_CARE = "personal_care"
+    HEALTH = "health"
+    TRANSPORTATION = "transportation"
+    TRAVEL = "travel"
+    ENTERTAINMENT = "entertainment"
+    SUBSCRIPTIONS = "subscriptions"
+    PETS = "pets"
+    EDUCATION_OFFICE = "education_office"
+    SERVICES = "services"
+    FEES_TAXES_DISCOUNTS = "fees_taxes_discounts"
+    OTHER_UNCERTAIN = "other_uncertain"
+
+
+class ClassificationActivityType(StrEnum):
+    GROCERY = "grocery"
+    HOUSEHOLD_CONSUMABLE = "household_consumable"
+    ROUTINE_CONSUMPTION = "routine_consumption"
+    ONE_TIME_PURCHASE = "one_time_purchase"
+    RESTAURANT_MEAL = "restaurant_meal"
+    COFFEE_BEVERAGE = "coffee_beverage"
+    FOOD_DELIVERY = "food_delivery"
+    NIGHTLIFE = "nightlife"
+    APPAREL = "apparel"
+    ELECTRONICS = "electronics"
+    PHARMACY = "pharmacy"
+    PERSONAL_CARE = "personal_care"
+    BEAUTY = "beauty"
+    PET_SUPPLY = "pet_supply"
+    AUTOMOTIVE = "automotive"
+    TRANSPORTATION = "transportation"
+    TRAVEL = "travel"
+    ENTERTAINMENT = "entertainment"
+    SUBSCRIPTION = "subscription"
+    EDUCATION_OFFICE = "education_office"
+    SERVICE = "service"
+    TAX = "tax"
+    TIP = "tip"
+    DISCOUNT = "discount"
+    FEE = "fee"
+    REFUND = "refund"
+    NON_PRODUCT = "non_product"
+    UNCERTAIN = "uncertain"
+
+
+class ReplenishmentEligibility(StrEnum):
+    REPLENISHABLE = "replenishable"
+    POTENTIALLY_REPLENISHABLE = "potentially_replenishable"
+    NOT_REPLENISHABLE = "not_replenishable"
+    UNCERTAIN = "uncertain"
+
+
+class ClassificationConfidenceBand(StrEnum):
+    LOW = "low"
+    MEDIUM = "medium"
+    HIGH = "high"
+
+
+class ClassificationDecisionState(StrEnum):
+    PROVISIONAL = "provisional"
+    FINAL = "final"
+    CORRECTED = "corrected"
+
+
+class ClassificationAuthority(StrEnum):
+    FALLBACK = "fallback"
+    MODEL_EVIDENCE = "model_evidence"
+    PROVIDER_EVIDENCE = "provider_evidence"
+    RECEIPT_EVIDENCE = "receipt_evidence"
+    DETERMINISTIC_EXACT = "deterministic_exact"
+    CONFIRMED_ALIAS = "confirmed_alias"
+    USER_CORRECTION = "user_correction"
+
+
+SPENDING_PARENT_CATEGORY_SQL = (
+    "(" + ", ".join(f"'{value.value}'" for value in SpendingParentCategory) + ")"
+)
+CLASSIFICATION_ACTIVITY_TYPE_SQL = (
+    "(" + ", ".join(f"'{value.value}'" for value in ClassificationActivityType) + ")"
+)
+REPLENISHMENT_ELIGIBILITY_SQL = (
+    "(" + ", ".join(f"'{value.value}'" for value in ReplenishmentEligibility) + ")"
+)
+CLASSIFICATION_CONFIDENCE_BAND_SQL = (
+    "(" + ", ".join(f"'{value.value}'" for value in ClassificationConfidenceBand) + ")"
+)
+CLASSIFICATION_AUTHORITY_SQL = (
+    "(" + ", ".join(f"'{value.value}'" for value in ClassificationAuthority) + ")"
+)
+CLASSIFICATION_DECISION_STATE_SQL = (
+    "(" + ", ".join(f"'{value.value}'" for value in ClassificationDecisionState) + ")"
+)
+
+
 class HouseholdCadenceSource(StrEnum):
     CONFIGURED = "configured"
     LEARNING = "learning"
+    CATEGORY_PRIOR = "category_prior"
+    MODEL_PRIOR = "model_prior"
     OBSERVED = "observed"
+    QUANTITY_ADJUSTED = "quantity_adjusted"
     ADAPTIVE = "adaptive"
 
 
@@ -502,6 +603,48 @@ class ExpenseTransaction(TenantScoped, Base):
             "pending",
             "date",
         ),
+        ForeignKeyConstraint(
+            ["workspace_id", "classification_subcategory_id"],
+            ["classification_subcategories.workspace_id", "classification_subcategories.id"],
+            name="fk_expense_transaction_classification_subcategory_workspace",
+        ),
+        ForeignKeyConstraint(
+            ["workspace_id", "classification_concept_id"],
+            ["classification_concepts.workspace_id", "classification_concepts.id"],
+            name="fk_expense_transaction_classification_concept_workspace",
+        ),
+        CheckConstraint(
+            "classification_confidence >= 0 AND classification_confidence <= 1",
+            name="ck_expense_transaction_classification_confidence",
+        ),
+        CheckConstraint(
+            "classification_version > 0",
+            name="ck_expense_transaction_classification_version",
+        ),
+        CheckConstraint(
+            f"spending_parent_category IN {SPENDING_PARENT_CATEGORY_SQL}",
+            name="ck_expense_transaction_spending_parent",
+        ),
+        CheckConstraint(
+            f"classification_activity_type IN {CLASSIFICATION_ACTIVITY_TYPE_SQL}",
+            name="ck_expense_transaction_classification_activity",
+        ),
+        CheckConstraint(
+            f"replenishment_eligibility IN {REPLENISHMENT_ELIGIBILITY_SQL}",
+            name="ck_expense_transaction_replenishment_eligibility",
+        ),
+        CheckConstraint(
+            f"classification_confidence_band IN {CLASSIFICATION_CONFIDENCE_BAND_SQL}",
+            name="ck_expense_transaction_classification_band",
+        ),
+        CheckConstraint(
+            f"classification_authority IN {CLASSIFICATION_AUTHORITY_SQL}",
+            name="ck_expense_transaction_classification_authority",
+        ),
+        CheckConstraint(
+            f"classification_decision_state IN {CLASSIFICATION_DECISION_STATE_SQL}",
+            name="ck_expense_transaction_classification_state",
+        ),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
@@ -518,6 +661,52 @@ class ExpenseTransaction(TenantScoped, Base):
     pending: Mapped[bool] = mapped_column(Boolean, default=False)
     payment_channel: Mapped[str | None] = mapped_column(String(64), nullable=True)
     category: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    provider_category: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    spending_parent_category: Mapped[str] = mapped_column(
+        String(64), default=SpendingParentCategory.OTHER_UNCERTAIN.value, index=True
+    )
+    classification_subcategory_id: Mapped[int | None] = mapped_column(
+        Integer, nullable=True, index=True
+    )
+    classification_subcategory_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    classification_concept_id: Mapped[int | None] = mapped_column(
+        Integer, nullable=True, index=True
+    )
+    classification_concept_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    classification_activity_type: Mapped[str] = mapped_column(
+        String(64), default=ClassificationActivityType.UNCERTAIN.value, index=True
+    )
+    replenishment_eligibility: Mapped[str] = mapped_column(
+        String(32), default=ReplenishmentEligibility.UNCERTAIN.value, index=True
+    )
+    classification_confidence: Mapped[float] = mapped_column(Float, default=0.0)
+    classification_confidence_band: Mapped[str] = mapped_column(
+        String(16), default=ClassificationConfidenceBand.LOW.value, index=True
+    )
+    classification_authority: Mapped[str] = mapped_column(
+        String(32), default=ClassificationAuthority.FALLBACK.value, index=True
+    )
+    classification_provenance_json: Mapped[list] = mapped_column(JSON, default=list)
+    classification_decision_state: Mapped[str] = mapped_column(
+        String(16), default=ClassificationDecisionState.FINAL.value, index=True
+    )
+    classification_applied_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    classification_auto_finalize_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, index=True
+    )
+    classification_retry_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, index=True
+    )
+    classification_finalized_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    classification_corrected_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    classification_corrects_version: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    classification_version: Mapped[int] = mapped_column(Integer, default=1)
     raw_json: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     status: Mapped[str] = mapped_column(String(32), default=TransactionStatus.ASK_USER.value)
@@ -765,14 +954,357 @@ class TelegramSession(TenantScoped, Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
 
+class ClassificationSubcategory(TenantScoped, Base):
+    __tablename__ = "classification_subcategories"
+    __table_args__ = (
+        UniqueConstraint("workspace_id", "id", name="uq_classification_subcategory_workspace_id"),
+        UniqueConstraint(
+            "workspace_id",
+            "parent_category",
+            "normalized_name",
+            name="uq_classification_subcategory_workspace_parent_name",
+        ),
+        ForeignKeyConstraint(
+            ["workspace_id", "merged_into_id"],
+            ["classification_subcategories.workspace_id", "classification_subcategories.id"],
+            name="fk_classification_subcategory_merged_workspace",
+        ),
+        CheckConstraint(
+            "parent_category IN ("
+            "'food_dining', 'household_home', 'lifestyle_shopping', 'personal_care', "
+            "'health', 'transportation', 'travel', 'entertainment', 'subscriptions', "
+            "'pets', 'education_office', 'services', 'fees_taxes_discounts', "
+            "'other_uncertain')",
+            name="ck_classification_subcategory_parent",
+        ),
+        CheckConstraint(
+            "confidence >= 0 AND confidence <= 1",
+            name="ck_classification_subcategory_confidence",
+        ),
+        CheckConstraint(
+            f"source IN {CLASSIFICATION_AUTHORITY_SQL}",
+            name="ck_classification_subcategory_source",
+        ),
+        CheckConstraint(
+            "merged_into_id IS NULL OR merged_into_id != id",
+            name="ck_classification_subcategory_not_self_merged",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    workspace_id: Mapped[int] = mapped_column(
+        ForeignKey("workspaces.id", ondelete="CASCADE"), nullable=False, default=1, index=True
+    )
+    parent_category: Mapped[str] = mapped_column(String(64), index=True)
+    name: Mapped[str] = mapped_column(String(128))
+    normalized_name: Mapped[str] = mapped_column(String(128), index=True)
+    source: Mapped[str] = mapped_column(String(32), default="deterministic_exact")
+    confidence: Mapped[float] = mapped_column(Float, default=1.0)
+    merged_into_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class ClassificationConcept(TenantScoped, Base):
+    __tablename__ = "classification_concepts"
+    __table_args__ = (
+        UniqueConstraint("workspace_id", "id", name="uq_classification_concept_workspace_id"),
+        UniqueConstraint(
+            "workspace_id", "normalized_name", name="uq_classification_concept_workspace_name"
+        ),
+        ForeignKeyConstraint(
+            ["workspace_id", "subcategory_id"],
+            ["classification_subcategories.workspace_id", "classification_subcategories.id"],
+            name="fk_classification_concept_subcategory_workspace",
+        ),
+        ForeignKeyConstraint(
+            ["workspace_id", "merged_into_id"],
+            ["classification_concepts.workspace_id", "classification_concepts.id"],
+            name="fk_classification_concept_merged_workspace",
+        ),
+        CheckConstraint(
+            "parent_category IN ("
+            "'food_dining', 'household_home', 'lifestyle_shopping', 'personal_care', "
+            "'health', 'transportation', 'travel', 'entertainment', 'subscriptions', "
+            "'pets', 'education_office', 'services', 'fees_taxes_discounts', "
+            "'other_uncertain')",
+            name="ck_classification_concept_parent",
+        ),
+        CheckConstraint(
+            "confidence >= 0 AND confidence <= 1",
+            name="ck_classification_concept_confidence",
+        ),
+        CheckConstraint(
+            f"item_activity_type IN {CLASSIFICATION_ACTIVITY_TYPE_SQL}",
+            name="ck_classification_concept_activity",
+        ),
+        CheckConstraint(
+            f"replenishment_eligibility IN {REPLENISHMENT_ELIGIBILITY_SQL}",
+            name="ck_classification_concept_replenishment_eligibility",
+        ),
+        CheckConstraint(
+            f"source IN {CLASSIFICATION_AUTHORITY_SQL}",
+            name="ck_classification_concept_source",
+        ),
+        CheckConstraint(
+            "merged_into_id IS NULL OR merged_into_id != id",
+            name="ck_classification_concept_not_self_merged",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    workspace_id: Mapped[int] = mapped_column(
+        ForeignKey("workspaces.id", ondelete="CASCADE"), nullable=False, default=1, index=True
+    )
+    subcategory_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    parent_category: Mapped[str] = mapped_column(String(64), index=True)
+    name: Mapped[str] = mapped_column(String(255))
+    normalized_name: Mapped[str] = mapped_column(String(255), index=True)
+    item_activity_type: Mapped[str] = mapped_column(String(64), index=True)
+    replenishment_eligibility: Mapped[str] = mapped_column(String(32), index=True)
+    source: Mapped[str] = mapped_column(String(32), default="deterministic_exact")
+    confidence: Mapped[float] = mapped_column(Float, default=1.0)
+    merged_into_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class ClassificationConceptAlias(TenantScoped, Base):
+    __tablename__ = "classification_concept_aliases"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["workspace_id", "concept_id"],
+            ["classification_concepts.workspace_id", "classification_concepts.id"],
+            name="fk_classification_concept_alias_workspace",
+            ondelete="CASCADE",
+        ),
+        Index(
+            "uq_classification_concept_alias_active",
+            "workspace_id",
+            "merchant_normalized",
+            "normalized_alias",
+            unique=True,
+            postgresql_where=text("voided_at IS NULL"),
+            sqlite_where=text("voided_at IS NULL"),
+        ),
+        CheckConstraint(
+            "confidence >= 0 AND confidence <= 1",
+            name="ck_classification_concept_alias_confidence",
+        ),
+        CheckConstraint(
+            f"source IN {CLASSIFICATION_AUTHORITY_SQL}",
+            name="ck_classification_concept_alias_source",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    workspace_id: Mapped[int] = mapped_column(
+        ForeignKey("workspaces.id", ondelete="CASCADE"), nullable=False, default=1, index=True
+    )
+    concept_id: Mapped[int] = mapped_column(Integer, index=True)
+    merchant_normalized: Mapped[str] = mapped_column(String(255), default="")
+    raw_pattern: Mapped[str] = mapped_column(String(500))
+    normalized_alias: Mapped[str] = mapped_column(String(255), index=True)
+    confidence: Mapped[float] = mapped_column(Float, default=1.0)
+    source: Mapped[str] = mapped_column(String(32), default="confirmed_alias")
+    voided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class ClassificationSettings(TenantScoped, Base):
+    __tablename__ = "classification_settings"
+    __table_args__ = (
+        UniqueConstraint("workspace_id", name="uq_classification_settings_workspace"),
+        CheckConstraint(
+            "grace_hours >= 1 AND grace_hours <= 168",
+            name="ck_classification_settings_grace_hours",
+        ),
+        CheckConstraint(
+            "receipt_item_backfill_cursor >= 0 AND transaction_backfill_cursor >= 0 "
+            "AND receipt_match_backfill_cursor >= 0",
+            name="ck_classification_settings_backfill_cursors",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    workspace_id: Mapped[int] = mapped_column(
+        ForeignKey("workspaces.id", ondelete="CASCADE"), nullable=False, default=1, index=True
+    )
+    autonomous_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    category_creation_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    cadence_estimation_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    grace_hours: Mapped[int] = mapped_column(Integer, default=24)
+    receipt_item_backfill_cursor: Mapped[int] = mapped_column(Integer, default=0)
+    transaction_backfill_cursor: Mapped[int] = mapped_column(Integer, default=0)
+    receipt_match_backfill_cursor: Mapped[int] = mapped_column(Integer, default=0)
+    last_backfill_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class ClassificationDecisionRecord(TenantScoped, Base):
+    """Immutable classification ledger; projections remain the read-optimized current state."""
+
+    __tablename__ = "classification_decisions"
+    __table_args__ = (
+        UniqueConstraint("workspace_id", "id", name="uq_classification_decision_workspace_id"),
+        UniqueConstraint(
+            "workspace_id",
+            "source_type",
+            "source_entity_id",
+            "version",
+            name="uq_classification_decision_source_version",
+        ),
+        ForeignKeyConstraint(
+            ["workspace_id", "subcategory_id"],
+            ["classification_subcategories.workspace_id", "classification_subcategories.id"],
+            name="fk_classification_decision_subcategory_workspace",
+        ),
+        ForeignKeyConstraint(
+            ["workspace_id", "concept_id"],
+            ["classification_concepts.workspace_id", "classification_concepts.id"],
+            name="fk_classification_decision_concept_workspace",
+        ),
+        ForeignKeyConstraint(
+            ["workspace_id", "corrects_decision_id"],
+            ["classification_decisions.workspace_id", "classification_decisions.id"],
+            name="fk_classification_decision_correction_workspace",
+        ),
+        ForeignKeyConstraint(
+            ["workspace_id", "household_item_id"],
+            ["household_items.workspace_id", "household_items.id"],
+            name="fk_classification_decision_household_item_workspace",
+        ),
+        CheckConstraint(
+            "source_type IN ('receipt_line', 'transaction')",
+            name="ck_classification_decision_source_type",
+        ),
+        CheckConstraint(
+            "confidence >= 0 AND confidence <= 1",
+            name="ck_classification_decision_confidence",
+        ),
+        CheckConstraint("version > 0", name="ck_classification_decision_version"),
+        CheckConstraint(
+            f"spending_parent_category IN {SPENDING_PARENT_CATEGORY_SQL}",
+            name="ck_classification_decision_spending_parent",
+        ),
+        CheckConstraint(
+            f"item_activity_type IN {CLASSIFICATION_ACTIVITY_TYPE_SQL}",
+            name="ck_classification_decision_activity",
+        ),
+        CheckConstraint(
+            f"replenishment_eligibility IN {REPLENISHMENT_ELIGIBILITY_SQL}",
+            name="ck_classification_decision_replenishment_eligibility",
+        ),
+        CheckConstraint(
+            f"confidence_band IN {CLASSIFICATION_CONFIDENCE_BAND_SQL}",
+            name="ck_classification_decision_band",
+        ),
+        CheckConstraint(
+            f"authority IN {CLASSIFICATION_AUTHORITY_SQL}",
+            name="ck_classification_decision_authority",
+        ),
+        CheckConstraint(
+            f"decision_state IN {CLASSIFICATION_DECISION_STATE_SQL}",
+            name="ck_classification_decision_state",
+        ),
+        CheckConstraint(
+            "(decision_state = 'provisional' AND auto_finalize_at IS NOT NULL "
+            "AND finalized_at IS NULL) OR "
+            "(decision_state IN ('final', 'corrected') AND finalized_at IS NOT NULL)",
+            name="ck_classification_decision_finalization",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    workspace_id: Mapped[int] = mapped_column(
+        ForeignKey("workspaces.id", ondelete="CASCADE"), nullable=False, default=1, index=True
+    )
+    source_type: Mapped[str] = mapped_column(String(32), index=True)
+    source_entity_id: Mapped[int] = mapped_column(Integer, index=True)
+    version: Mapped[int] = mapped_column(Integer)
+    spending_parent_category: Mapped[str] = mapped_column(String(64), index=True)
+    subcategory_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    subcategory_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    concept_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    concept_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    item_activity_type: Mapped[str] = mapped_column(String(64), index=True)
+    replenishment_eligibility: Mapped[str] = mapped_column(String(32), index=True)
+    confidence: Mapped[float] = mapped_column(Float)
+    confidence_band: Mapped[str] = mapped_column(String(16), index=True)
+    authority: Mapped[str] = mapped_column(String(32), index=True)
+    provenance_json: Mapped[list] = mapped_column(JSON, default=list)
+    decision_state: Mapped[str] = mapped_column(String(16), index=True)
+    auto_finalize_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, index=True
+    )
+    finalized_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    corrects_decision_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    household_item_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    created_subcategory: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_concept: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_alias: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_household_item: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
 class HouseholdItem(TenantScoped, Base):
     __tablename__ = "household_items"
     __table_args__ = (
+        UniqueConstraint("workspace_id", "id", name="uq_household_item_workspace_id"),
         CheckConstraint(
             "(cadence_source = 'learning' AND cadence_days IS NULL) OR "
-            "(cadence_source IN ('configured', 'observed', 'adaptive') "
+            "(cadence_source IN ('configured', 'category_prior', 'model_prior', 'observed', "
+            "'quantity_adjusted', 'adaptive') "
             "AND cadence_days IS NOT NULL AND cadence_days > 0)",
             name="ck_household_items_cadence_state",
+        ),
+        CheckConstraint(
+            "cadence_confidence >= 0 AND cadence_confidence <= 1",
+            name="ck_household_items_cadence_confidence",
+        ),
+        CheckConstraint(
+            "(cadence_min_days IS NULL AND cadence_max_days IS NULL) OR "
+            "(cadence_days IS NOT NULL AND cadence_min_days > 0 AND "
+            "cadence_max_days > 0 AND cadence_min_days <= cadence_days AND "
+            "cadence_days <= cadence_max_days)",
+            name="ck_household_items_cadence_range",
+        ),
+        CheckConstraint(
+            f"spending_parent_category IN {SPENDING_PARENT_CATEGORY_SQL}",
+            name="ck_household_items_spending_parent",
+        ),
+        CheckConstraint(
+            f"replenishment_eligibility IN {REPLENISHMENT_ELIGIBILITY_SQL}",
+            name="ck_household_items_replenishment_eligibility",
+        ),
+        CheckConstraint(
+            "classification_confidence >= 0 AND classification_confidence <= 1",
+            name="ck_household_items_classification_confidence",
+        ),
+        ForeignKeyConstraint(
+            ["workspace_id", "classification_concept_id"],
+            ["classification_concepts.workspace_id", "classification_concepts.id"],
+            name="fk_household_item_classification_concept_workspace",
+        ),
+        ForeignKeyConstraint(
+            ["workspace_id", "merged_into_id"],
+            ["household_items.workspace_id", "household_items.id"],
+            name="fk_household_item_merged_workspace",
+        ),
+        CheckConstraint(
+            "merged_into_id IS NULL OR merged_into_id != id",
+            name="ck_household_item_not_self_merged",
+        ),
+        Index(
+            "uq_household_items_workspace_canonical_enabled",
+            "workspace_id",
+            "canonical_key",
+            unique=True,
+            postgresql_where=text("canonical_key IS NOT NULL AND enabled IS TRUE"),
+            sqlite_where=text("canonical_key IS NOT NULL AND enabled = 1"),
         ),
     )
 
@@ -789,6 +1321,27 @@ class HouseholdItem(TenantScoped, Base):
     cadence_source: Mapped[str] = mapped_column(
         String(32), default=HouseholdCadenceSource.CONFIGURED.value, nullable=False
     )
+    cadence_confidence: Mapped[float] = mapped_column(Float, default=0.0)
+    cadence_min_days: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    cadence_max_days: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    cadence_provenance_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    cadence_estimated_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    canonical_key: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
+    classification_concept_id: Mapped[int | None] = mapped_column(
+        Integer, nullable=True, index=True
+    )
+    spending_parent_category: Mapped[str] = mapped_column(
+        String(64), default=SpendingParentCategory.OTHER_UNCERTAIN.value, index=True
+    )
+    replenishment_eligibility: Mapped[str] = mapped_column(
+        String(32), default=ReplenishmentEligibility.REPLENISHABLE.value, index=True
+    )
+    classification_confidence: Mapped[float] = mapped_column(Float, default=0.0)
+    classification_provenance_json: Mapped[list] = mapped_column(JSON, default=list)
+    merged_into_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    merged_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     last_acquired_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
@@ -818,9 +1371,33 @@ class PurchaseReceipt(TenantScoped, Base):
             "parse_status",
             "created_at",
         ),
+        CheckConstraint(
+            "transaction_match_status IN "
+            "('not_attempted', 'auto_matched', 'ambiguous', 'no_match')",
+            name="ck_purchase_receipts_transaction_match_status",
+        ),
+        CheckConstraint(
+            "transaction_match_confidence >= 0 AND transaction_match_confidence <= 1",
+            name="ck_purchase_receipts_transaction_match_confidence",
+        ),
+        CheckConstraint(
+            "(transaction_match_status != 'auto_matched' OR "
+            "(transaction_id IS NOT NULL AND transaction_matched_at IS NOT NULL)) AND "
+            "(transaction_match_status = 'auto_matched' OR transaction_matched_at IS NULL)",
+            name="ck_purchase_receipts_transaction_match_consistency",
+        ),
+        CheckConstraint(
+            "arithmetic_status IN ('unknown', 'verified', 'mismatch', 'insufficient_data')",
+            name="ck_purchase_receipts_arithmetic_status",
+        ),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    owner_user_id: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id", name="fk_purchase_receipt_owner_user", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
     source: Mapped[str] = mapped_column(String(32), index=True)
     source_external_id: Mapped[str] = mapped_column(String(255))
     content_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
@@ -829,10 +1406,26 @@ class PurchaseReceipt(TenantScoped, Base):
     purchased_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     subtotal_cents: Mapped[int | None] = mapped_column(Integer, nullable=True)
     tax_cents: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    tip_cents: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    discount_cents: Mapped[int | None] = mapped_column(Integer, nullable=True)
     total_cents: Mapped[int | None] = mapped_column(Integer, nullable=True)
     currency: Mapped[str] = mapped_column(String(8), default="USD")
+    line_items_complete: Mapped[bool] = mapped_column(Boolean, default=False)
+    quality_warnings_json: Mapped[list] = mapped_column(JSON, default=list)
+    arithmetic_status: Mapped[str] = mapped_column(String(32), default="unknown", index=True)
     transaction_id: Mapped[int | None] = mapped_column(
         ForeignKey("expense_transactions.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    transaction_match_status: Mapped[str] = mapped_column(
+        String(32), default="not_attempted", index=True
+    )
+    transaction_match_confidence: Mapped[float] = mapped_column(Float, default=0.0)
+    transaction_match_evidence_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    transaction_match_attempted_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, index=True
+    )
+    transaction_matched_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
     )
     parse_status: Mapped[str] = mapped_column(
         String(32), default=ReceiptParseStatus.PENDING.value, index=True
@@ -863,6 +1456,44 @@ class PurchaseReceiptItem(Base):
             "(classification_confidence >= 0 AND classification_confidence <= 1)",
             name="ck_purchase_receipt_items_classification_confidence",
         ),
+        CheckConstraint(
+            "classification_version > 0",
+            name="ck_purchase_receipt_items_classification_version",
+        ),
+        CheckConstraint(
+            f"spending_parent_category IN {SPENDING_PARENT_CATEGORY_SQL}",
+            name="ck_purchase_receipt_items_spending_parent",
+        ),
+        CheckConstraint(
+            f"item_activity_type IN {CLASSIFICATION_ACTIVITY_TYPE_SQL}",
+            name="ck_purchase_receipt_items_classification_activity",
+        ),
+        CheckConstraint(
+            f"replenishment_eligibility IN {REPLENISHMENT_ELIGIBILITY_SQL}",
+            name="ck_purchase_receipt_items_replenishment_eligibility",
+        ),
+        CheckConstraint(
+            f"classification_confidence_band IN {CLASSIFICATION_CONFIDENCE_BAND_SQL}",
+            name="ck_purchase_receipt_items_classification_band",
+        ),
+        CheckConstraint(
+            f"classification_authority IN {CLASSIFICATION_AUTHORITY_SQL}",
+            name="ck_purchase_receipt_items_classification_authority",
+        ),
+        CheckConstraint(
+            f"classification_decision_state IN {CLASSIFICATION_DECISION_STATE_SQL}",
+            name="ck_purchase_receipt_items_classification_state",
+        ),
+        ForeignKeyConstraint(
+            ["classification_subcategory_id"],
+            ["classification_subcategories.id"],
+            name="fk_purchase_receipt_item_classification_subcategory",
+        ),
+        ForeignKeyConstraint(
+            ["classification_concept_id"],
+            ["classification_concepts.id"],
+            name="fk_purchase_receipt_item_classification_concept",
+        ),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
@@ -884,6 +1515,50 @@ class PurchaseReceiptItem(Base):
     classification: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
     classification_confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
     canonical_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    spending_parent_category: Mapped[str] = mapped_column(
+        String(64), default=SpendingParentCategory.OTHER_UNCERTAIN.value, index=True
+    )
+    classification_subcategory_id: Mapped[int | None] = mapped_column(
+        Integer, nullable=True, index=True
+    )
+    classification_subcategory_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    classification_concept_id: Mapped[int | None] = mapped_column(
+        Integer, nullable=True, index=True
+    )
+    classification_concept_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    item_activity_type: Mapped[str] = mapped_column(
+        String(64), default=ClassificationActivityType.UNCERTAIN.value, index=True
+    )
+    replenishment_eligibility: Mapped[str] = mapped_column(
+        String(32), default=ReplenishmentEligibility.UNCERTAIN.value, index=True
+    )
+    classification_confidence_band: Mapped[str] = mapped_column(
+        String(16), default=ClassificationConfidenceBand.LOW.value, index=True
+    )
+    classification_authority: Mapped[str] = mapped_column(
+        String(32), default=ClassificationAuthority.FALLBACK.value, index=True
+    )
+    classification_provenance_json: Mapped[list] = mapped_column(JSON, default=list)
+    classification_decision_state: Mapped[str] = mapped_column(
+        String(16), default=ClassificationDecisionState.FINAL.value, index=True
+    )
+    classification_applied_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    classification_auto_finalize_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, index=True
+    )
+    classification_retry_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, index=True
+    )
+    classification_finalized_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    classification_corrected_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    classification_corrects_version: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    classification_version: Mapped[int] = mapped_column(Integer, default=1)
     household_item_id: Mapped[int | None] = mapped_column(
         ForeignKey("household_items.id", ondelete="SET NULL"), nullable=True, index=True
     )
@@ -930,9 +1605,24 @@ class HouseholdItemAlias(Base):
 class HouseholdItemAcquisition(TenantScoped, Base):
     __tablename__ = "household_item_acquisitions"
     __table_args__ = (
-        UniqueConstraint("receipt_item_id", name="uq_acquisition_receipt_item"),
+        UniqueConstraint(
+            "workspace_id", "id", name="uq_household_item_acquisition_workspace_id"
+        ),
+        Index(
+            "uq_acquisition_receipt_item_active",
+            "receipt_item_id",
+            unique=True,
+            postgresql_where=text("receipt_item_id IS NOT NULL AND voided_at IS NULL"),
+            sqlite_where=text("receipt_item_id IS NOT NULL AND voided_at IS NULL"),
+        ),
         UniqueConstraint(
             "workspace_id", "logical_purchase_key", name="uq_acquisition_workspace_purchase_key"
+        ),
+        ForeignKeyConstraint(
+            ["workspace_id", "household_item_id"],
+            ["household_items.workspace_id", "household_items.id"],
+            name="fk_household_item_acquisition_item_workspace",
+            ondelete="CASCADE",
         ),
     )
 
@@ -966,13 +1656,25 @@ class HouseholdItemAcquisition(TenantScoped, Base):
     voided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
-    household_item: Mapped[HouseholdItem] = relationship()
+    household_item: Mapped[HouseholdItem] = relationship(
+        primaryjoin=(
+            "and_(HouseholdItemAcquisition.workspace_id == HouseholdItem.workspace_id, "
+            "HouseholdItemAcquisition.household_item_id == HouseholdItem.id)"
+        ),
+        foreign_keys=(
+            "[HouseholdItemAcquisition.workspace_id, "
+            "HouseholdItemAcquisition.household_item_id]"
+        ),
+    )
     receipt_item: Mapped[PurchaseReceiptItem | None] = relationship(back_populates="acquisition")
 
 
 class ReplenishmentModelVersion(TenantScoped, Base):
     __tablename__ = "replenishment_model_versions"
     __table_args__ = (
+        UniqueConstraint(
+            "workspace_id", "id", name="uq_replenishment_model_version_workspace_id"
+        ),
         UniqueConstraint("workspace_id", "version", name="uq_model_version_workspace_version"),
         Index(
             "uq_replenishment_workspace_single_active_model",
@@ -1001,6 +1703,22 @@ class ReplenishmentModelVersion(TenantScoped, Base):
 
 class ReplenishmentPrediction(TenantScoped, Base):
     __tablename__ = "replenishment_predictions"
+    __table_args__ = (
+        UniqueConstraint(
+            "workspace_id", "id", name="uq_replenishment_prediction_workspace_id"
+        ),
+        ForeignKeyConstraint(
+            ["workspace_id", "household_item_id"],
+            ["household_items.workspace_id", "household_items.id"],
+            name="fk_replenishment_prediction_item_workspace",
+            ondelete="CASCADE",
+        ),
+        ForeignKeyConstraint(
+            ["workspace_id", "model_version_id"],
+            ["replenishment_model_versions.workspace_id", "replenishment_model_versions.id"],
+            name="fk_replenishment_prediction_model_workspace",
+        ),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     household_item_id: Mapped[int] = mapped_column(
@@ -1023,12 +1741,40 @@ class ReplenishmentPrediction(TenantScoped, Base):
     error_days: Mapped[float | None] = mapped_column(Float, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
-    household_item: Mapped[HouseholdItem] = relationship()
-    model_version: Mapped[ReplenishmentModelVersion | None] = relationship()
+    household_item: Mapped[HouseholdItem] = relationship(
+        primaryjoin=(
+            "and_(ReplenishmentPrediction.workspace_id == HouseholdItem.workspace_id, "
+            "ReplenishmentPrediction.household_item_id == HouseholdItem.id)"
+        ),
+        foreign_keys=(
+            "[ReplenishmentPrediction.workspace_id, "
+            "ReplenishmentPrediction.household_item_id]"
+        ),
+    )
+    model_version: Mapped[ReplenishmentModelVersion | None] = relationship(
+        primaryjoin=(
+            "and_(ReplenishmentPrediction.workspace_id == "
+            "ReplenishmentModelVersion.workspace_id, "
+            "ReplenishmentPrediction.model_version_id == ReplenishmentModelVersion.id)"
+        ),
+        foreign_keys=(
+            "[ReplenishmentPrediction.workspace_id, "
+            "ReplenishmentPrediction.model_version_id]"
+        ),
+        overlaps="household_item",
+    )
 
 
 class ReplenishmentFeedback(TenantScoped, Base):
     __tablename__ = "replenishment_feedback"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["workspace_id", "household_item_id"],
+            ["household_items.workspace_id", "household_items.id"],
+            name="fk_replenishment_feedback_item_workspace",
+            ondelete="CASCADE",
+        ),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     household_item_id: Mapped[int] = mapped_column(
@@ -1045,7 +1791,14 @@ class ReplenishmentFeedback(TenantScoped, Base):
 
 class ReplenishmentJobRun(TenantScoped, Base):
     __tablename__ = "replenishment_job_runs"
-    __table_args__ = (UniqueConstraint("workspace_id", "run_key", name="uq_job_run_workspace_key"),)
+    __table_args__ = (
+        UniqueConstraint("workspace_id", "run_key", name="uq_job_run_workspace_key"),
+        ForeignKeyConstraint(
+            ["workspace_id", "model_version_id"],
+            ["replenishment_model_versions.workspace_id", "replenishment_model_versions.id"],
+            name="fk_replenishment_job_run_model_workspace",
+        ),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     run_key: Mapped[str] = mapped_column(String(100), index=True)

@@ -324,6 +324,179 @@ def test_runtime_role_enforces_every_parent_derived_child_policy(
         transaction.rollback()
 
 
+@pytest.mark.skipif(
+    not HARDENED_RLS_EXPECTED,
+    reason="Day 16 taxonomy guards require hardened PostgreSQL RLS",
+)
+def test_runtime_rejects_real_cross_workspace_classification_and_receipt_links():
+    engine = create_engine(os.environ["DATABASE_URL"], future=True)
+    first_workspace = int(os.environ.get("RLS_TEST_FIRST_WORKSPACE_ID", "1"))
+    second_workspace = int(os.environ.get("RLS_TEST_SECOND_WORKSPACE_ID", "900002"))
+    suffix = uuid4().hex
+
+    with engine.connect() as connection:
+        transaction = connection.begin()
+        connection.execute(
+            text("SELECT set_config('expenseops.workspace_id', :workspace_id, true)"),
+            {"workspace_id": str(first_workspace)},
+        )
+        first_subcategory_id = connection.scalar(
+            text(
+                "INSERT INTO classification_subcategories "
+                "(workspace_id, parent_category, name, normalized_name, source, "
+                "confidence, created_at, updated_at) VALUES "
+                "(:workspace_id, 'household_home', 'CI first paper', :name, "
+                "'deterministic_exact', 1.0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP) "
+                "RETURNING id"
+            ),
+            {"workspace_id": first_workspace, "name": f"ci-first-paper-{suffix}"},
+        )
+        first_concept_id = connection.scalar(
+            text(
+                "INSERT INTO classification_concepts "
+                "(workspace_id, subcategory_id, parent_category, name, normalized_name, "
+                "item_activity_type, replenishment_eligibility, source, confidence, "
+                "created_at, updated_at) VALUES "
+                "(:workspace_id, :subcategory_id, 'household_home', 'CI first towels', "
+                ":name, 'household_consumable', 'replenishable', "
+                "'deterministic_exact', 1.0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP) "
+                "RETURNING id"
+            ),
+            {
+                "workspace_id": first_workspace,
+                "subcategory_id": first_subcategory_id,
+                "name": f"ci-first-towels-{suffix}",
+            },
+        )
+        transaction.commit()
+
+        transaction = connection.begin()
+        connection.execute(
+            text("SELECT set_config('expenseops.workspace_id', :workspace_id, true)"),
+            {"workspace_id": str(second_workspace)},
+        )
+        second_subcategory_id = connection.scalar(
+            text(
+                "INSERT INTO classification_subcategories "
+                "(workspace_id, parent_category, name, normalized_name, source, "
+                "confidence, created_at, updated_at) VALUES "
+                "(:workspace_id, 'food_dining', 'CI second grocery', :name, "
+                "'deterministic_exact', 1.0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP) "
+                "RETURNING id"
+            ),
+            {"workspace_id": second_workspace, "name": f"ci-second-grocery-{suffix}"},
+        )
+        second_concept_id = connection.scalar(
+            text(
+                "INSERT INTO classification_concepts "
+                "(workspace_id, subcategory_id, parent_category, name, normalized_name, "
+                "item_activity_type, replenishment_eligibility, source, confidence, "
+                "created_at, updated_at) VALUES "
+                "(:workspace_id, :subcategory_id, 'food_dining', 'CI second milk', "
+                ":name, 'grocery', 'replenishable', 'deterministic_exact', 1.0, "
+                "CURRENT_TIMESTAMP, CURRENT_TIMESTAMP) RETURNING id"
+            ),
+            {
+                "workspace_id": second_workspace,
+                "subcategory_id": second_subcategory_id,
+                "name": f"ci-second-milk-{suffix}",
+            },
+        )
+        second_plaid_item_id = connection.scalar(
+            text(
+                "INSERT INTO plaid_items "
+                "(workspace_id, item_id, enabled, created_at, updated_at) VALUES "
+                "(:workspace_id, :item_id, true, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP) "
+                "RETURNING id"
+            ),
+            {"workspace_id": second_workspace, "item_id": f"ci-day16-{suffix}"},
+        )
+        second_transaction_id = connection.scalar(
+            text(
+                "INSERT INTO expense_transactions "
+                "(workspace_id, plaid_transaction_id, plaid_item_id, name, amount_cents, "
+                "iso_currency_code, pending, status, created_at, updated_at) VALUES "
+                "(:workspace_id, :transaction_id, :plaid_item_id, 'CI second purchase', "
+                "1000, 'USD', false, 'ask_user', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP) "
+                "RETURNING id"
+            ),
+            {
+                "workspace_id": second_workspace,
+                "transaction_id": f"ci-day16-transaction-{suffix}",
+                "plaid_item_id": second_plaid_item_id,
+            },
+        )
+        transaction.commit()
+
+        transaction = connection.begin()
+        connection.execute(
+            text("SELECT set_config('expenseops.workspace_id', :workspace_id, true)"),
+            {"workspace_id": str(first_workspace)},
+        )
+        assert connection.scalars(text("SELECT id FROM classification_concepts")).all() == [
+            first_concept_id
+        ]
+        transaction.rollback()
+
+        forbidden_statements = (
+            (
+                "UPDATE purchase_receipt_items SET classification_concept_id = :foreign_id "
+                "WHERE id = 900021",
+                {"foreign_id": second_concept_id},
+            ),
+            (
+                "INSERT INTO classification_concept_aliases "
+                "(workspace_id, concept_id, merchant_normalized, raw_pattern, "
+                "normalized_alias, confidence, source, created_at) VALUES "
+                "(:workspace_id, :foreign_id, '', 'CI forbidden', :alias, 1.0, "
+                "'confirmed_alias', CURRENT_TIMESTAMP)",
+                {
+                    "workspace_id": first_workspace,
+                    "foreign_id": second_concept_id,
+                    "alias": f"ci-forbidden-{suffix}",
+                },
+            ),
+            (
+                "INSERT INTO classification_decisions "
+                "(workspace_id, source_type, source_entity_id, version, "
+                "spending_parent_category, concept_id, item_activity_type, "
+                "replenishment_eligibility, confidence, confidence_band, authority, "
+                "provenance_json, decision_state, created_subcategory, created_concept, "
+                "created_alias, created_household_item, finalized_at, created_at) VALUES "
+                "(:workspace_id, 'transaction', 1, 1, 'food_dining', :foreign_id, "
+                "'grocery', 'replenishable', 0.99, 'high', 'deterministic_exact', "
+                "'[]'::json, 'final', false, false, false, false, CURRENT_TIMESTAMP, "
+                "CURRENT_TIMESTAMP)",
+                {"workspace_id": first_workspace, "foreign_id": second_concept_id},
+            ),
+            (
+                "INSERT INTO classification_decisions "
+                "(workspace_id, source_type, source_entity_id, version, "
+                "spending_parent_category, item_activity_type, replenishment_eligibility, "
+                "confidence, confidence_band, authority, provenance_json, decision_state, "
+                "created_subcategory, created_concept, created_alias, "
+                "created_household_item, finalized_at, created_at) VALUES "
+                "(:workspace_id, 'transaction', :foreign_id, 1, 'other_uncertain', "
+                "'uncertain', 'uncertain', 0.0, 'low', 'fallback', '[]'::json, 'final', "
+                "false, false, false, false, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+                {"workspace_id": first_workspace, "foreign_id": second_transaction_id},
+            ),
+            (
+                "UPDATE purchase_receipts SET transaction_id = :foreign_id WHERE id = 900021",
+                {"foreign_id": second_transaction_id},
+            ),
+        )
+        for statement, parameters in forbidden_statements:
+            transaction = connection.begin()
+            connection.execute(
+                text("SELECT set_config('expenseops.workspace_id', :workspace_id, true)"),
+                {"workspace_id": str(first_workspace)},
+            )
+            with pytest.raises(DBAPIError):
+                connection.execute(text(statement), parameters)
+            transaction.rollback()
+
+
 def test_tenant_routing_functions_reject_stale_rows_without_active_membership():
     from app.models import (
         PlaidItem,

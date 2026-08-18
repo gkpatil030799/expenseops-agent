@@ -24,6 +24,7 @@ class ConsentRequest(BaseModel):
         "gmail_receipts",
         "gmail_promotions",
         "model_receipt_processing",
+        "model_transaction_classification",
         "structured_transaction_learning",
     ]
     granted: bool

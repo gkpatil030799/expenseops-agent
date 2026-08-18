@@ -1,3 +1,14 @@
+import type {
+  ClassificationActivityType,
+  ClassificationAuthority,
+  ClassificationConfidenceBand,
+  ClassificationDecisionState,
+  ReplenishmentEligibility,
+  SpendingParentCategory,
+} from "./classificationActivity";
+
+export type { ClassificationActivityOut } from "./classificationActivity";
+
 export type Transaction = {
   id: number;
   plaid_transaction_id: string;
@@ -164,7 +175,14 @@ export type HouseholdItem = {
   preferred_place_address: string | null;
   replenishment_mode: "errand" | "delivery" | "either";
   cadence_days: number | null;
-  cadence_source: "configured" | "learning" | "observed" | "adaptive";
+  cadence_source:
+    | "configured"
+    | "learning"
+    | "category_prior"
+    | "model_prior"
+    | "observed"
+    | "quantity_adjusted"
+    | "adaptive";
   last_acquired_at: string | null;
   snoozed_until: string | null;
   enabled: boolean;
@@ -262,6 +280,18 @@ export type ReceiptLine = {
     | null;
   classification_confidence: number | null;
   canonical_name: string | null;
+  spending_parent_category?: SpendingParentCategory;
+  classification_subcategory_name?: string | null;
+  classification_concept_name?: string | null;
+  item_activity_type?: ClassificationActivityType;
+  replenishment_eligibility?: ReplenishmentEligibility;
+  classification_confidence_band?: ClassificationConfidenceBand;
+  classification_authority?: ClassificationAuthority;
+  classification_decision_state?: ClassificationDecisionState;
+  classification_applied_at?: string | null;
+  classification_finalized_at?: string | null;
+  classification_corrected_at?: string | null;
+  classification_version?: number;
 };
 
 export type PurchaseReceipt = {

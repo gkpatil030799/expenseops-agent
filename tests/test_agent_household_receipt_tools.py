@@ -134,7 +134,7 @@ def test_registry_exposes_only_two_strict_read_tools_and_rejects_invalid_views(
 ):
     factory, contexts = household_receipt_database
     registry = _registry()
-    assert registry.get("get_receipts").version == "1.2"
+    assert registry.get("get_receipts").version == "1.3"
     metadata = registry.metadata()
 
     assert {item.name for item in metadata} == {
@@ -163,6 +163,7 @@ def test_registry_exposes_only_two_strict_read_tools_and_rejects_invalid_views(
             ),
             ("get_receipts", {"view": "detail"}),
             ("get_receipts", {"view": "recent", "receipt_id": 1}),
+            ("get_receipts", {"view": "latest", "merchant": "Costco"}),
             (
                 "get_receipts",
                 {"view": "detail", "receipt_id": 1, "merchant": "Costco"},
@@ -501,6 +502,12 @@ def test_receipt_views_are_bounded_parent_scoped_and_keep_hostile_text_inert(
                 household_item_id=tracked.id,
                 match_status="matched",
                 match_confidence=0.99,
+                spending_parent_category="household_home",
+                classification_subcategory_name="Paper goods",
+                classification_concept_name="Paper towels",
+                item_activity_type="household_consumable",
+                replenishment_eligibility="replenishable",
+                classification_confidence=0.96,
             ),
             PurchaseReceiptItem(
                 receipt_id=receipt.id,
@@ -566,6 +573,15 @@ def test_receipt_views_are_bounded_parent_scoped_and_keep_hostile_text_inert(
                 "line_limit": MAX_RECEIPT_LINE_RESULTS,
             },
         )
+        latest = _execute(
+            registry,
+            db,
+            "get_receipts",
+            {
+                "view": "latest",
+                "line_limit": MAX_RECEIPT_LINE_RESULTS,
+            },
+        )
 
     assert [item["public_id"] for item in recent["receipts"]] == [str(receipt.id)]
     recent_receipt = recent["receipts"][0]
@@ -591,15 +607,21 @@ def test_receipt_views_are_bounded_parent_scoped_and_keep_hostile_text_inert(
         "household_item_name": hostile_item_name,
         "household_item_public_id": str(tracked.id),
         "classification": "uncertain",
-        "classification_confidence": 0.0,
+        "classification_confidence": 0.96,
         "canonical_name": None,
+        "parent_category": "household_home",
+        "subcategory": "Paper goods",
+        "concept": "Paper towels",
+        "activity_type": "household_consumable",
+        "replenishment_eligibility": "replenishable",
         "confirmed_acquisition": True,
     }
     assert detail["total_count"] == MAX_RECEIPT_LINE_RESULTS + 2
     assert detail["result_limit"] == MAX_RECEIPT_LINE_RESULTS
     assert len(detail["receipt"]["lines"]) == MAX_RECEIPT_LINE_RESULTS
     assert detail["truncated"] is True
-    serialized = json.dumps({"recent": recent, "detail": detail})
+    assert latest == {**detail, "view": "latest"}
+    serialized = json.dumps({"recent": recent, "detail": detail, "latest": latest})
     assert hostile_merchant in serialized
     assert hostile_line in serialized
     assert hostile_item_name in serialized

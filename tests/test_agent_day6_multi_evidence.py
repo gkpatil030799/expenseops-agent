@@ -35,6 +35,11 @@ from app.agent.runtime import (
     build_run_evidence_bundle,
     compose_grounded_response,
 )
+from app.models import (
+    ClassificationActivityType,
+    ReplenishmentEligibility,
+    SpendingParentCategory,
+)
 from scripts.benchmark_agent_day6 import (
     _deal_output,
     _errand_output,
@@ -578,6 +583,9 @@ def test_receipt_replenishment_relationship_requires_both_confirmed_evidence_sid
                     "classification": "replenishable_household",
                     "classification_confidence": 0.99,
                     "canonical_name": "Laundry detergent",
+                    "parent_category": SpendingParentCategory.HOUSEHOLD_HOME,
+                    "activity_type": ClassificationActivityType.HOUSEHOLD_CONSUMABLE,
+                    "replenishment_eligibility": ReplenishmentEligibility.REPLENISHABLE,
                     "confirmed_acquisition": True,
                 }
             ],

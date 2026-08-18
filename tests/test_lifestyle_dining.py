@@ -90,6 +90,55 @@ def test_lifestyle_uses_purchase_only_canonical_spend_and_preserves_uncertainty(
     assert "groceries" not in {row["name"] for row in all_lifestyle["top_merchants"]}
 
 
+def test_lifestyle_prefers_canonical_activity_over_conflicting_provider_label(tmp_path):
+    db, item, _ = _db(tmp_path)
+    coffee = _tx(
+        item,
+        "canonical-coffee",
+        700,
+        "FOOD_AND_DRINK / GROCERIES",
+        date(2026, 8, 12),
+    )
+    coffee.provider_category = "FOOD_AND_DRINK / GROCERIES"
+    coffee.spending_parent_category = "food_dining"
+    coffee.classification_subcategory_name = "Coffee shops"
+    coffee.classification_activity_type = "coffee_beverage"
+    coffee.replenishment_eligibility = "not_replenishable"
+    coffee.classification_applied_at = datetime.now(UTC)
+    grocery = _tx(
+        item,
+        "canonical-grocery",
+        2_000,
+        "FOOD_AND_DRINK / RESTAURANT",
+        date(2026, 8, 13),
+    )
+    grocery.provider_category = "FOOD_AND_DRINK / RESTAURANT"
+    grocery.spending_parent_category = "food_dining"
+    grocery.classification_subcategory_name = "Groceries"
+    grocery.classification_activity_type = "grocery"
+    grocery.replenishment_eligibility = "replenishable"
+    grocery.classification_applied_at = datetime.now(UTC)
+    db.add_all([coffee, grocery])
+    db.commit()
+
+    result = LifestyleDiningService(db).build(
+        start_date=date(2026, 8, 9),
+        end_date=date(2026, 8, 16),
+        activity_type="coffee",
+    )
+
+    assert result["summary"]["total_cents"] == 700
+    assert result["summary"]["transaction_count"] == 1
+    assert result["top_merchants"] == [
+        {
+            "name": "canonical-coffee",
+            "amount_cents": 700,
+            "transaction_count": 1,
+            "percentage": 100.0,
+        }
+    ]
+
+
 def test_lifestyle_actual_share_reconciles_and_never_guesses_unknown_allocations(tmp_path):
     db, item, _ = _db(tmp_path)
     db.add(

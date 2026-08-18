@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from typing import Literal
 from uuid import uuid4
 
@@ -9,6 +9,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import selectinload
 
 from app.api.deps import DbSession
+from app.classification_activity_schemas import ClassificationActivityOut
 from app.config import get_settings
 from app.models import (
     HouseholdItem,
@@ -30,6 +31,10 @@ from app.replenishment_schemas import (
     WeeklyRunRequest,
 )
 from app.services.acquisition_service import AcquisitionService
+from app.services.classification_activity_service import (
+    MAX_CLASSIFICATION_ACTIVITY_RESULTS,
+    ClassificationActivityService,
+)
 from app.services.gmail_receipt_service import GmailReceiptService
 from app.services.receipt_ingestion_service import ReceiptIngestionService
 from app.services.replenishment_model_service import ReplenishmentModelService
@@ -37,6 +42,28 @@ from app.services.replenishment_prediction_service import TrainingDatasetService
 from app.services.weekly_replenishment_service import WeeklyReplenishmentService
 
 router = APIRouter(prefix="/api/replenishment", tags=["replenishment-learning"])
+
+
+@router.get("/classification-activity", response_model=ClassificationActivityOut)
+def classification_activity(
+    db: DbSession,
+    activity_date: date,
+    view: Literal[
+        "summary",
+        "categories",
+        "new_categories",
+        "matches",
+        "staples",
+        "cadence",
+        "uncertain",
+    ] = "summary",
+    limit: int = Query(default=10, ge=1, le=MAX_CLASSIFICATION_ACTIVITY_RESULTS),
+) -> ClassificationActivityOut:
+    return ClassificationActivityService(db).read(
+        activity_date=activity_date,
+        view=view,
+        limit=limit,
+    )
 
 
 @router.get("/summary")
@@ -408,14 +435,25 @@ def _receipt_dict(receipt: PurchaseReceipt) -> dict:
         "source": receipt.source,
         "merchant": receipt.merchant_raw,
         "purchased_at": receipt.purchased_at,
+        "subtotal_cents": receipt.subtotal_cents,
+        "tax_cents": receipt.tax_cents,
+        "tip_cents": receipt.tip_cents,
+        "discount_cents": receipt.discount_cents,
         "total_cents": receipt.total_cents,
         "currency": receipt.currency,
+        "line_items_complete": receipt.line_items_complete,
+        "quality_warnings": list(receipt.quality_warnings_json or []),
+        "arithmetic_status": receipt.arithmetic_status,
         "parse_status": receipt.parse_status,
         "parse_quality": parse_quality,
         "quality_message": quality_message,
         "parse_confidence": receipt.parse_confidence,
         "failure_code": receipt.failure_code,
         "transaction_id": receipt.transaction_id,
+        "transaction_match_status": receipt.transaction_match_status,
+        "transaction_match_confidence": receipt.transaction_match_confidence,
+        "transaction_match_attempted_at": receipt.transaction_match_attempted_at,
+        "transaction_matched_at": receipt.transaction_matched_at,
         "created_at": receipt.created_at,
         "updated_at": receipt.updated_at,
         "decision_summary": {
@@ -431,7 +469,9 @@ def _receipt_dict(receipt: PurchaseReceipt) -> dict:
                 "normalized_name": line.normalized_name,
                 "quantity": line.quantity,
                 "unit": line.unit,
+                "unit_price_cents": line.unit_price_cents,
                 "line_total_cents": line.line_total_cents,
+                "brand": line.brand,
                 "household_item_id": line.household_item_id,
                 "household_item_name": line.household_item.name if line.household_item else None,
                 "acquisition_id": line.acquisition.id if line.acquisition else None,
@@ -440,6 +480,18 @@ def _receipt_dict(receipt: PurchaseReceipt) -> dict:
                 "classification": line.classification,
                 "classification_confidence": line.classification_confidence,
                 "canonical_name": line.canonical_name,
+                "spending_parent_category": line.spending_parent_category,
+                "classification_subcategory_name": line.classification_subcategory_name,
+                "classification_concept_name": line.classification_concept_name,
+                "item_activity_type": line.item_activity_type,
+                "replenishment_eligibility": line.replenishment_eligibility,
+                "classification_confidence_band": line.classification_confidence_band,
+                "classification_authority": line.classification_authority,
+                "classification_decision_state": line.classification_decision_state,
+                "classification_applied_at": line.classification_applied_at,
+                "classification_finalized_at": line.classification_finalized_at,
+                "classification_corrected_at": line.classification_corrected_at,
+                "classification_version": line.classification_version,
             }
             for line in receipt.items
         ],

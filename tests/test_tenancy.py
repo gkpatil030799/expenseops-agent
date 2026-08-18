@@ -18,6 +18,7 @@ from app.db import Base, get_db
 from app.jobs import weekly_replenishment
 from app.main import app
 from app.models import (
+    DataConsent,
     Errand,
     ExpenseTransaction,
     GmailAccount,
@@ -449,7 +450,20 @@ def test_gmail_receipt_ingestion_deduplication_is_workspace_scoped(tenant_db):
     receipt_ids = []
     for context in contexts.values():
         with _scoped(factory, context) as db:
-            receipt = ReceiptIngestionService(db).ingest_text(
+            db.add(
+                DataConsent(
+                    workspace_id=context.workspace_id,
+                    user_id=context.user_id,
+                    purpose="model_receipt_processing",
+                    granted=True,
+                    policy_version="test",
+                    granted_at=datetime.now(UTC),
+                )
+            )
+            db.commit()
+            receipt = ReceiptIngestionService(
+                db, owner_user_id=context.user_id
+            ).ingest_text(
                 source="gmail",
                 source_external_id="same-gmail-message-id",
                 text="Receipt\nMilk 2.99\nTotal 2.99",

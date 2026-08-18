@@ -12,13 +12,14 @@ from decimal import ROUND_FLOOR, Decimal
 from typing import Any
 
 from sqlalchemy import func, or_, select, update
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app.config import Settings, get_settings
 from app.job_tenancy import telegram_settings_for_workspace
 from app.logging_config import get_trace_id, log_event
 from app.models import (
+    ClassificationAuthority,
     ExpenseTransaction,
     FinancialOperation,
     PlaidItem,
@@ -34,10 +35,14 @@ from app.services.agent_service import (
     friend_display_name,
     transaction_display_name,
 )
+from app.services.autonomous_classification_service import AutonomousClassificationService
 from app.services.managed_auth_service import record_audit
 from app.services.notification_service import NotificationService
 from app.services.outbox_service import enqueue_outbox_event
 from app.services.plaid_service import PlaidService
+from app.services.receipt_transaction_reconciliation_service import (
+    ReceiptTransactionReconciliationService,
+)
 from app.services.share_calculator import (
     CustomSplitInput,
     SplitMode,
@@ -325,6 +330,8 @@ class TransactionService:
             )
 
         self._link_pending_replacement(item, tx, tx_data)
+        ReceiptTransactionReconciliationService(self.db).reconcile_for_transaction(tx)
+        self._classify_transaction_nonblocking(tx)
         if (
             not created
             and previous_amount_cents is not None
@@ -390,6 +397,9 @@ class TransactionService:
         previous_pending = bool(tx.pending)
         previous_status = str(tx.status)
         self._apply_plaid_transaction_fields(tx, item, tx_data)
+        self._link_pending_replacement(item, tx, tx_data)
+        ReceiptTransactionReconciliationService(self.db).reconcile_for_transaction(tx)
+        self._classify_transaction_nonblocking(tx)
         if _is_resolved_transaction_status(previous_status):
             log_event(
                 logger,
@@ -427,6 +437,34 @@ class TransactionService:
             tx_id=tx.id,
         )
 
+    def _classify_transaction_nonblocking(self, tx: ExpenseTransaction) -> None:
+        """Apply internal taxonomy without making Plaid ingestion depend on it."""
+
+        if not self.settings.autonomous_classification_enabled:
+            return
+        try:
+            with self.db.begin_nested():
+                classification = AutonomousClassificationService(
+                    self.db, self.settings
+                ).classify_transaction(tx, commit=False)
+                if classification.failures:
+                    # The classifier reports bounded internal apply failures in
+                    # its summary. Roll back the savepoint and persist the same
+                    # durable retry marker used for raised storage failures.
+                    raise ValueError("autonomous_transaction_classification_incomplete")
+        except (SQLAlchemyError, ValueError) as exc:
+            if tx.classification_authority != ClassificationAuthority.USER_CORRECTION.value:
+                # The surrounding Plaid upsert remains authoritative and must
+                # not fail because classification is unavailable.  Persist a
+                # bounded due marker in that same commit so the finalizer can
+                # retry exactly this still-unclassified transaction.
+                tx.classification_retry_at = utc_now()
+            log_event(
+                logger,
+                "transaction_autonomous_classification_deferred",
+                error_type=type(exc).__name__,
+            )
+
     def _get_transaction_by_plaid_id(self, plaid_transaction_id: str) -> ExpenseTransaction | None:
         return self.db.execute(
             select(ExpenseTransaction).where(
@@ -452,9 +490,14 @@ class TransactionService:
         tx.authorized_date = _parse_date(tx_data.get("authorized_date"))
         tx.pending = bool(tx_data.get("pending", False))
         tx.payment_channel = tx_data.get("payment_channel")
-        tx.category = _category_to_string(
+        provider_category = _category_to_string(
             tx_data.get("category"), tx_data.get("personal_finance_category")
         )
+        # Keep the legacy projection during the consumer migration, while the
+        # raw provider field remains separate from canonical user-correctable
+        # classification fields.
+        tx.category = provider_category
+        tx.provider_category = provider_category
         tx.raw_json = json.dumps(tx_data, default=str)
         tx.updated_at = utc_now()
 
@@ -938,9 +981,12 @@ class TransactionService:
                 # Plaid cursor is safe because retries no longer depend on replaying
                 # the webhook page.
                 return
+            ReceiptTransactionReconciliationService(self.db).reconcile_removed_transaction(tx)
+            self.db.commit()
             return
         tx.status = TransactionStatus.REMOVED.value
         tx.updated_at = utc_now()
+        ReceiptTransactionReconciliationService(self.db).reconcile_removed_transaction(tx)
         self._record_transaction_audit(
             tx,
             event_type="transaction_removed",
@@ -1996,8 +2042,11 @@ class TransactionService:
         prior = self._get_transaction_by_plaid_id(pending_plaid_id)
         if prior is None or prior.id == tx.id:
             return
+        if prior.workspace_id != item.workspace_id or tx.workspace_id != item.workspace_id:
+            return
         tx.replaces_transaction_id = prior.id
         prior.replaced_by_transaction_id = tx.id
+        ReceiptTransactionReconciliationService(self.db).migrate_pending_replacement(prior, tx)
         if prior.splitwise_expense_id:
             try:
                 self._execute_splitwise_delete(

@@ -22,6 +22,7 @@ from app.api import (
     ai_memory_routes,
     attention_routes,
     auth_routes,
+    classification_routes,
     context_routes,
     household_routes,
     insights_routes,
@@ -64,7 +65,15 @@ _CHILD_WORKSPACE_POLICY_EXPRESSIONS = {
         "AND (household_item_id IS NULL OR EXISTS ("
         "SELECT 1 FROM public.household_items AS item WHERE "
         "item.id = purchase_receipt_items.household_item_id AND "
-        f"item.workspace_id = {_WORKSPACE_SETTING_EXPRESSION}))"
+        f"item.workspace_id = {_WORKSPACE_SETTING_EXPRESSION})) "
+        "AND (classification_subcategory_id IS NULL OR EXISTS ("
+        "SELECT 1 FROM public.classification_subcategories AS subcategory WHERE "
+        "subcategory.id = purchase_receipt_items.classification_subcategory_id AND "
+        f"subcategory.workspace_id = {_WORKSPACE_SETTING_EXPRESSION})) "
+        "AND (classification_concept_id IS NULL OR EXISTS ("
+        "SELECT 1 FROM public.classification_concepts AS concept WHERE "
+        "concept.id = purchase_receipt_items.classification_concept_id AND "
+        f"concept.workspace_id = {_WORKSPACE_SETTING_EXPRESSION}))"
     ),
     "household_item_aliases": (
         "EXISTS (SELECT 1 FROM public.household_items AS item WHERE "
@@ -246,6 +255,7 @@ app.include_router(plaid_routes.router)
 app.include_router(admin_routes.router)
 app.include_router(agent_routes.router)
 app.include_router(auth_routes.router)
+app.include_router(classification_routes.router)
 app.include_router(context_routes.router)
 app.include_router(integration_routes.router)
 app.include_router(workspace_routes.router)
@@ -360,6 +370,12 @@ def readiness() -> JSONResponse:
                 }
                 protected_tables = sorted(policy_expressions)
                 application_tables = sorted(Base.metadata.tables)
+                append_only_tables = [
+                    table for table in ("classification_decisions",) if table in application_tables
+                ]
+                mutable_application_tables = [
+                    table for table in application_tables if table not in append_only_tables
+                ]
                 allowed_runtime_relations = [*application_tables, "alembic_version"]
                 rls_rows = connection.execute(
                     text(
@@ -558,6 +574,19 @@ def readiness() -> JSONResponse:
                         ),
                         {"tables": application_tables},
                     )
+                ) or bool(
+                    append_only_tables
+                    and connection.scalar(
+                        text(
+                            "SELECT EXISTS (SELECT 1 FROM pg_class c "
+                            "JOIN pg_namespace n ON n.oid = c.relnamespace "
+                            "WHERE n.nspname = 'public' "
+                            "AND c.relname = ANY(:tables) AND ("
+                            "has_table_privilege(current_user, c.oid, 'UPDATE') OR "
+                            "has_table_privilege(current_user, c.oid, 'DELETE')))"
+                        ),
+                        {"tables": append_only_tables},
+                    )
                 )
                 checks["runtime_role_missing_table_privileges"] = bool(
                     connection.scalar(
@@ -571,7 +600,20 @@ def readiness() -> JSONResponse:
                             "NOT has_table_privilege(current_user, c.oid, 'UPDATE') OR "
                             "NOT has_table_privilege(current_user, c.oid, 'DELETE')))"
                         ),
-                        {"tables": application_tables},
+                        {"tables": mutable_application_tables},
+                    )
+                ) or bool(
+                    append_only_tables
+                    and connection.scalar(
+                        text(
+                            "SELECT EXISTS (SELECT 1 FROM pg_class c "
+                            "JOIN pg_namespace n ON n.oid = c.relnamespace "
+                            "WHERE n.nspname = 'public' "
+                            "AND c.relname = ANY(:tables) AND ("
+                            "NOT has_table_privilege(current_user, c.oid, 'SELECT') OR "
+                            "NOT has_table_privilege(current_user, c.oid, 'INSERT')))"
+                        ),
+                        {"tables": append_only_tables},
                     )
                 )
                 checks["runtime_role_unexpected_table_privileges"] = bool(
@@ -959,9 +1001,12 @@ def privacy_policy() -> str:
             (
                 "Providers and model processing",
                 "Connected providers receive only the requests needed for their integration. "
-                "Relevant receipt or promotion text is sent to the configured model provider only "
-                "when model processing is enabled and you have granted that consent. Each "
-                "integration can be disconnected from Settings.",
+                "Relevant receipt email or promotion text, and receipt photo or PDF bytes you "
+                "submit, are sent to the configured model provider only when receipt model "
+                "processing is enabled and you have granted that consent. Bounded unresolved "
+                "transaction merchant, description, and provider-category evidence is sent only "
+                "when you separately enable model-assisted transaction categories. Each "
+                "integration and consent can be disconnected or withdrawn from Settings.",
             ),
             (
                 "Workspace visibility",

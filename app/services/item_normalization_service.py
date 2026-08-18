@@ -67,7 +67,10 @@ class ItemNormalizationService:
         alias_query = (
             select(HouseholdItemAlias)
             .join(HouseholdItem, HouseholdItem.id == HouseholdItemAlias.household_item_id)
-            .where(HouseholdItemAlias.voided_at.is_(None))
+            .where(
+                HouseholdItemAlias.voided_at.is_(None),
+                HouseholdItem.enabled.is_(True),
+            )
         )
         if self.workspace_id is not None:
             alias_query = alias_query.where(HouseholdItem.workspace_id == self.workspace_id)
@@ -140,6 +143,8 @@ class ItemNormalizationService:
         if existing:
             existing.raw_pattern = raw_pattern
             existing.confidence = max(existing.confidence, confidence)
+            if source in {"confirmed_receipt", "user", "user_correction"}:
+                existing.source = source
             existing.voided_at = None
             return existing
         alias = HouseholdItemAlias(
@@ -159,18 +164,20 @@ class ItemNormalizationService:
         raw_pattern: str,
         *,
         merchant: str | None = None,
+        sources: frozenset[str] | None = None,
     ) -> None:
         if self.workspace_id is not None and household_item.workspace_id != self.workspace_id:
             raise ValueError("Household item not found.")
         normalized = normalize_item_name(raw_pattern)
         merchant_key = normalize_merchant(merchant)
-        aliases = self.db.execute(
-            select(HouseholdItemAlias).where(
+        statement = select(HouseholdItemAlias).where(
                 HouseholdItemAlias.household_item_id == household_item.id,
                 HouseholdItemAlias.merchant_normalized == merchant_key,
                 HouseholdItemAlias.normalized_alias == normalized,
                 HouseholdItemAlias.voided_at.is_(None),
             )
-        ).scalars()
+        if sources is not None:
+            statement = statement.where(HouseholdItemAlias.source.in_(sources))
+        aliases = self.db.execute(statement).scalars()
         for alias in aliases:
             alias.voided_at = utc_now()
