@@ -72,7 +72,7 @@ def test_classification_activity_tool_is_strict_bounded_and_read_only() -> None:
     metadata = registry.get("get_classification_activity")
 
     assert metadata.effect == "read"
-    assert metadata.version == "1.0"
+    assert metadata.version == "1.1"
     assert metadata.confirmation_required is False
     assert metadata.input_model.model_json_schema()["additionalProperties"] is False
     assert (
@@ -81,8 +81,34 @@ def test_classification_activity_tool_is_strict_bounded_and_read_only() -> None:
         ).view
         == "uncertain"
     )
+    ranged = ClassificationActivityInput.model_validate(
+        {
+            "start_date": "2026-07-19",
+            "end_date": "2026-08-17",
+            "timezone": "America/Phoenix",
+            "view": "staple_candidates",
+            "limit": 5,
+        }
+    )
+    assert ranged.timezone == "America/Phoenix"
+    assert ranged.view == "staple_candidates"
+    local_day = ClassificationActivityInput.model_validate(
+        {"activity_date": "2026-08-17", "timezone": "America/Phoenix"}
+    )
+    assert local_day.activity_date == "2026-08-17"
+    assert local_day.timezone == "America/Phoenix"
     for invalid in (
+        {},
         {"activity_date": "08/17/2026"},
+        {"activity_date": "2026-08-17", "start_date": "2026-08-17", "end_date": "2026-08-17"},
+        {"start_date": "2026-08-17"},
+        {"start_date": "2026-08-18", "end_date": "2026-08-17"},
+        {"start_date": "2026-01-01", "end_date": "2026-08-17"},
+        {
+            "start_date": "2026-08-17",
+            "end_date": "2026-08-17",
+            "timezone": "Mars/Olympus_Mons",
+        },
         {"activity_date": "2026-08-17", "view": "everything"},
         {"activity_date": "2026-08-17", "limit": 21},
         {"activity_date": "2026-08-17", "workspace_id": 99},

@@ -239,6 +239,8 @@ def register_household_receipt_tools(registry: AgentToolRegistry) -> None:
             description=(
                 "Read bounded household due estimates, safe replenishment-learning summaries, "
                 "or confirmed acquisition history from the authenticated ExpenseOps workspace. "
+                "DO NOT USE for recently categorized purchases, newly learned staple candidates, "
+                "or classification activity; use get_classification_activity for those. "
                 "Pair with deals for a due-item offer question, errands for exact stored links, "
                 "or receipts only when confirmed acquisition evidence is relevant."
             ),

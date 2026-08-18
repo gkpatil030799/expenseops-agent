@@ -8,6 +8,9 @@
 
 import type {
   ClassificationActivityCounts,
+  ClassificationActivityRangeCounts,
+  ClassificationActivityRangeRows,
+  ClassificationActivityRangeView,
   ClassificationActivityRows,
   ClassificationActivityView,
   ClassificationActivityType,
@@ -134,6 +137,15 @@ export type AgentSpendingBreakdownItem = {
 
 export type AgentSpendingSummaryBlock = AgentResponseBlockBase & {
   type: "spending_summary";
+  /** Optional on persisted v1.0 responses; new responses include the answer objective. */
+  focus?:
+    | "summary"
+    | "comparison"
+    | "top_categories"
+    | "top_merchants"
+    | "change_explanation";
+  /** Exact requested ranking size when the answer is a bounded top-N list. */
+  requested_limit?: number | null;
   title: string;
   start_date: string;
   end_date: string;
@@ -358,17 +370,45 @@ export type AgentIntegrationStatusBlock = AgentResponseBlockBase & {
   integrations: AgentIntegrationStatusItem[];
 };
 
-export type AgentClassificationActivityBlock =
+type AgentClassificationActivityBlockBase =
   AgentResponseBlockBase &
-  ClassificationActivityRows & {
+  Omit<ClassificationActivityRows, "truncated_sections"> & {
     type: "classification_activity_summary";
-    block_version: "1.0";
     title: string;
+  };
+
+export type AgentClassificationActivityV1Block =
+  AgentClassificationActivityBlockBase & {
+    block_version: "1.0";
     view: ClassificationActivityView;
     activity_date: string;
+    start_date?: null;
+    end_date?: null;
     timezone: "UTC";
     counts: ClassificationActivityCounts;
+    staple_candidates?: [];
+    aliases?: [];
+    truncated_sections: ClassificationActivityRows["truncated_sections"];
   };
+
+export type AgentClassificationActivityV11Block =
+  AgentClassificationActivityBlockBase &
+  Omit<ClassificationActivityRangeRows, keyof ClassificationActivityRows> & {
+    block_version: "1.1";
+    view: ClassificationActivityRangeView;
+    activity_date?: null;
+    start_date: string;
+    end_date: string;
+    timezone: string;
+    counts: ClassificationActivityRangeCounts;
+    staple_candidates: ClassificationActivityRangeRows["staple_candidates"];
+    aliases: ClassificationActivityRangeRows["aliases"];
+    truncated_sections: ClassificationActivityRangeRows["truncated_sections"];
+  };
+
+export type AgentClassificationActivityBlock =
+  | AgentClassificationActivityV1Block
+  | AgentClassificationActivityV11Block;
 
 export type AgentAttentionDomain =
   | "spending"
@@ -588,6 +628,7 @@ export type AgentAssistantDeltaEvent = AgentStreamEventBase & {
 
 export type AgentToolActivity =
   | "spending"
+  | "lifestyle"
   | "transactions"
   | "replenishment"
   | "receipts"

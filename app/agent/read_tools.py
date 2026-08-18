@@ -4,7 +4,7 @@ from datetime import date
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
-from sqlalchemy import func, or_, select
+from sqlalchemy import and_, func, or_, select
 
 from app.agent.classification_activity_tool import register_classification_activity_tool
 from app.agent.deals_errands_tools import register_deals_errands_tools
@@ -12,9 +12,14 @@ from app.agent.household_receipt_tools import register_household_receipt_tools
 from app.agent.integration_read_tool import register_integration_read_tool
 from app.agent.tooling import AgentTool, AgentToolContext, AgentToolRegistry, ToolEffect
 from app.config import Settings
-from app.models import ExpenseTransaction, TransactionStatus
+from app.models import ExpenseTransaction, SpendingParentCategory, TransactionStatus
 from app.services.agent_service import transaction_display_name
-from app.services.lifestyle_dining_service import LifestyleDiningService
+from app.services.lifestyle_dining_service import (
+    MAX_LIFESTYLE_MERCHANTS,
+    LifestyleDiningService,
+    is_lifestyle_purchase_row,
+    select_lifestyle_currency,
+)
 from app.services.spending_insights_service import SpendingInsightsService
 
 MAX_DATE_RANGE_DAYS = 730
@@ -44,6 +49,16 @@ class ReadToolModel(BaseModel):
 class SpendingInsightsInput(ReadToolModel):
     start_date: str = Field(pattern=r"^\d{4}-\d{2}-\d{2}$")
     end_date: str = Field(pattern=r"^\d{4}-\d{2}-\d{2}$")
+    comparison_start_date: str | None = Field(
+        default=None,
+        pattern=r"^\d{4}-\d{2}-\d{2}$",
+        description=("Optional exact comparison start; provide together with comparison_end_date."),
+    )
+    comparison_end_date: str | None = Field(
+        default=None,
+        pattern=r"^\d{4}-\d{2}-\d{2}$",
+        description=("Optional exact comparison end; provide together with comparison_start_date."),
+    )
     account_id: str | None = Field(default=None, min_length=1, max_length=128)
     category: str | None = Field(default=None, min_length=1, max_length=100)
     merchant: str | None = Field(default=None, min_length=1, max_length=255)
@@ -79,10 +94,29 @@ class SpendingInsightsInput(ReadToolModel):
     def validate_range(self) -> SpendingInsightsInput:
         start, end = self.date_range()
         _validate_date_range(start, end)
+        comparison = self.comparison_date_range()
+        if comparison is not None:
+            _validate_date_range(*comparison)
+            if self.comparison_mode is not None:
+                raise ValueError(
+                    "explicit comparison dates cannot be combined with same_weekdays_last_week"
+                )
         return self
 
     def date_range(self) -> tuple[date, date]:
         return date.fromisoformat(self.start_date), date.fromisoformat(self.end_date)
+
+    def comparison_date_range(self) -> tuple[date, date] | None:
+        if (self.comparison_start_date is None) != (self.comparison_end_date is None):
+            raise ValueError(
+                "comparison_start_date and comparison_end_date must be provided together"
+            )
+        if self.comparison_start_date is None or self.comparison_end_date is None:
+            return None
+        return (
+            date.fromisoformat(self.comparison_start_date),
+            date.fromisoformat(self.comparison_end_date),
+        )
 
 
 class SpendingAggregate(ReadToolModel):
@@ -146,6 +180,16 @@ class SpendingInsightsOutput(ReadToolModel):
 class LifestyleDiningInput(ReadToolModel):
     start_date: str = Field(pattern=r"^\d{4}-\d{2}-\d{2}$")
     end_date: str = Field(pattern=r"^\d{4}-\d{2}-\d{2}$")
+    comparison_start_date: str | None = Field(
+        default=None,
+        pattern=r"^\d{4}-\d{2}-\d{2}$",
+        description=("Optional exact comparison start; provide together with comparison_end_date."),
+    )
+    comparison_end_date: str | None = Field(
+        default=None,
+        pattern=r"^\d{4}-\d{2}-\d{2}$",
+        description=("Optional exact comparison end; provide together with comparison_start_date."),
+    )
     activity_type: Literal["all", "coffee", "restaurants", "delivery", "nightlife"] | None = None
     merchant: str | None = Field(default=None, min_length=1, max_length=255)
     account_id: str | None = Field(default=None, min_length=1, max_length=128)
@@ -158,11 +202,37 @@ class LifestyleDiningInput(ReadToolModel):
         pattern=r"^[A-Za-z]{3}$",
     )
     include_comparison: bool = True
+    merchant_limit: int = Field(
+        default=MAX_LIFESTYLE_MERCHANTS,
+        ge=1,
+        le=MAX_LIFESTYLE_MERCHANTS,
+        description=(
+            "Maximum canonical merchant ranking rows. Use 8 unless ExpenseOps carries an "
+            "explicit typed top-merchant request."
+        ),
+    )
 
     @model_validator(mode="after")
     def validate_range(self) -> LifestyleDiningInput:
         _validate_date_range(date.fromisoformat(self.start_date), date.fromisoformat(self.end_date))
+        comparison = self.comparison_date_range()
+        if comparison is not None:
+            _validate_date_range(*comparison)
+            if not self.include_comparison:
+                raise ValueError("explicit comparison dates require include_comparison")
         return self
+
+    def comparison_date_range(self) -> tuple[date, date] | None:
+        if (self.comparison_start_date is None) != (self.comparison_end_date is None):
+            raise ValueError(
+                "comparison_start_date and comparison_end_date must be provided together"
+            )
+        if self.comparison_start_date is None or self.comparison_end_date is None:
+            return None
+        return (
+            date.fromisoformat(self.comparison_start_date),
+            date.fromisoformat(self.comparison_end_date),
+        )
 
 
 class LifestyleAggregate(ReadToolModel):
@@ -198,6 +268,23 @@ class LifestyleBreakdownItem(ReadToolModel):
     percentage: float = Field(ge=0, le=100)
 
 
+class LifestyleMerchantChange(ReadToolModel):
+    name: str = Field(min_length=1, max_length=255)
+    current_amount_cents: int = Field(ge=0)
+    previous_amount_cents: int = Field(ge=0)
+    delta_cents: int
+    current_transaction_count: int = Field(ge=0)
+    previous_transaction_count: int = Field(ge=0)
+
+    @model_validator(mode="after")
+    def validate_delta(self) -> LifestyleMerchantChange:
+        if self.delta_cents != self.current_amount_cents - self.previous_amount_cents:
+            raise ValueError("merchant delta must reconcile to current and previous amounts")
+        if self.delta_cents == 0:
+            raise ValueError("merchant changes must have a nonzero spend delta")
+        return self
+
+
 class LifestyleDiningOutput(ReadToolModel):
     start_date: str = Field(pattern=r"^\d{4}-\d{2}-\d{2}$")
     end_date: str = Field(pattern=r"^\d{4}-\d{2}-\d{2}$")
@@ -210,6 +297,7 @@ class LifestyleDiningOutput(ReadToolModel):
     comparison: LifestyleAggregate | None
     activities: list[LifestyleBreakdownItem] = Field(max_length=4)
     top_merchants: list[LifestyleBreakdownItem] = Field(max_length=8)
+    merchant_changes: list[LifestyleMerchantChange] = Field(max_length=8)
     uncertain_transaction_count: int = Field(ge=0)
     previous_uncertain_transaction_count: int = Field(ge=0)
     observations: list[str] = Field(max_length=6)
@@ -229,6 +317,8 @@ class LifestyleDiningOutput(ReadToolModel):
             raise ValueError("comparison dates must match comparison presence")
         if (self.comparison is None) != (self.previous_end_date is None):
             raise ValueError("comparison dates must match comparison presence")
+        if self.comparison is None and self.merchant_changes:
+            raise ValueError("merchant changes require a comparison period")
         return self
 
 
@@ -241,7 +331,32 @@ class TransactionSearchInput(ReadToolModel):
     merchant: str | None = Field(default=None, min_length=1, max_length=255)
     start_date: str | None = Field(default=None, pattern=r"^\d{4}-\d{2}-\d{2}$")
     end_date: str | None = Field(default=None, pattern=r"^\d{4}-\d{2}-\d{2}$")
+    comparison_start_date: str | None = Field(
+        default=None,
+        pattern=r"^\d{4}-\d{2}-\d{2}$",
+        description=(
+            "Server-owned exact Lifestyle comparison start. Use null unless ExpenseOps "
+            "carries a typed Lifestyle follow-up scope."
+        ),
+    )
+    comparison_end_date: str | None = Field(
+        default=None,
+        pattern=r"^\d{4}-\d{2}-\d{2}$",
+        description=(
+            "Server-owned exact Lifestyle comparison end. Use null unless ExpenseOps carries "
+            "a typed Lifestyle follow-up scope."
+        ),
+    )
     category: str | None = Field(default=None, min_length=1, max_length=100)
+    lifestyle_activity_type: (
+        Literal["all", "coffee", "restaurants", "delivery", "nightlife"] | None
+    ) = Field(
+        default=None,
+        description=(
+            "Server-owned canonical Lifestyle row scope. Use null; ExpenseOps may set this "
+            "closed selector for a typed transaction follow-up."
+        ),
+    )
     review_type: Literal["all", "personal", "shared", "unreviewed", "attention"] | None = Field(
         default=None,
         description=(
@@ -267,6 +382,31 @@ class TransactionSearchInput(ReadToolModel):
         end = date.fromisoformat(self.end_date) if self.end_date else None
         if start and end:
             _validate_date_range(start, end)
+        comparison = self.comparison_date_range()
+        if comparison is not None:
+            _validate_date_range(*comparison)
+            if self.lifestyle_activity_type is None:
+                raise ValueError(
+                    "comparison dates require the canonical Lifestyle transaction scope"
+                )
+        if self.lifestyle_activity_type is not None:
+            if start is None or end is None:
+                raise ValueError(
+                    "canonical Lifestyle transaction scope requires start_date and end_date"
+                )
+            if self.include_pending:
+                raise ValueError(
+                    "canonical Lifestyle transaction scope must exclude pending transactions"
+                )
+            if self.transaction_id is not None or self.category is not None:
+                raise ValueError(
+                    "canonical Lifestyle transaction scope cannot be combined with an exact "
+                    "transaction or category filter"
+                )
+            if self.review_status is not None or self.review_type == "attention":
+                raise ValueError(
+                    "canonical Lifestyle transaction scope cannot use a recovery status scope"
+                )
         if (
             self.min_amount_cents is not None
             and self.max_amount_cents is not None
@@ -278,6 +418,18 @@ class TransactionSearchInput(ReadToolModel):
         if self.review_status and self.review_type not in {None, "all"}:
             raise ValueError("review_status and review_type cannot both be specified")
         return self
+
+    def comparison_date_range(self) -> tuple[date, date] | None:
+        if (self.comparison_start_date is None) != (self.comparison_end_date is None):
+            raise ValueError(
+                "comparison_start_date and comparison_end_date must be provided together"
+            )
+        if self.comparison_start_date is None or self.comparison_end_date is None:
+            return None
+        return (
+            date.fromisoformat(self.comparison_start_date),
+            date.fromisoformat(self.comparison_end_date),
+        )
 
 
 class TransactionSearchItem(ReadToolModel):
@@ -305,30 +457,35 @@ def build_read_tool_registry(settings: Settings) -> AgentToolRegistry:
         AgentTool(
             name="get_spending_insights",
             description=(
-                "Return canonical ExpenseOps eligible purchase-spend totals with credits "
-                "reported separately, comparable-period totals, top categories, top merchants, "
-                "and deterministic notable changes for an explicit date range."
+                "USE for canonical ExpenseOps aggregate purchase-spend totals, period "
+                "comparisons, category or merchant rankings, and deterministic change "
+                "explanations; credits remain separate. Optionally pass both exact comparison "
+                "dates, otherwise ExpenseOps derives the immediately preceding period. "
+                "DO NOT USE to list transaction rows, classify lifestyle subtypes, or answer "
+                "household replenishment questions."
             ),
             effect=ToolEffect.READ,
             input_model=SpendingInsightsInput,
             output_model=SpendingInsightsOutput,
             handler=_get_spending_insights,
-            version="1.2",
+            version="1.3",
         )
     )
     registry.register(
         AgentTool(
             name="get_lifestyle_dining_insights",
             description=(
-                "Return canonical read-only coffee, restaurant, food-delivery, or reliably "
-                "categorized nightlife purchase frequency and spend for an explicit date range. "
-                "Use this for lifestyle/dining behavior questions, not household replenishment."
+                "USE for canonical read-only coffee, restaurant, food-delivery, or reliably "
+                "categorized nightlife frequency, average, spend, and merchant changes. "
+                "Optionally pass both exact comparison dates for a user-selected second period. "
+                "DO NOT USE for generic transaction rows, groceries, household replenishment, "
+                "or uncertain activity classification."
             ),
             effect=ToolEffect.READ,
             input_model=LifestyleDiningInput,
             output_model=LifestyleDiningOutput,
             handler=_get_lifestyle_dining_insights,
-            version="1.0",
+            version="1.3",
         )
     )
     registry.register(
@@ -343,7 +500,7 @@ def build_read_tool_registry(settings: Settings) -> AgentToolRegistry:
             input_model=TransactionSearchInput,
             output_model=TransactionSearchOutput,
             handler=_search_transactions,
-            version="1.1",
+            version="1.2",
         )
     )
     register_household_receipt_tools(registry)
@@ -357,6 +514,7 @@ def _get_spending_insights(
     values: SpendingInsightsInput,
 ) -> dict:
     start_date, end_date = values.date_range()
+    comparison_range = values.comparison_date_range()
     result = SpendingInsightsService(context.db).build(
         start_date=start_date,
         end_date=end_date,
@@ -367,6 +525,8 @@ def _get_spending_insights(
         spend_basis=values.spend_basis or "card",
         currency_code=values.currency_code,
         comparison_mode=values.comparison_mode or "immediately_preceding",
+        comparison_start_date=comparison_range[0] if comparison_range else None,
+        comparison_end_date=comparison_range[1] if comparison_range else None,
     )
     scope = result["scope"]
     range_value = result["range"]
@@ -393,6 +553,7 @@ def _get_lifestyle_dining_insights(
     context: AgentToolContext,
     values: LifestyleDiningInput,
 ) -> dict:
+    comparison_range = values.comparison_date_range()
     return LifestyleDiningService(context.db).build(
         start_date=date.fromisoformat(values.start_date),
         end_date=date.fromisoformat(values.end_date),
@@ -403,6 +564,9 @@ def _get_lifestyle_dining_insights(
         spend_basis=values.spend_basis or "card",
         currency_code=values.currency_code,
         include_comparison=values.include_comparison,
+        comparison_start_date=comparison_range[0] if comparison_range else None,
+        comparison_end_date=comparison_range[1] if comparison_range else None,
+        merchant_limit=values.merchant_limit,
     )
 
 
@@ -410,6 +574,9 @@ def _search_transactions(
     context: AgentToolContext,
     values: TransactionSearchInput,
 ) -> dict:
+    if values.lifestyle_activity_type is not None:
+        return _search_lifestyle_transactions(context, values)
+
     criteria = [
         ExpenseTransaction.workspace_id == context.workspace_id,
         ExpenseTransaction.status != TransactionStatus.REMOVED.value,
@@ -435,12 +602,46 @@ def _search_transactions(
     if values.end_date:
         criteria.append(ExpenseTransaction.date <= date.fromisoformat(values.end_date))
     if values.category:
-        criteria.append(
-            func.lower(func.coalesce(ExpenseTransaction.category, "")).like(
-                f"%{_escape_like(values.category.casefold())}%",
-                escape="\\",
-            )
+        normalized_category = " ".join(
+            values.category.casefold().replace("&", " and ").replace("_", " ").split()
         )
+        if normalized_category == "food and dining":
+            raw_category_fields = (
+                func.lower(func.coalesce(ExpenseTransaction.provider_category, "")),
+                func.lower(func.coalesce(ExpenseTransaction.category, "")),
+            )
+            raw_food_terms = (
+                "food_and_drink",
+                "food and drink",
+                "food & dining",
+                "restaurant",
+                "dining",
+                "grocery",
+                "coffee",
+                "fast food",
+                "food delivery",
+            )
+            criteria.append(
+                or_(
+                    and_(
+                        ExpenseTransaction.classification_applied_at.is_not(None),
+                        ExpenseTransaction.spending_parent_category
+                        == SpendingParentCategory.FOOD_DINING.value,
+                    ),
+                    *(
+                        field.like(f"%{_escape_like(term)}%", escape="\\")
+                        for field in raw_category_fields
+                        for term in raw_food_terms
+                    ),
+                )
+            )
+        else:
+            criteria.append(
+                func.lower(func.coalesce(ExpenseTransaction.category, "")).like(
+                    f"%{_escape_like(values.category.casefold())}%",
+                    escape="\\",
+                )
+            )
     if values.review_status:
         criteria.append(ExpenseTransaction.status == values.review_status)
     elif values.review_type == "personal":
@@ -488,6 +689,70 @@ def _search_transactions(
     )
     return _transaction_search_output(
         rows,
+        result_limit=values.limit,
+        total_count=total_count,
+    )
+
+
+def _search_lifestyle_transactions(
+    context: AgentToolContext,
+    values: TransactionSearchInput,
+) -> dict:
+    """Return the exact canonical purchase rows behind a typed Lifestyle follow-up."""
+
+    activity_type = values.lifestyle_activity_type
+    if activity_type is None or values.start_date is None or values.end_date is None:
+        raise ValueError("canonical Lifestyle transaction scope requires an exact activity range")
+    ranges = [
+        (date.fromisoformat(values.start_date), date.fromisoformat(values.end_date)),
+    ]
+    comparison = values.comparison_date_range()
+    if comparison is not None:
+        ranges.append(comparison)
+
+    # Query each bounded interval separately. This preserves an exact pair even
+    # when the periods are non-adjacent and avoids admitting rows from the gap.
+    canonical_by_id = {}
+    service = SpendingInsightsService(context.db)
+    for start_date, end_date in ranges:
+        for row in service.canonical_rows(
+            start_date=start_date,
+            end_date=end_date,
+            spend_basis="card",
+        ):
+            if row.tx.workspace_id == context.workspace_id:
+                canonical_by_id[row.tx.id] = row
+
+    merchant_query = (values.merchant or "").casefold()
+    scoped = [
+        row
+        for row in canonical_by_id.values()
+        if (not merchant_query or merchant_query in row.merchant.casefold())
+        and (values.review_type in {None, "all"} or row.review_type == values.review_type)
+        and (values.min_amount_cents is None or row.tx.amount_cents >= values.min_amount_cents)
+        and (values.max_amount_cents is None or row.tx.amount_cents <= values.max_amount_cents)
+    ]
+    available_currencies = sorted({row.currency_code for row in scoped})
+    selected_currency = select_lifestyle_currency(
+        values.currency_code,
+        available_currencies,
+    )
+
+    eligible = []
+    for row in scoped:
+        if row.currency_code != selected_currency or not is_lifestyle_purchase_row(
+            row, activity_type
+        ):
+            continue
+        eligible.append(row.tx)
+
+    eligible.sort(
+        key=lambda row: (row.date or date.min, row.id),
+        reverse=True,
+    )
+    total_count = len(eligible)
+    return _transaction_search_output(
+        eligible[: values.limit],
         result_limit=values.limit,
         total_count=total_count,
     )

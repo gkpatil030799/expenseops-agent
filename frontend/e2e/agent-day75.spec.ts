@@ -9,6 +9,7 @@ import {
   mockAgentApp,
   successfulEvents,
 } from "./fixtures/agent";
+import { mockInsightsDateRanges } from "./fixtures/insights";
 
 const ORIGINAL_QUERY = "are my spendings increased compared to last week ?";
 
@@ -341,6 +342,7 @@ async function mockInsights(
     }
     return route.fulfill({ status: 503, json: { detail: "Unavailable in Day 7.5 test" } });
   });
+  await mockInsightsDateRanges(page);
   await page.route("**/api/insights/spending?**", (route) => {
     const basis = new URL(route.request().url()).searchParams.get("spend_basis");
     return route.fulfill({

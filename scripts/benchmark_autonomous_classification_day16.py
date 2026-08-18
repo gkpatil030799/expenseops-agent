@@ -46,6 +46,9 @@ from app.services.receipt_transaction_reconciliation_service import (
 
 DAY13_TOTAL_TOOL_COUNT = 12
 DAY13_TOTAL_TOOL_SCHEMA_BYTES = 16_231
+DAY16_READ_TOOL_SCHEMA_BYTES = 12_050
+DAY16_TOTAL_TOOL_COUNT = 13
+DAY16_TOTAL_TOOL_SCHEMA_BYTES = 17_227
 
 
 @dataclass(frozen=True)
@@ -1124,10 +1127,20 @@ def _tool_surface() -> dict[str, Any]:
         "total_tool_schema_bytes": all_bytes,
         "day13_baseline_total_tools": DAY13_TOTAL_TOOL_COUNT,
         "day13_baseline_total_schema_bytes": DAY13_TOTAL_TOOL_SCHEMA_BYTES,
-        "day16_total_tool_growth": len(all_metadata) - DAY13_TOTAL_TOOL_COUNT,
-        "day16_total_schema_growth_bytes": all_bytes - DAY13_TOTAL_TOOL_SCHEMA_BYTES,
+        "day16_checkpoint_read_tool_schema_bytes": DAY16_READ_TOOL_SCHEMA_BYTES,
+        "day16_checkpoint_total_tools": DAY16_TOTAL_TOOL_COUNT,
+        "day16_checkpoint_total_tool_schema_bytes": DAY16_TOTAL_TOOL_SCHEMA_BYTES,
+        "day16_total_tool_growth": DAY16_TOTAL_TOOL_COUNT - DAY13_TOTAL_TOOL_COUNT,
+        "day16_total_schema_growth_bytes": (
+            DAY16_TOTAL_TOOL_SCHEMA_BYTES - DAY13_TOTAL_TOOL_SCHEMA_BYTES
+        ),
         "day16_approx_schema_growth_tokens": round(
-            (all_bytes - DAY13_TOTAL_TOOL_SCHEMA_BYTES) / 4
+            (DAY16_TOTAL_TOOL_SCHEMA_BYTES - DAY13_TOTAL_TOOL_SCHEMA_BYTES) / 4
+        ),
+        "day17_read_schema_growth_bytes": read_bytes - DAY16_READ_TOOL_SCHEMA_BYTES,
+        "day17_total_schema_growth_bytes": all_bytes - DAY16_TOTAL_TOOL_SCHEMA_BYTES,
+        "day17_approx_total_schema_growth_tokens": round(
+            (all_bytes - DAY16_TOTAL_TOOL_SCHEMA_BYTES) / 4
         ),
         "classification_activity_tool_present": any(
             value["name"] == "get_classification_activity" for value in read_metadata

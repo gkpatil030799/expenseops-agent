@@ -9,6 +9,7 @@ import type {
   AgentStreamEvent,
   AgentStructuredResponse,
 } from "../../src/agent/contracts";
+import { mockInsightsDateRanges } from "./insights";
 
 const NOW = "2026-08-15T07:00:00Z";
 
@@ -392,6 +393,7 @@ export async function mockAgentApp(
     }
     return route.fulfill({ status: 503, json: { detail: "Unavailable in Agent browser test" } });
   });
+  await mockInsightsDateRanges(page);
 
   await page.route(/\/transactions(?:\?|\/|$)/, (route) => {
     if (route.request().method() === "GET") return route.fulfill({ json: [] });

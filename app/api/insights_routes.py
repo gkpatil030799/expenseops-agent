@@ -2,13 +2,27 @@ from datetime import date
 from typing import Literal
 
 from fastapi import APIRouter, HTTPException, Query
+from pydantic import BaseModel
 from sqlalchemy import desc, func, select
 
-from app.api.deps import DbSession
-from app.models import AuditEvent, ExpenseTransaction, FinancialOperation, TransactionStatus, User
+from app.api.deps import CurrentUser, CurrentWorkspace, DbSession
+from app.models import (
+    AuditEvent,
+    ExpenseTransaction,
+    FinancialOperation,
+    TransactionStatus,
+    User,
+    utc_now,
+)
 from app.schemas import FinancialActivityEventOut, FinancialActivityPage, TransactionOut
 from app.services.share_calculator import cents_to_decimal_string
 from app.services.spending_insights_service import SpendingInsightsService
+from app.services.temporal_range_service import (
+    InsightsDatePreset,
+    InsightsGranularity,
+    configured_user_timezone,
+    resolve_insights_date_range,
+)
 from app.services.transaction_service import can_undo_transaction
 
 router = APIRouter(prefix="/api/insights", tags=["insights"])
@@ -24,6 +38,40 @@ FINANCIAL_ACTIVITY_EVENT_TYPES = {
     "financial_operation_failed",
     "financial_operation_needs_reconciliation",
 }
+
+
+class InsightsDateRangeOut(BaseModel):
+    preset: InsightsDatePreset
+    start_date: date
+    end_date: date
+    granularity: InsightsGranularity
+    timezone: str
+
+
+@router.get("/date-range", response_model=InsightsDateRangeOut)
+def insights_date_range(
+    db: DbSession,
+    user: CurrentUser,
+    workspace: CurrentWorkspace,
+    preset: InsightsDatePreset = Query(...),
+) -> InsightsDateRangeOut:
+    timezone = configured_user_timezone(
+        db,
+        workspace_id=workspace.id,
+        user_id=user.id,
+    )
+    resolved = resolve_insights_date_range(
+        preset,
+        now=utc_now(),
+        timezone_name=timezone,
+    )
+    return InsightsDateRangeOut(
+        preset=resolved.preset,
+        start_date=resolved.start_date,
+        end_date=resolved.end_date,
+        granularity=resolved.granularity,
+        timezone=resolved.timezone,
+    )
 
 
 @router.get("/activity", response_model=list[TransactionOut])
@@ -72,10 +120,11 @@ def financial_activity(
         )
     )
     user_ids = {event.user_id for event in audit_events if event.user_id is not None}
-    users = {
-        user.id: user
-        for user in db.scalars(select(User).where(User.id.in_(user_ids)))
-    } if user_ids else {}
+    users = (
+        {user.id: user for user in db.scalars(select(User).where(User.id.in_(user_ids)))}
+        if user_ids
+        else {}
+    )
     operation_ids = {
         int(event.resource_id)
         for event in audit_events
@@ -83,24 +132,32 @@ def financial_activity(
         and event.resource_id
         and event.resource_id.isdigit()
     }
-    operations = {
-        operation.id: operation
-        for operation in db.scalars(
-            select(FinancialOperation).where(FinancialOperation.id.in_(operation_ids))
-        )
-    } if operation_ids else {}
+    operations = (
+        {
+            operation.id: operation
+            for operation in db.scalars(
+                select(FinancialOperation).where(FinancialOperation.id.in_(operation_ids))
+            )
+        }
+        if operation_ids
+        else {}
+    )
     transaction_ids = {
         int(metadata["transaction_id"])
         for event in audit_events
         if isinstance((metadata := event.metadata_json), dict)
         and str(metadata.get("transaction_id") or "").isdigit()
     }
-    transactions = {
-        transaction.id: transaction
-        for transaction in db.scalars(
-            select(ExpenseTransaction).where(ExpenseTransaction.id.in_(transaction_ids))
-        )
-    } if transaction_ids else {}
+    transactions = (
+        {
+            transaction.id: transaction
+            for transaction in db.scalars(
+                select(ExpenseTransaction).where(ExpenseTransaction.id.in_(transaction_ids))
+            )
+        }
+        if transaction_ids
+        else {}
+    )
 
     rows: list[FinancialActivityEventOut] = []
     for event in audit_events:

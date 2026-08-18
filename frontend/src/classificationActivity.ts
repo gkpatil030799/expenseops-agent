@@ -17,6 +17,16 @@ export type ClassificationActivitySection =
   | "cadence_updates"
   | "uncertain";
 
+export type ClassificationActivityRangeView =
+  | ClassificationActivityView
+  | "staple_candidates"
+  | "aliases";
+
+export type ClassificationActivityRangeSection =
+  | ClassificationActivitySection
+  | "staple_candidates"
+  | "aliases";
+
 export type SpendingParentCategory =
   | "food_dining"
   | "household_home"
@@ -224,6 +234,40 @@ export type ClassificationUncertainActivity = {
   observed_at: string;
 };
 
+export type ClassificationStapleCandidateActivity = {
+  decision_public_id: string;
+  receipt_item_public_id: string;
+  receipt_public_id: string;
+  source_available: boolean;
+  merchant: string | null;
+  name: string;
+  parent_category: SpendingParentCategory;
+  subcategory: string | null;
+  concept: string | null;
+  activity_type: ClassificationActivityType;
+  replenishment_eligibility: "replenishable" | "potentially_replenishable";
+  confidence: number;
+  confidence_band: ClassificationConfidenceBand;
+  decision_state: ClassificationDecisionState;
+  created_household_item: boolean;
+  household_item_public_id: string | null;
+  household_item_name: string | null;
+  learning_state: "candidate" | "learning" | "tracked";
+  applied_at: string;
+};
+
+export type ClassificationAliasActivity = {
+  public_id: string;
+  concept: string;
+  parent_category: SpendingParentCategory;
+  raw_pattern: string;
+  merchant: string | null;
+  confidence: number;
+  authority: ClassificationAuthority;
+  active: boolean;
+  created_at: string;
+};
+
 export type ClassificationActivityCounts = {
   transactions: number;
   receipt_items: number;
@@ -233,6 +277,11 @@ export type ClassificationActivityCounts = {
   new_household_items: number;
   cadence_updates: number;
   uncertain: number;
+};
+
+export type ClassificationActivityRangeCounts = ClassificationActivityCounts & {
+  staple_candidates: number;
+  aliases: number;
 };
 
 export type ClassificationActivityRows = {
@@ -245,6 +294,12 @@ export type ClassificationActivityRows = {
   cadence_updates: ClassificationHouseholdItemActivity[];
   uncertain: ClassificationUncertainActivity[];
   truncated_sections: ClassificationActivitySection[];
+};
+
+export type ClassificationActivityRangeRows = Omit<ClassificationActivityRows, "truncated_sections"> & {
+  staple_candidates: ClassificationStapleCandidateActivity[];
+  aliases: ClassificationAliasActivity[];
+  truncated_sections: ClassificationActivityRangeSection[];
 };
 
 export type ClassificationActivityOut = ClassificationActivityRows & {

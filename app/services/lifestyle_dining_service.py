@@ -16,6 +16,8 @@ from app.services.spending_insights_service import (
 
 LifestyleActivity = Literal["all", "coffee", "restaurants", "delivery", "nightlife"]
 LifestyleSubtype = Literal["coffee", "restaurants", "delivery", "nightlife", "uncertain"]
+MAX_COMPARISON_RANGE_DAYS = 730
+MAX_LIFESTYLE_MERCHANTS = 8
 
 _KNOWN_SUBTYPES: tuple[Literal["coffee", "restaurants", "delivery", "nightlife"], ...] = (
     "coffee",
@@ -48,14 +50,24 @@ class LifestyleDiningService:
         spend_basis: Literal["card", "actual_share"] = "card",
         currency_code: str | None = None,
         include_comparison: bool = True,
+        comparison_start_date: date | None = None,
+        comparison_end_date: date | None = None,
+        merchant_limit: int = MAX_LIFESTYLE_MERCHANTS,
     ) -> dict:
-        period_days = (end_date - start_date).days + 1
-        previous_end = start_date - timedelta(days=1)
-        previous_start = previous_end - timedelta(days=period_days - 1)
-        query_start = previous_start if include_comparison else start_date
+        if not 1 <= merchant_limit <= MAX_LIFESTYLE_MERCHANTS:
+            raise ValueError("merchant_limit is outside the supported range")
+        previous_start, previous_end = _comparison_range(
+            start_date=start_date,
+            end_date=end_date,
+            include_comparison=include_comparison,
+            comparison_start_date=comparison_start_date,
+            comparison_end_date=comparison_end_date,
+        )
+        query_start = min(start_date, previous_start) if include_comparison else start_date
+        query_end = max(end_date, previous_end) if include_comparison else end_date
         canonical = SpendingInsightsService(self.db).canonical_rows(
             start_date=query_start,
-            end_date=end_date,
+            end_date=query_end,
             spend_basis=spend_basis,
         )
         scoped = [
@@ -66,7 +78,7 @@ class LifestyleDiningService:
             and (review_type == "all" or row.review_type == review_type)
         ]
         available_currencies = sorted({row.currency_code for row in scoped})
-        selected_currency = _select_currency(currency_code, available_currencies)
+        selected_currency = select_lifestyle_currency(currency_code, available_currencies)
         current_rows = [
             row
             for row in scoped
@@ -106,7 +118,10 @@ class LifestyleDiningService:
             "summary": summary,
             "comparison": comparison,
             "activities": _activity_breakdown(current),
-            "top_merchants": _merchant_breakdown(current),
+            "top_merchants": _merchant_breakdown(current, limit=merchant_limit),
+            "merchant_changes": (
+                _merchant_changes(current, previous) if include_comparison else []
+            ),
             "uncertain_transaction_count": len(current_uncertain),
             "previous_uncertain_transaction_count": len(previous_uncertain),
             "observations": observations,
@@ -121,6 +136,36 @@ class LifestyleDiningService:
             ),
             "pending_transactions_excluded": True,
         }
+
+
+def _comparison_range(
+    *,
+    start_date: date,
+    end_date: date,
+    include_comparison: bool,
+    comparison_start_date: date | None,
+    comparison_end_date: date | None,
+) -> tuple[date, date]:
+    """Resolve one bounded comparison period without changing legacy defaults."""
+
+    if (comparison_start_date is None) != (comparison_end_date is None):
+        raise ValueError("comparison_start_date and comparison_end_date must be provided together")
+    if comparison_start_date is not None and comparison_end_date is not None:
+        if not include_comparison:
+            raise ValueError("explicit comparison dates require include_comparison")
+        _validate_comparison_range(comparison_start_date, comparison_end_date)
+        return comparison_start_date, comparison_end_date
+
+    period_days = (end_date - start_date).days + 1
+    previous_end = start_date - timedelta(days=1)
+    return previous_end - timedelta(days=period_days - 1), previous_end
+
+
+def _validate_comparison_range(start_date: date, end_date: date) -> None:
+    if start_date > end_date:
+        raise ValueError("comparison_start_date must not be after comparison_end_date")
+    if (end_date - start_date).days > MAX_COMPARISON_RANGE_DAYS:
+        raise ValueError("comparison date range must be two years or less")
 
 
 def classify_lifestyle_row(row: SpendRow) -> LifestyleSubtype | None:
@@ -198,7 +243,9 @@ def _has_any(value: str, *terms: str) -> bool:
     return any(f" {term} " in padded for term in terms)
 
 
-def _select_currency(requested: str | None, available: list[str]) -> str:
+def select_lifestyle_currency(requested: str | None, available: list[str]) -> str:
+    """Apply the canonical Lifestyle currency preference to a bounded row set."""
+
     if requested and requested.strip():
         return requested.strip().upper()
     if "USD" in available:
@@ -228,6 +275,18 @@ def _purchase_value(row: SpendRow) -> int:
     if row.classification is not SpendClassification.PURCHASE:
         return 0
     return row.selected_cents or 0
+
+
+def is_lifestyle_purchase_row(row: SpendRow, activity_type: LifestyleActivity) -> bool:
+    """Whether one canonical spend row contributes to the Lifestyle purchase summary."""
+
+    subtype = classify_lifestyle_row(row)
+    return bool(
+        _purchase_value(row) > 0
+        and subtype is not None
+        and subtype != "uncertain"
+        and (activity_type == "all" or subtype == activity_type)
+    )
 
 
 def _summary(rows: list[tuple[SpendRow, LifestyleSubtype]]) -> dict[str, int]:
@@ -298,6 +357,8 @@ def _activity_breakdown(
 
 def _merchant_breakdown(
     rows: list[tuple[SpendRow, LifestyleSubtype]],
+    *,
+    limit: int,
 ) -> list[dict[str, int | float | str]]:
     values: dict[str, dict[str, int]] = defaultdict(lambda: {"amount": 0, "count": 0})
     for row, _ in rows:
@@ -317,6 +378,52 @@ def _merchant_breakdown(
         for name, value in values.items()
     ]
     result.sort(key=lambda item: (-int(item["amount_cents"]), str(item["name"])))
+    return result[:limit]
+
+
+def _merchant_changes(
+    current: list[tuple[SpendRow, LifestyleSubtype]],
+    previous: list[tuple[SpendRow, LifestyleSubtype]],
+) -> list[dict[str, int | str]]:
+    """Return bounded signed merchant deltas over canonical purchase rows.
+
+    Current-only and previous-only merchants are retained so a deterministic
+    explanation can identify both new spend and spend that disappeared. Credits
+    remain separate because ``_purchase_value`` accepts purchase rows only.
+    """
+
+    def amounts(
+        rows: list[tuple[SpendRow, LifestyleSubtype]],
+    ) -> dict[str, dict[str, int]]:
+        values: dict[str, dict[str, int]] = defaultdict(lambda: {"amount": 0, "count": 0})
+        for row, _subtype in rows:
+            value = _purchase_value(row)
+            if value <= 0:
+                continue
+            values[row.merchant]["amount"] += value
+            values[row.merchant]["count"] += 1
+        return values
+
+    current_values = amounts(current)
+    previous_values = amounts(previous)
+    result = []
+    for name in current_values.keys() | previous_values.keys():
+        current_value = current_values.get(name, {"amount": 0, "count": 0})
+        previous_value = previous_values.get(name, {"amount": 0, "count": 0})
+        delta = current_value["amount"] - previous_value["amount"]
+        if delta == 0:
+            continue
+        result.append(
+            {
+                "name": name,
+                "current_amount_cents": current_value["amount"],
+                "previous_amount_cents": previous_value["amount"],
+                "delta_cents": delta,
+                "current_transaction_count": current_value["count"],
+                "previous_transaction_count": previous_value["count"],
+            }
+        )
+    result.sort(key=lambda item: (-abs(int(item["delta_cents"])), str(item["name"])))
     return result[:8]
 
 

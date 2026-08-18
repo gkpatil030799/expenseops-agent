@@ -1,22 +1,122 @@
 import { describe, expect, it } from "vitest";
 
-import { comparisonPercent, customGranularity, dateRangeForPreset } from "@/insightsLogic";
-
-const now = new Date(2026, 7, 12, 10, 30);
+import {
+  comparisonPercent,
+  createLatestPresetRequestGate,
+  customGranularity,
+  dateRangeForPreset,
+  insightsContextForPresetResolution,
+  presetDateRangePath,
+  type PresetDateRangeResponse,
+} from "@/insightsLogic";
 
 describe("insights date ranges", () => {
-  it("builds rolling ranges including today", () => {
-    expect(dateRangeForPreset("7d", now)).toMatchObject({ start: "2026-08-06", end: "2026-08-12" });
-    expect(dateRangeForPreset("30d", now)).toMatchObject({ start: "2026-07-14", end: "2026-08-12" });
-    expect(dateRangeForPreset("90d", now)).toMatchObject({ start: "2026-05-15", end: "2026-08-12", granularity: "week" });
+  it("consumes the backend-owned Phoenix range near UTC midnight", () => {
+    const response: PresetDateRangeResponse = {
+      preset: "30d",
+      start_date: "2026-07-19",
+      end_date: "2026-08-17",
+      granularity: "day",
+      timezone: "America/Phoenix",
+    };
+
+    expect(dateRangeForPreset(response, "30d")).toEqual({
+      start: "2026-07-19",
+      end: "2026-08-17",
+      granularity: "day",
+    });
   });
 
-  it("builds calendar month and quarter ranges", () => {
-    expect(dateRangeForPreset("this_month", now)).toMatchObject({ start: "2026-08-01", end: "2026-08-12" });
-    expect(dateRangeForPreset("last_month", now)).toMatchObject({ start: "2026-07-01", end: "2026-07-31" });
-    expect(dateRangeForPreset("this_quarter", now)).toMatchObject({ start: "2026-07-01", end: "2026-08-12" });
-    expect(dateRangeForPreset("last_quarter", now)).toMatchObject({ start: "2026-04-01", end: "2026-06-30" });
-    expect(dateRangeForPreset("ytd", now)).toMatchObject({ start: "2026-01-01", end: "2026-08-12" });
+  it("consumes the backend-owned DST-zone calendar range without browser recomputation", () => {
+    const response: PresetDateRangeResponse = {
+      preset: "this_month",
+      start_date: "2026-03-01",
+      end_date: "2026-03-08",
+      granularity: "day",
+      timezone: "America/New_York",
+    };
+
+    expect(dateRangeForPreset(response, "this_month")).toEqual({
+      start: "2026-03-01",
+      end: "2026-03-08",
+      granularity: "day",
+    });
+  });
+
+  it("fails visibly for missing, mismatched, or malformed server resolution", () => {
+    expect(() => dateRangeForPreset("30d")).toThrow(
+      "Invalid Insights preset date range response",
+    );
+    expect(() => dateRangeForPreset({
+      preset: "7d",
+      start_date: "2026-08-11",
+      end_date: "2026-08-17",
+      granularity: "day",
+      timezone: "America/Phoenix",
+    }, "30d")).toThrow("Invalid Insights preset date range response");
+    expect(() => dateRangeForPreset({
+      preset: "30d",
+      start_date: "2026-08-18",
+      end_date: "2026-08-17",
+      granularity: "day",
+      timezone: "America/Phoenix",
+    })).toThrow("Invalid Insights preset date range response");
+    expect(() => dateRangeForPreset({
+      preset: "30d",
+      start_date: "2026-02-31",
+      end_date: "2026-03-01",
+      granularity: "day",
+      timezone: "America/Phoenix",
+    })).toThrow("Invalid Insights preset date range response");
+    expect(() => dateRangeForPreset({
+      preset: "30d",
+      start_date: "2026-07-19",
+      end_date: "2026-08-17",
+      granularity: "day",
+      timezone: "Mars/Phobos",
+    })).toThrow("Invalid Insights preset date range response");
+    expect(() => dateRangeForPreset({
+      preset: "30d",
+      start_date: "2026-07-19",
+      end_date: "2026-08-17",
+      granularity: "day",
+      timezone: "America/Phoenix",
+      extra: "must fail closed",
+    })).toThrow("Invalid Insights preset date range response");
+  });
+
+  it("cancels superseded preset reads and rejects their stale completions", () => {
+    const gate = createLatestPresetRequestGate();
+    const first = gate.begin();
+    const second = gate.begin();
+
+    expect(first.signal.aborted).toBe(true);
+    expect(first.isCurrent()).toBe(false);
+    expect(second.signal.aborted).toBe(false);
+    expect(second.isCurrent()).toBe(true);
+
+    gate.cancel();
+    expect(second.signal.aborted).toBe(true);
+    expect(second.isCurrent()).toBe(false);
+    const staleContext = {
+      pageContext: {
+        schema_version: "1.0" as const,
+        surface: "expense_insights" as const,
+        filters: { start_date: "2026-07-19", end_date: "2026-08-17" },
+      },
+      label: "Insights · Last 30 Days",
+    };
+    expect(insightsContextForPresetResolution(false, () => staleContext)).toEqual({
+      pageContext: null,
+      label: "Insights",
+    });
+    expect(insightsContextForPresetResolution(true, () => staleContext)).toBe(staleContext);
+  });
+
+  it("builds the bounded authenticated preset endpoint path", () => {
+    expect(presetDateRangePath("last_quarter")).toBe(
+      "/api/insights/date-range?preset=last_quarter",
+    );
   });
 
   it("selects deterministic custom granularity", () => {

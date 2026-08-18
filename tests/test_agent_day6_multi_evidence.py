@@ -60,7 +60,7 @@ _OUTPUT_MODELS = {
     "get_integration_status": IntegrationStatusToolOutput,
 }
 _TOOL_VERSIONS = {
-    "get_spending_insights": "1.2",
+    "get_spending_insights": "1.3",
     "get_receipts": "1.2",
     "get_errands_and_plan": "1.1",
 }

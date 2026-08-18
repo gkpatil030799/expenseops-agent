@@ -12,6 +12,8 @@ from app.api.replenishment_routes import classification_activity
 from app.classification_activity_schemas import ClassificationActivityOut
 from app.db import Base
 from app.models import (
+    ClassificationConcept,
+    ClassificationConceptAlias,
     ClassificationDecisionRecord,
     ExpenseTransaction,
     HouseholdItem,
@@ -319,6 +321,235 @@ def test_daily_classification_activity_is_bounded_scoped_and_truthfully_grouped(
             limit=10,
         )
         assert failed_activity.receipt_items[0].source_available is False
+    engine.dispose()
+
+
+def test_range_activity_uses_local_boundaries_and_projects_candidates_and_aliases(
+    tmp_path,
+) -> None:
+    engine = create_engine(f"sqlite:///{tmp_path / 'classification-range.db'}")
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        owner = User(email="range-owner@example.test", display_name="Range owner")
+        outsider = User(email="range-outsider@example.test", display_name="Range outsider")
+        db.add_all([owner, outsider])
+        db.flush()
+        workspace = Workspace(name="Range household", created_by_user_id=owner.id)
+        other_workspace = Workspace(name="Other range household", created_by_user_id=outsider.id)
+        db.add_all([workspace, other_workspace])
+        db.flush()
+        db.add_all(
+            [
+                WorkspaceMembership(
+                    workspace_id=workspace.id,
+                    user_id=owner.id,
+                    role="owner",
+                    is_default=True,
+                ),
+                WorkspaceMembership(
+                    workspace_id=other_workspace.id,
+                    user_id=outsider.id,
+                    role="owner",
+                    is_default=True,
+                ),
+            ]
+        )
+        learning_item = HouseholdItem(
+            workspace_id=workspace.id,
+            name="Paper towels",
+            cadence_days=None,
+            cadence_source="learning",
+            canonical_key="paper towels",
+            spending_parent_category="household_home",
+            replenishment_eligibility="replenishable",
+            classification_confidence=0.98,
+            cadence_confidence=0.0,
+            created_at=datetime(2026, 8, 18, 6, 30, tzinfo=UTC),
+        )
+        db.add(learning_item)
+        db.flush()
+        receipt = PurchaseReceipt(
+            workspace_id=workspace.id,
+            source="web",
+            source_external_id="range-receipt",
+            merchant_raw="Household Store",
+            total_cents=6_000,
+            currency="USD",
+            parse_status="confirmed",
+        )
+        db.add(receipt)
+        db.flush()
+        learning_line = PurchaseReceiptItem(
+            receipt_id=receipt.id,
+            raw_name="PAPER TOWELS",
+            normalized_name="paper towels",
+            household_item_id=learning_item.id,
+        )
+        candidate_line = PurchaseReceiptItem(
+            receipt_id=receipt.id,
+            raw_name="AIR FILTER 20X20",
+            normalized_name="air filter 20x20",
+        )
+        outside_line = PurchaseReceiptItem(
+            receipt_id=receipt.id,
+            raw_name="OUTSIDE LOCAL DAY",
+            normalized_name="outside local day",
+        )
+        db.add_all([learning_line, candidate_line, outside_line])
+        db.flush()
+
+        concept = ClassificationConcept(
+            workspace_id=workspace.id,
+            parent_category="household_home",
+            name="Paper towels",
+            normalized_name="paper towels",
+            item_activity_type="household_consumable",
+            replenishment_eligibility="replenishable",
+            source="deterministic_exact",
+            confidence=0.98,
+            created_at=datetime(2026, 8, 18, 6, 20, tzinfo=UTC),
+        )
+        private_concept = ClassificationConcept(
+            workspace_id=other_workspace.id,
+            parent_category="household_home",
+            name="Private product",
+            normalized_name="private product",
+            item_activity_type="household_consumable",
+            replenishment_eligibility="replenishable",
+            source="deterministic_exact",
+            confidence=0.99,
+            created_at=datetime(2026, 8, 18, 6, 20, tzinfo=UTC),
+        )
+        db.add_all([concept, private_concept])
+        db.flush()
+        db.add_all(
+            [
+                ClassificationConceptAlias(
+                    workspace_id=workspace.id,
+                    concept_id=concept.id,
+                    merchant_normalized="household store",
+                    raw_pattern="PAPER TOWELS 6=12 ROLLS",
+                    normalized_alias="paper towels 6 12 rolls",
+                    confidence=0.97,
+                    source="confirmed_alias",
+                    created_at=datetime(2026, 8, 18, 6, 45, tzinfo=UTC),
+                    voided_at=datetime(2026, 8, 19, 12, tzinfo=UTC),
+                ),
+                ClassificationConceptAlias(
+                    workspace_id=other_workspace.id,
+                    concept_id=private_concept.id,
+                    merchant_normalized="private store",
+                    raw_pattern="PRIVATE PRODUCT",
+                    normalized_alias="private product",
+                    confidence=0.99,
+                    source="confirmed_alias",
+                    created_at=datetime(2026, 8, 18, 6, 46, tzinfo=UTC),
+                ),
+            ]
+        )
+        db.add_all(
+            [
+                _decision(
+                    workspace.id,
+                    "receipt_line",
+                    learning_line.id,
+                    datetime(2026, 8, 18, 6, 30, tzinfo=UTC),
+                    parent="household_home",
+                    activity="household_consumable",
+                    replenishment="replenishable",
+                    confidence=0.98,
+                    band="high",
+                    provenance=["deterministic_taxonomy_rule"],
+                    household_item_id=learning_item.id,
+                    created_household_item=True,
+                ),
+                _decision(
+                    workspace.id,
+                    "receipt_line",
+                    candidate_line.id,
+                    datetime(2026, 8, 18, 6, 31, tzinfo=UTC),
+                    parent="household_home",
+                    activity="household_consumable",
+                    replenishment="potentially_replenishable",
+                    confidence=0.72,
+                    band="medium",
+                    provenance=["model_evidence"],
+                ),
+                _decision(
+                    workspace.id,
+                    "receipt_line",
+                    outside_line.id,
+                    datetime(2026, 8, 18, 7, 0, tzinfo=UTC),
+                    parent="household_home",
+                    activity="household_consumable",
+                    replenishment="replenishable",
+                    confidence=0.95,
+                    band="high",
+                    provenance=["boundary_fixture"],
+                ),
+            ]
+        )
+        db.commit()
+        set_session_tenant(db, TenantContext(owner.id, workspace.id))
+
+        result = ClassificationActivityService(db).read_range(
+            start_date=date(2026, 8, 17),
+            end_date=date(2026, 8, 17),
+            timezone="America/Phoenix",
+            view="summary",
+            limit=10,
+        )
+
+        assert result.schema_version == "1.1"
+        assert result.timezone == "America/Phoenix"
+        assert result.counts.staple_candidates == 2
+        assert result.counts.aliases == 1
+        assert [row.name for row in result.staple_candidates] == [
+            "AIR FILTER 20X20",
+            "PAPER TOWELS",
+        ]
+        assert [row.learning_state for row in result.staple_candidates] == [
+            "candidate",
+            "learning",
+        ]
+        assert result.staple_candidates[1].created_household_item is True
+        assert result.staple_candidates[1].household_item_name == "Paper towels"
+        assert len(result.aliases) == 1
+        assert result.aliases[0].raw_pattern == "PAPER TOWELS 6=12 ROLLS"
+        assert result.aliases[0].active is False
+        serialized = json.dumps(result.model_dump(mode="json"), sort_keys=True)
+        assert "PRIVATE PRODUCT" not in serialized
+        assert "OUTSIDE LOCAL DAY" not in serialized
+
+        candidate_view = ClassificationActivityService(db).read_range(
+            start_date=date(2026, 8, 17),
+            end_date=date(2026, 8, 17),
+            timezone="America/Phoenix",
+            view="staple_candidates",
+            limit=1,
+        )
+        assert len(candidate_view.staple_candidates) == 1
+        assert candidate_view.aliases == []
+        assert candidate_view.truncated_sections == ["staple_candidates"]
+
+        alias_view = ClassificationActivityService(db).read_range(
+            start_date=date(2026, 8, 17),
+            end_date=date(2026, 8, 17),
+            timezone="America/Phoenix",
+            view="aliases",
+            limit=10,
+        )
+        assert len(alias_view.aliases) == 1
+        assert alias_view.staple_candidates == []
+
+        legacy = ClassificationActivityService(db).read(
+            activity_date=date(2026, 8, 17),
+            view="summary",
+            limit=10,
+        )
+        assert legacy.schema_version == "1.0"
+        assert "staple_candidates" not in legacy.model_dump(mode="json")
+        assert "aliases" not in legacy.model_dump(mode="json")
     engine.dispose()
 
 

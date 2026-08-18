@@ -230,6 +230,8 @@ test("mobile Agent sends and scrolls a canonical transaction answer before retur
   await expect(
     agentPage.getByText("Looking through your transactions…", { exact: true }).first(),
   ).toBeVisible();
+  await expect(composer).toBeEnabled();
+  await expect(composer).toBeFocused();
   await releaseAgentStream(page);
 
   await expect(agentPage.getByLabel("ExpenseOps Agent response in progress")).toHaveCount(0);
@@ -419,7 +421,10 @@ test("unknown structured blocks fail closed without rendering action controls", 
   await page.getByLabel("Ask ExpenseOps Agent").press("Enter");
 
   await expect(page.getByRole("alert")).toContainText(
-    /unsupported Agent response|cannot safely display/i,
+    "I couldn't display that answer. Reload the conversation or try again.",
+  );
+  await expect(page.getByRole("alert")).not.toContainText(
+    /unsupported Agent response|cannot safely display|protocol|schema/i,
   );
   await expect(page.getByRole("button", { name: "Confirm transfer" })).toHaveCount(0);
   await expect(page.getByText("Transfer money", { exact: true })).toHaveCount(0);

@@ -447,7 +447,7 @@ def test_transaction_attention_scope_includes_recovery_states_and_excludes_other
     )
     result = registry.execute_read(prepared, context=context)
 
-    assert registry.get("search_transactions").version == "1.1"
+    assert registry.get("search_transactions").version == "1.2"
     assert result.output is not None
     assert result.output["total_count"] == 5
     assert {row["status"] for row in result.output["transactions"]} == set(statuses[:-1])

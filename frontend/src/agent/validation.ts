@@ -12,12 +12,17 @@ import {
 import type { ClassificationActivityOut } from "../classificationActivity";
 import { isAgentNavigationRequest } from "./pageContext";
 
+export const AGENT_RESPONSE_UNAVAILABLE_MESSAGE =
+  "I couldn't display that answer. Reload the conversation or try again.";
+
 export class AgentProtocolError extends Error {
-  constructor(message = "ExpenseOps received an unsupported Agent response.") {
+  constructor(message = AGENT_RESPONSE_UNAVAILABLE_MESSAGE) {
     super(message);
     this.name = "AgentProtocolError";
   }
 }
+
+const STREAM_EVENT_BASE_KEYS = ["schema_version", "sequence", "run_public_id", "type"];
 
 export function parseAgentStreamEvent(value: unknown): AgentStreamEvent {
   const record = requireRecord(value);
@@ -27,22 +32,28 @@ export function parseAgentStreamEvent(value: unknown): AgentStreamEvent {
   const type = requireString(record.type, 64);
   switch (type) {
     case "run_started":
+      requireAllowedKeys(record, [...STREAM_EVENT_BASE_KEYS, "resumed"]);
       requireBoolean(record.resumed);
       break;
     case "assistant_delta":
-      requireString(record.delta, 1_000);
+      requireAllowedKeys(record, [...STREAM_EVENT_BASE_KEYS, "delta"]);
+      if (!requireString(record.delta, 1_000).trim()) throw new AgentProtocolError();
       break;
     case "tool_started":
     case "tool_completed":
+      requireAllowedKeys(record, [...STREAM_EVENT_BASE_KEYS, "activity", "message"]);
       requireToolActivity(record.activity);
       requireString(record.message, 160);
       break;
     case "structured_response":
+      requireAllowedKeys(record, [...STREAM_EVENT_BASE_KEYS, "response"]);
       parseAgentStructuredResponse(record.response);
       break;
     case "assistant_completed":
       {
+        requireAllowedKeys(record, [...STREAM_EVENT_BASE_KEYS, "message"]);
         const message = parseAgentMessage(record.message);
+        if (message.role !== "assistant") throw new AgentProtocolError();
         if (
           message.feedback !== null &&
           message.feedback.run_public_id !== record.run_public_id
@@ -52,11 +63,21 @@ export function parseAgentStreamEvent(value: unknown): AgentStreamEvent {
       }
       break;
     case "run_completed":
-      parseAgentRun(record.run);
+      {
+        requireAllowedKeys(record, [...STREAM_EVENT_BASE_KEYS, "run"]);
+        const run = parseAgentRun(record.run);
+        requireTerminalRunIdentity(record, run);
+        if (run.status !== "completed") throw new AgentProtocolError();
+      }
       break;
     case "run_failed":
-      if (record.run !== null && record.run !== undefined) parseAgentRun(record.run);
-      requireString(record.code, 100);
+      requireAllowedKeys(record, [...STREAM_EVENT_BASE_KEYS, "run", "code", "message", "retryable"]);
+      if (record.run !== null && record.run !== undefined) {
+        const run = parseAgentRun(record.run);
+        requireTerminalRunIdentity(record, run);
+        if (run.status !== "failed" && run.status !== "cancelled") throw new AgentProtocolError();
+      }
+      requireCode(record.code, 100);
       requireString(record.message, 1_000);
       requireBoolean(record.retryable);
       break;
@@ -68,6 +89,8 @@ export function parseAgentStreamEvent(value: unknown): AgentStreamEvent {
 
 export function parseAgentStructuredResponse(value: unknown): AgentStructuredResponse {
   const record = requireRecord(value);
+  requireAllowedKeys(record, ["schema_version", "blocks"]);
+  requireKeys(record, ["schema_version", "blocks"]);
   requireSchema(record);
   if (!Array.isArray(record.blocks) || record.blocks.length < 1 || record.blocks.length > 50) {
     throw new AgentProtocolError();
@@ -99,6 +122,7 @@ export function parseClassificationActivityOut(value: unknown): ClassificationAc
 
 export function parseAgentConversation(value: unknown): AgentConversation {
   const record = requireRecord(value);
+  requireAllowedKeys(record, ["public_id", "title", "archived_at", "created_at", "updated_at"]);
   requireString(record.public_id, 128);
   requireNullableString(record.title, 120);
   requireNullableString(record.archived_at, 128);
@@ -114,6 +138,9 @@ export function parseAgentConversationList(value: unknown): AgentConversation[] 
 
 export function parseAgentConversationDetail(value: unknown): AgentConversationDetail {
   const record = requireRecord(value);
+  requireAllowedKeys(record, [
+    "conversation", "messages", "messages_total", "messages_offset", "messages_has_more",
+  ]);
   parseAgentConversation(record.conversation);
   if (!Array.isArray(record.messages) || record.messages.length > 500) {
     throw new AgentProtocolError();
@@ -156,6 +183,10 @@ export function parseAgentFeedback(value: unknown): AgentFeedbackOut {
 
 function parseAgentMessage(value: unknown): AgentMessage {
   const record = requireRecord(value);
+  requireAllowedKeys(record, [
+    "public_id", "conversation_public_id", "role", "text", "structured_response",
+    "client_message_id", "feedback_eligible", "feedback", "created_at",
+  ]);
   requireString(record.public_id, 128);
   requireString(record.conversation_public_id, 128);
   if (record.role !== "user" && record.role !== "assistant") throw new AgentProtocolError();
@@ -185,6 +216,10 @@ function parseAgentMessage(value: unknown): AgentMessage {
 
 function parseAgentRun(value: unknown): AgentRunOut {
   const record = requireRecord(value);
+  requireAllowedKeys(record, [
+    "public_id", "status", "model_name", "prompt_version", "input_tokens", "output_tokens",
+    "total_tokens", "error_code", "created_at", "started_at", "completed_at",
+  ]);
   requireString(record.public_id, 128);
   if (!["queued", "running", "completed", "failed", "cancelled"].includes(String(record.status))) {
     throw new AgentProtocolError();
@@ -194,7 +229,7 @@ function parseAgentRun(value: unknown): AgentRunOut {
   requireNullableInteger(record.input_tokens);
   requireNullableInteger(record.output_tokens);
   requireNullableInteger(record.total_tokens);
-  requireNullableString(record.error_code, 100);
+  if (record.error_code !== null && record.error_code !== undefined) requireCode(record.error_code, 100);
   requireString(record.created_at, 128);
   requireNullableString(record.started_at, 128);
   requireNullableString(record.completed_at, 128);
@@ -207,13 +242,32 @@ function parseSupportedBlock(value: unknown): void {
   requireNullableString(block.block_id, 100);
   switch (type) {
     case "text":
+      requireBlockKeys(block, ["text"]);
       requireString(block.text, 8_000);
       return;
     case "spending_summary":
+      requireBlockKeys(block, [
+        "focus", "requested_limit", "title", "start_date", "end_date", "currency_code",
+        "spend_basis", "total_cents", "previous_total_cents", "credits_cents",
+        "previous_credits_cents", "unknown_share_transactions",
+        "previous_unknown_share_transactions", "unknown_credit_share_transactions",
+        "previous_unknown_credit_share_transactions", "change_percent", "highlights",
+        "top_categories", "top_merchants",
+      ]);
+      if (block.focus !== undefined) {
+        requireOneOf(block.focus, [
+          "summary", "comparison", "top_categories", "top_merchants", "change_explanation",
+        ]);
+      }
+      if (block.requested_limit !== undefined && block.requested_limit !== null) {
+        requirePositiveInteger(block.requested_limit);
+        if ((block.requested_limit as number) > 10) throw new AgentProtocolError();
+      }
       requireString(block.title, 160);
-      requireString(block.start_date, 32);
-      requireString(block.end_date, 32);
-      requireString(block.currency_code, 8);
+      const startDate = requireDate(block.start_date);
+      const endDate = requireDate(block.end_date);
+      if (startDate > endDate) throw new AgentProtocolError();
+      requireCurrencyCode(block.currency_code);
       requireOneOf(block.spend_basis, ["card", "actual_share"]);
       requireNonNegativeInteger(block.total_cents);
       requireNullableInteger(block.previous_total_cents);
@@ -243,11 +297,33 @@ function parseSupportedBlock(value: unknown): void {
       requireStringArray(block.highlights, 10, 1_000);
       parseBreakdowns(block.top_categories);
       parseBreakdowns(block.top_merchants);
+      {
+        const focus = block.focus ?? "summary";
+        const requestedLimit = typeof block.requested_limit === "number"
+          ? block.requested_limit
+          : null;
+        if (focus === "top_categories") {
+          if (
+            requestedLimit === null ||
+            (block.top_categories as unknown[]).length > requestedLimit ||
+            (block.top_merchants as unknown[]).length > 0
+          ) throw new AgentProtocolError();
+        } else if (focus === "top_merchants") {
+          if (
+            requestedLimit === null ||
+            (block.top_merchants as unknown[]).length > requestedLimit ||
+            (block.top_categories as unknown[]).length > 0
+          ) throw new AgentProtocolError();
+        } else if (requestedLimit !== null) {
+          throw new AgentProtocolError();
+        }
+      }
       return;
     case "lifestyle_summary":
       parseLifestyleSummaryBlock(block);
       return;
     case "transaction_list":
+      requireBlockKeys(block, ["title", "transactions", "total_count"]);
       requireString(block.title, 160);
       requireNonNegativeInteger(block.total_count);
       if (!Array.isArray(block.transactions) || block.transactions.length > 50) {
@@ -255,26 +331,39 @@ function parseSupportedBlock(value: unknown): void {
       }
       block.transactions.forEach((item) => {
         const transaction = requireRecord(item);
+        requireAllowedKeys(transaction, [
+          "public_id", "merchant", "amount_cents", "currency_code", "occurred_on",
+          "category", "status", "pending",
+        ]);
         requireString(transaction.public_id, 128);
         requireString(transaction.merchant, 255);
         requireInteger(transaction.amount_cents);
-        requireString(transaction.currency_code, 8);
-        requireNullableString(transaction.occurred_on, 32);
+        requireCurrencyCode(transaction.currency_code);
+        requireNullableDate(transaction.occurred_on);
         requireNullableString(transaction.category, 255);
         requireString(transaction.status, 64);
         requireBoolean(transaction.pending);
       });
       return;
     case "replenishment_summary":
+      requireBlockKeys(block, [
+        "title", "items", "acquisition_history", "acquisition_history_truncated",
+        "total_count", "items_truncated",
+      ]);
       requireString(block.title, 160);
       requireNonNegativeInteger(block.total_count);
       requireBoolean(block.items_truncated);
       if (!Array.isArray(block.items) || block.items.length > 50) throw new AgentProtocolError();
       block.items.forEach((item) => {
         const row = requireRecord(item);
+        requireAllowedKeys(row, [
+          "public_id", "name", "predicted_due_on", "confidence", "confidence_level",
+          "evidence_basis", "due_state", "reason", "quantity", "unit", "last_acquired_on",
+          "confirmed_acquisition_count",
+        ]);
         requireString(row.public_id, 128);
         requireString(row.name, 255);
-        requireNullableString(row.predicted_due_on, 32);
+        requireNullableDate(row.predicted_due_on);
         requireNullableNumberRange(row.confidence, 0, 1);
         requireOneOf(row.confidence_level, ["insufficient", "low", "medium", "high"]);
         requireOneOf(row.evidence_basis, [
@@ -287,7 +376,7 @@ function parseSupportedBlock(value: unknown): void {
         requireNullableString(row.reason, 500);
         requireNullableString(row.quantity, 64);
         requireNullableString(row.unit, 64);
-        requireNullableString(row.last_acquired_on, 32);
+        requireNullableDate(row.last_acquired_on);
         requireNonNegativeInteger(row.confirmed_acquisition_count);
       });
       if (!Array.isArray(block.acquisition_history) || block.acquisition_history.length > 20) {
@@ -296,20 +385,27 @@ function parseSupportedBlock(value: unknown): void {
       requireBoolean(block.acquisition_history_truncated);
       block.acquisition_history.forEach((item) => {
         const row = requireRecord(item);
-        requireString(row.acquired_on, 32);
+        requireAllowedKeys(row, ["acquired_on", "merchant", "quantity", "unit", "evidence_type"]);
+        requireDate(row.acquired_on);
         requireNullableString(row.merchant, 255);
-        requireNullableFiniteNumber(row.quantity);
+        requireNullableNumberRange(row.quantity, 0, Number.MAX_VALUE);
         requireNullableString(row.unit, 64);
         requireOneOf(row.evidence_type, ["manual", "receipt", "transaction", "imported", "correction"]);
       });
       return;
     case "receipt_summary":
+      requireBlockKeys(block, [
+        "public_id", "merchant", "purchased_at", "ingested_at", "total_cents",
+        "currency_code", "status", "transaction_linked", "matched_line_count",
+        "ignored_line_count", "unmatched_line_count", "total_line_count", "items",
+        "items_truncated",
+      ]);
       requireString(block.public_id, 128);
       requireNullableString(block.merchant, 255);
       requireNullableString(block.purchased_at, 128);
       requireNullableString(block.ingested_at, 128);
       requireNullableIntegerValue(block.total_cents);
-      requireString(block.currency_code, 8);
+      requireCurrencyCode(block.currency_code);
       requireString(block.status, 64);
       requireBoolean(block.transaction_linked);
       requireNonNegativeInteger(block.matched_line_count);
@@ -327,7 +423,7 @@ function parseSupportedBlock(value: unknown): void {
           "confirmed_acquisition",
         ]);
         requireString(row.name, 500);
-        requireNullableFiniteNumber(row.quantity);
+        requireNullableNumberRange(row.quantity, 0, Number.MAX_VALUE);
         requireNullableString(row.unit, 64);
         requireNullableIntegerValue(row.line_total_cents);
         requireOneOf(row.match_status, ["matched", "possible", "unmatched", "ignored"]);
@@ -356,11 +452,18 @@ function parseSupportedBlock(value: unknown): void {
       });
       return;
     case "deal_list":
+      requireBlockKeys(block, ["title", "deals", "total_count"]);
       requireString(block.title, 160);
       requireNonNegativeInteger(block.total_count);
       if (!Array.isArray(block.deals) || block.deals.length > 50) throw new AgentProtocolError();
       block.deals.forEach((item) => {
         const row = requireRecord(item);
+        requireAllowedKeys(row, [
+          "public_id", "merchant", "headline", "expires_at", "score", "category",
+          "offer_type", "percent_off", "amount_off_cents", "currency_code",
+          "minimum_spend_cents", "promo_code", "trust_status", "saved",
+          "relevant_to_need", "relevance_reasons",
+        ]);
         requireString(row.public_id, 128);
         requireString(row.merchant, 255);
         requireString(row.headline, 500);
@@ -370,7 +473,9 @@ function parseSupportedBlock(value: unknown): void {
         requireNullableString(row.offer_type, 32);
         requireNullableNumberRange(row.percent_off, 0, 100);
         requireNullableNonNegativeInteger(row.amount_off_cents);
-        requireNullableString(row.currency_code, 8);
+        if (row.currency_code !== null && row.currency_code !== undefined) {
+          requireCurrencyCode(row.currency_code);
+        }
         requireNullableNonNegativeInteger(row.minimum_spend_cents);
         requireNullableString(row.promo_code, 128);
         requireOneOf(row.trust_status, ["trusted", "review"]);
@@ -380,6 +485,7 @@ function parseSupportedBlock(value: unknown): void {
       });
       return;
     case "errand_summary":
+      requireBlockKeys(block, ["title", "errands", "total_count", "errands_truncated", "plan"]);
       requireString(block.title, 160);
       requireNonNegativeInteger(block.total_count);
       requireBoolean(block.errands_truncated);
@@ -388,12 +494,14 @@ function parseSupportedBlock(value: unknown): void {
       if (block.plan !== null && block.plan !== undefined) parseErrandPlan(block.plan);
       return;
     case "integration_status":
+      requireBlockKeys(block, ["title", "integrations"]);
       requireString(block.title, 160);
       if (!Array.isArray(block.integrations) || block.integrations.length > 25) {
         throw new AgentProtocolError();
       }
       block.integrations.forEach((item) => {
         const row = requireRecord(item);
+        requireAllowedKeys(row, ["provider", "scope", "status", "message", "last_successful_sync_at"]);
         requireString(row.provider, 64);
         if (row.scope !== null && row.scope !== undefined) {
           requireOneOf(row.scope, ["personal", "workspace", "application"]);
@@ -423,12 +531,14 @@ function parseSupportedBlock(value: unknown): void {
       parseAgentActionConfirmation(block);
       return;
     case "error":
-      requireString(block.code, 100);
+      requireBlockKeys(block, ["code", "title", "message", "retryable"]);
+      requireCode(block.code, 100);
       requireString(block.title, 160);
       requireString(block.message, 1_000);
       requireBoolean(block.retryable);
       return;
     case "empty":
+      requireBlockKeys(block, ["title", "message", "suggested_navigation"]);
       requireString(block.title, 160);
       requireString(block.message, 1_000);
       if (block.suggested_navigation !== null && block.suggested_navigation !== undefined) {
@@ -516,6 +626,25 @@ const CLASSIFICATION_SECTIONS = [
   "uncertain",
 ] as const;
 
+const CLASSIFICATION_RANGE_VIEWS = [
+  ...CLASSIFICATION_VIEWS,
+  "staple_candidates",
+  "aliases",
+] as const;
+
+const CLASSIFICATION_RANGE_SECTIONS = [
+  "transactions",
+  "receipt_items",
+  "categories",
+  "new_categories",
+  "receipt_matches",
+  "new_household_items",
+  "staple_candidates",
+  "aliases",
+  "cadence_updates",
+  "uncertain",
+] as const;
+
 const CLASSIFICATION_PARENT_CATEGORIES = [
   "food_dining",
   "household_home",
@@ -570,17 +699,42 @@ const CADENCE_SOURCES = [
 ] as const;
 
 function parseClassificationActivityBlock(block: Record<string, unknown>): void {
+  if (block.block_version === "1.0") {
+    parseClassificationActivityV1Block(block);
+    return;
+  }
+  if (block.block_version === "1.1") {
+    parseClassificationActivityV11Block(block);
+    return;
+  }
+  throw new AgentProtocolError();
+}
+
+function parseClassificationActivityV1Block(block: Record<string, unknown>): void {
   const keys = [
-    "type", "block_id", "block_version", "title", "view", "activity_date", "timezone",
+    "type", "block_id", "block_version", "title", "view", "activity_date", "start_date",
+    "end_date", "timezone",
     "counts", "transactions", "receipt_items", "categories", "new_categories", "receipt_matches",
-    "new_household_items", "cadence_updates", "uncertain", "truncated_sections",
+    "new_household_items", "staple_candidates", "aliases", "cadence_updates", "uncertain",
+    "truncated_sections",
   ];
   requireAllowedKeys(block, keys);
-  requireKeys(block, keys.filter((key) => key !== "block_id"));
-  if (block.block_version !== "1.0") throw new AgentProtocolError();
+  requireKeys(block, [
+    "type", "block_version", "title", "view", "activity_date", "timezone", "counts",
+    "transactions", "receipt_items", "categories", "new_categories", "receipt_matches",
+    "new_household_items", "cadence_updates", "uncertain", "truncated_sections",
+  ]);
+  if (block.start_date !== null && block.start_date !== undefined) throw new AgentProtocolError();
+  if (block.end_date !== null && block.end_date !== undefined) throw new AgentProtocolError();
+  if (block.staple_candidates !== undefined && (
+    !Array.isArray(block.staple_candidates) || block.staple_candidates.length > 0
+  )) throw new AgentProtocolError();
+  if (block.aliases !== undefined && (!Array.isArray(block.aliases) || block.aliases.length > 0)) {
+    throw new AgentProtocolError();
+  }
   requireString(block.title, 160);
   requireOneOf(block.view, CLASSIFICATION_VIEWS);
-  requireString(block.activity_date, 32);
+  requireDate(block.activity_date);
   if (block.timezone !== "UTC") throw new AgentProtocolError();
 
   const counts = requireRecord(block.counts);
@@ -632,6 +786,87 @@ function parseClassificationActivityBlock(block: Record<string, unknown>): void 
   });
   if (new Set(truncated).size !== truncated.length) throw new AgentProtocolError();
   const expected = CLASSIFICATION_SECTIONS.filter(
+    (section) => allowed.has(section) && (counts[section] as number) > rows[section].length,
+  );
+  if (expected.length !== truncated.length || expected.some((section) => !truncated.includes(section))) {
+    throw new AgentProtocolError();
+  }
+}
+
+function parseClassificationActivityV11Block(block: Record<string, unknown>): void {
+  const keys = [
+    "type", "block_id", "block_version", "title", "view", "activity_date", "start_date",
+    "end_date", "timezone", "counts", "transactions", "receipt_items", "categories",
+    "new_categories", "receipt_matches", "new_household_items", "staple_candidates",
+    "aliases", "cadence_updates", "uncertain", "truncated_sections",
+  ];
+  requireAllowedKeys(block, keys);
+  requireKeys(block, keys.filter((key) => key !== "block_id" && key !== "activity_date"));
+  if (block.activity_date !== null && block.activity_date !== undefined) throw new AgentProtocolError();
+  requireString(block.title, 160);
+  requireOneOf(block.view, CLASSIFICATION_RANGE_VIEWS);
+  const startDate = requireDate(block.start_date);
+  const endDate = requireDate(block.end_date);
+  if (startDate > endDate || dateSpanDays(startDate, endDate) >= 90) {
+    throw new AgentProtocolError();
+  }
+  requireIanaTimezone(block.timezone);
+
+  const counts = requireRecord(block.counts);
+  requireAllowedKeys(counts, CLASSIFICATION_RANGE_SECTIONS.slice());
+  requireKeys(counts, CLASSIFICATION_RANGE_SECTIONS.slice());
+  CLASSIFICATION_RANGE_SECTIONS.forEach((section) => requireNonNegativeInteger(counts[section]));
+
+  parseClassificationRows(block.transactions, 20, parseClassificationTransaction);
+  parseClassificationRows(block.receipt_items, 20, parseClassificationReceiptItem);
+  parseClassificationRows(block.categories, 20, parseClassificationCategory);
+  parseClassificationRows(block.new_categories, 20, parseClassificationNewCategory);
+  parseClassificationRows(block.receipt_matches, 20, parseClassificationReceiptMatch);
+  parseClassificationRows(block.new_household_items, 20, parseClassificationHouseholdItem);
+  parseClassificationRows(block.staple_candidates, 20, parseClassificationStapleCandidate);
+  parseClassificationRows(block.aliases, 20, parseClassificationAlias);
+  parseClassificationRows(block.cadence_updates, 20, parseClassificationHouseholdItem);
+  parseClassificationRows(block.uncertain, 20, parseClassificationUncertain);
+
+  const rows: Record<(typeof CLASSIFICATION_RANGE_SECTIONS)[number], unknown[]> = {
+    transactions: block.transactions as unknown[],
+    receipt_items: block.receipt_items as unknown[],
+    categories: block.categories as unknown[],
+    new_categories: block.new_categories as unknown[],
+    receipt_matches: block.receipt_matches as unknown[],
+    new_household_items: block.new_household_items as unknown[],
+    staple_candidates: block.staple_candidates as unknown[],
+    aliases: block.aliases as unknown[],
+    cadence_updates: block.cadence_updates as unknown[],
+    uncertain: block.uncertain as unknown[],
+  };
+  const view = block.view as (typeof CLASSIFICATION_RANGE_VIEWS)[number];
+  const allowed = view === "summary"
+    ? new Set<string>(CLASSIFICATION_RANGE_SECTIONS)
+    : new Set<string>({
+      categories: ["categories"],
+      new_categories: ["new_categories"],
+      matches: ["receipt_matches"],
+      staples: ["new_household_items"],
+      staple_candidates: ["staple_candidates"],
+      aliases: ["aliases"],
+      cadence: ["cadence_updates"],
+      uncertain: ["uncertain"],
+    }[view]);
+  for (const section of CLASSIFICATION_RANGE_SECTIONS) {
+    if (!allowed.has(section) && rows[section].length) throw new AgentProtocolError();
+    if (rows[section].length > (counts[section] as number)) throw new AgentProtocolError();
+  }
+
+  if (!Array.isArray(block.truncated_sections) || block.truncated_sections.length > 10) {
+    throw new AgentProtocolError();
+  }
+  const truncated = block.truncated_sections.map((section) => {
+    requireOneOf(section, CLASSIFICATION_RANGE_SECTIONS);
+    return section as (typeof CLASSIFICATION_RANGE_SECTIONS)[number];
+  });
+  if (new Set(truncated).size !== truncated.length) throw new AgentProtocolError();
+  const expected = CLASSIFICATION_RANGE_SECTIONS.filter(
     (section) => allowed.has(section) && (counts[section] as number) > rows[section].length,
   );
   if (expected.length !== truncated.length || expected.some((section) => !truncated.includes(section))) {
@@ -795,6 +1030,61 @@ function parseClassificationHouseholdItem(row: Record<string, unknown>): void {
   requireString(row.activity_at, 128);
 }
 
+function parseClassificationStapleCandidate(row: Record<string, unknown>): void {
+  const keys = [
+    "decision_public_id", "receipt_item_public_id", "receipt_public_id", "source_available",
+    "merchant", "name", "parent_category", "subcategory", "concept", "activity_type",
+    "replenishment_eligibility", "confidence", "confidence_band", "decision_state",
+    "created_household_item", "household_item_public_id", "household_item_name",
+    "learning_state", "applied_at",
+  ];
+  requireAllowedKeys(row, keys);
+  requireKeys(row, keys);
+  requireString(row.decision_public_id, 128);
+  requireString(row.receipt_item_public_id, 128);
+  requireString(row.receipt_public_id, 128);
+  requireBoolean(row.source_available);
+  requireNullableString(row.merchant, 255);
+  requireString(row.name, 500);
+  requireOneOf(row.parent_category, CLASSIFICATION_PARENT_CATEGORIES);
+  requireNullableString(row.subcategory, 128);
+  requireNullableString(row.concept, 255);
+  requireOneOf(row.activity_type, CLASSIFICATION_ACTIVITY_TYPES);
+  requireOneOf(row.replenishment_eligibility, ["replenishable", "potentially_replenishable"]);
+  requireNullableNumberRange(row.confidence, 0, 1);
+  if (row.confidence === null || row.confidence === undefined) throw new AgentProtocolError();
+  requireOneOf(row.confidence_band, CLASSIFICATION_CONFIDENCE);
+  requireOneOf(row.decision_state, CLASSIFICATION_STATES);
+  requireBoolean(row.created_household_item);
+  requireNullableString(row.household_item_public_id, 128);
+  requireNullableString(row.household_item_name, 255);
+  const linked = row.household_item_public_id !== null && row.household_item_public_id !== undefined;
+  const named = row.household_item_name !== null && row.household_item_name !== undefined;
+  if (linked !== named) throw new AgentProtocolError();
+  requireOneOf(row.learning_state, ["candidate", "learning", "tracked"]);
+  if ((row.learning_state === "candidate") === linked) throw new AgentProtocolError();
+  requireString(row.applied_at, 128);
+}
+
+function parseClassificationAlias(row: Record<string, unknown>): void {
+  const keys = [
+    "public_id", "concept", "parent_category", "raw_pattern", "merchant", "confidence",
+    "authority", "active", "created_at",
+  ];
+  requireAllowedKeys(row, keys);
+  requireKeys(row, keys);
+  requireString(row.public_id, 128);
+  requireString(row.concept, 255);
+  requireOneOf(row.parent_category, CLASSIFICATION_PARENT_CATEGORIES);
+  requireString(row.raw_pattern, 500);
+  requireNullableString(row.merchant, 255);
+  requireNullableNumberRange(row.confidence, 0, 1);
+  if (row.confidence === null || row.confidence === undefined) throw new AgentProtocolError();
+  requireOneOf(row.authority, CLASSIFICATION_AUTHORITIES);
+  requireBoolean(row.active);
+  requireString(row.created_at, 128);
+}
+
 function parseClassificationUncertain(row: Record<string, unknown>): void {
   const keys = [
     "kind", "public_id", "receipt_public_id", "label", "reasons", "confidence_band",
@@ -942,6 +1232,10 @@ function requireAllowedKeys(record: Record<string, unknown>, allowed: string[]):
   }
 }
 
+function requireBlockKeys(record: Record<string, unknown>, payloadKeys: string[]): void {
+  requireAllowedKeys(record, ["type", "block_id", ...payloadKeys]);
+}
+
 function requireKeys(record: Record<string, unknown>, required: string[]): void {
   if (required.some((key) => !Object.prototype.hasOwnProperty.call(record, key))) {
     throw new AgentProtocolError();
@@ -964,12 +1258,16 @@ function parseLifestyleSummaryBlock(block: Record<string, unknown>): void {
   requireKeys(block, keys.filter((key) => key !== "block_id"));
   if (block.block_version !== "1.0") throw new AgentProtocolError();
   requireString(block.title, 160);
-  requireString(block.start_date, 32);
-  requireString(block.end_date, 32);
-  requireNullableString(block.previous_start_date, 32);
-  requireNullableString(block.previous_end_date, 32);
+  const startDate = requireDate(block.start_date);
+  const endDate = requireDate(block.end_date);
+  if (startDate > endDate) throw new AgentProtocolError();
+  const previousStartDate = requireNullableDate(block.previous_start_date);
+  const previousEndDate = requireNullableDate(block.previous_end_date);
+  if (previousStartDate && previousEndDate && previousStartDate > previousEndDate) {
+    throw new AgentProtocolError();
+  }
   requireOneOf(block.activity_type, ["all", "coffee", "restaurants", "delivery", "nightlife"]);
-  requireString(block.currency_code, 8);
+  requireCurrencyCode(block.currency_code);
   requireOneOf(block.spend_basis, ["card", "actual_share"]);
   [
     "total_cents", "credits_cents", "transaction_count", "average_cents", "personal_cents",
@@ -1015,6 +1313,9 @@ function parseBreakdowns(value: unknown): void {
   if (!Array.isArray(value) || value.length > 10) throw new AgentProtocolError();
   value.forEach((item) => {
     const row = requireRecord(item);
+    requireAllowedKeys(row, [
+      "name", "amount_cents", "transaction_count", "percentage", "previous_amount_cents",
+    ]);
     requireString(row.name, 255);
     requireNonNegativeInteger(row.amount_cents);
     requireNonNegativeInteger(row.transaction_count);
@@ -1030,12 +1331,16 @@ function parseBreakdowns(value: unknown): void {
 
 function parseErrand(value: unknown): void {
   const row = requireRecord(value);
+  requireAllowedKeys(row, [
+    "public_id", "title", "status", "priority", "errand_type", "due_on", "place_name",
+    "place_resolution_status", "included_in_next_plan", "household_items",
+  ]);
   requireString(row.public_id, 128);
   requireString(row.title, 255);
   requireString(row.status, 64);
   requireString(row.priority, 32);
   requireString(row.errand_type, 32);
-  requireNullableString(row.due_on, 32);
+  requireNullableDate(row.due_on);
   requireNullableString(row.place_name, 255);
   requireString(row.place_resolution_status, 32);
   requireBoolean(row.included_in_next_plan);
@@ -1044,6 +1349,11 @@ function parseErrand(value: unknown): void {
 
 function parseErrandPlan(value: unknown): void {
   const plan = requireRecord(value);
+  requireAllowedKeys(plan, [
+    "public_id", "status", "planned_for", "is_stale", "stale_reason",
+    "estimated_stop_minutes", "travel_duration_minutes", "distance_meters", "stops",
+    "total_stop_count", "stops_truncated",
+  ]);
   requireString(plan.public_id, 128);
   requireString(plan.status, 32);
   requireNullableString(plan.planned_for, 128);
@@ -1057,6 +1367,10 @@ function parseErrandPlan(value: unknown): void {
   if (!Array.isArray(plan.stops) || plan.stops.length > 12) throw new AgentProtocolError();
   plan.stops.forEach((item) => {
     const stop = requireRecord(item);
+    requireAllowedKeys(stop, [
+      "order", "place_name", "errands", "errands_truncated", "household_items",
+      "household_items_truncated",
+    ]);
     requireNonNegativeInteger(stop.order);
     if (stop.order === 0) throw new AgentProtocolError();
     requireString(stop.place_name, 255);
@@ -1081,10 +1395,78 @@ function requireSchema(value: Record<string, unknown>): void {
 }
 
 function requireString(value: unknown, max: number): string {
-  if (typeof value !== "string" || value.length < 1 || value.length > max) {
+  if (
+    typeof value !== "string" ||
+    value.length < 1 ||
+    value.length > max ||
+    value.trim().length < 1
+  ) {
     throw new AgentProtocolError();
   }
   return value;
+}
+
+function requireCode(value: unknown, max: number): string {
+  const code = requireString(value, max);
+  if (!/^[a-z][a-z0-9_]*$/.test(code)) throw new AgentProtocolError();
+  return code;
+}
+
+function requireCurrencyCode(value: unknown): string {
+  const code = requireString(value, 8);
+  if (!/^[A-Za-z]{3,8}$/.test(code)) throw new AgentProtocolError();
+  return code;
+}
+
+function requireDate(value: unknown): string {
+  const date = requireString(value, 32);
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(date);
+  if (!match) throw new AgentProtocolError();
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  if (year < 1) throw new AgentProtocolError();
+  const parsed = new Date(0);
+  parsed.setUTCHours(0, 0, 0, 0);
+  parsed.setUTCFullYear(year, month - 1, day);
+  if (
+    parsed.getUTCFullYear() !== year ||
+    parsed.getUTCMonth() !== month - 1 ||
+    parsed.getUTCDate() !== day
+  ) {
+    throw new AgentProtocolError();
+  }
+  return date;
+}
+
+function requireNullableDate(value: unknown): string | null {
+  if (value === null || value === undefined) return null;
+  return requireDate(value);
+}
+
+function dateSpanDays(startDate: string, endDate: string): number {
+  return (
+    Date.parse(`${endDate}T00:00:00Z`) - Date.parse(`${startDate}T00:00:00Z`)
+  ) / 86_400_000;
+}
+
+function requireIanaTimezone(value: unknown): string {
+  const timezone = requireString(value, 64);
+  try {
+    new Intl.DateTimeFormat("en-US", { timeZone: timezone }).format(0);
+  } catch {
+    throw new AgentProtocolError();
+  }
+  return timezone;
+}
+
+function requireTerminalRunIdentity(
+  event: Record<string, unknown>,
+  run: AgentRunOut,
+): void {
+  if (event.run_public_id !== null && event.run_public_id !== run.public_id) {
+    throw new AgentProtocolError();
+  }
 }
 
 function requireNullableString(value: unknown, max: number): void {
@@ -1155,6 +1537,7 @@ function requireStringArray(value: unknown, maxItems: number, maxLength: number)
 function requireToolActivity(value: unknown): void {
   requireOneOf(value, [
     "spending",
+    "lifestyle",
     "transactions",
     "replenishment",
     "receipts",

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type CSSProperties, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import {
   ArrowDownRight,
   ArrowUpRight,
@@ -20,7 +20,18 @@ import {
   buildExpenseInsightsContext,
   type AgentContextPublisher,
 } from "@/agent/pageContext";
-import { customGranularity, dateRangeForPreset, type DatePreset } from "@/insightsLogic";
+import {
+  createLatestPresetRequestGate,
+  customGranularity,
+  dateRangeForPreset,
+  insightsContextForPresetResolution,
+  isServerDatePreset,
+  presetDateRangePath,
+  type DatePreset,
+  type Granularity,
+  type PresetDateRangeResponse,
+  type ServerDatePreset,
+} from "@/insightsLogic";
 import {
   axisTicks,
   categoryColor,
@@ -133,10 +144,11 @@ export function InsightsDashboard({
 }: {
   onAgentContextChange?: AgentContextPublisher;
 } = {}) {
-  const initial = useMemo(() => dateRangeForPreset("30d"), []);
   const [preset, setPreset] = useState<DatePreset>("30d");
-  const [start, setStart] = useState(initial.start);
-  const [end, setEnd] = useState(initial.end);
+  const [start, setStart] = useState("");
+  const [end, setEnd] = useState("");
+  const [granularity, setGranularity] = useState<Granularity>("day");
+  const [presetRangeReady, setPresetRangeReady] = useState(false);
   const [account, setAccount] = useState("");
   const [category, setCategory] = useState("");
   const [merchant, setMerchant] = useState("");
@@ -151,20 +163,56 @@ export function InsightsDashboard({
   const [sharedMode, setSharedMode] = useState<"people" | "groups">("people");
   const [trendMode, setTrendMode] = useState<"total" | "split">("total");
   const [reloadToken, setReloadToken] = useState(0);
+  const presetRequestGate = useRef(createLatestPresetRequestGate());
+
+  const requestPresetRange = useCallback((value: ServerDatePreset) => {
+    const request = presetRequestGate.current.begin();
+    setPreset(value);
+    setPresetRangeReady(false);
+    setLoading(true);
+    setError("");
+    void api<PresetDateRangeResponse>(presetDateRangePath(value), { signal: request.signal })
+      .then((response) => {
+        if (!request.isCurrent()) return;
+        const range = dateRangeForPreset(response, value);
+        setStart(range.start);
+        setEnd(range.end);
+        setGranularity(range.granularity);
+        setPresetRangeReady(true);
+      })
+      .catch((errorValue) => {
+        if (!request.isCurrent()) return;
+        setError(
+          typeof errorValue?.detail === "string"
+            ? errorValue.detail
+            : "We couldn't resolve the selected date range.",
+        );
+        setLoading(false);
+      });
+  }, []);
+
+  useEffect(() => {
+    const requestGate = presetRequestGate.current;
+    requestPresetRange("30d");
+    return () => requestGate.cancel();
+  }, [requestPresetRange]);
 
   const agentContext = useMemo(
-    () => buildExpenseInsightsContext({
-      startDate: start,
-      endDate: end,
-      datePreset: preset,
-      accountId: account,
-      category,
-      merchant,
-      reviewType,
-      currencyCode: currency,
-      spendBasis: basis === "actual_share" ? "actual_share" : "card",
-    }),
-    [account, basis, category, currency, end, merchant, preset, reviewType, start],
+    () => insightsContextForPresetResolution(
+      presetRangeReady,
+      () => buildExpenseInsightsContext({
+        startDate: start,
+        endDate: end,
+        datePreset: preset,
+        accountId: account,
+        category,
+        merchant,
+        reviewType,
+        currencyCode: currency,
+        spendBasis: basis === "actual_share" ? "actual_share" : "card",
+      }),
+    ),
+    [account, basis, category, currency, end, merchant, preset, presetRangeReady, reviewType, start],
   );
 
   useEffect(() => {
@@ -177,7 +225,7 @@ export function InsightsDashboard({
   }, [merchantInput]);
 
   useEffect(() => {
-    if (!start || !end || start > end) return;
+    if (!presetRangeReady || !start || !end || start > end) return;
     const controller = new AbortController();
     setLoading(true);
     setError("");
@@ -186,7 +234,7 @@ export function InsightsDashboard({
       end_date: end,
       review_type: reviewType,
       spend_basis: basis,
-      granularity: customGranularity(start, end),
+      granularity: preset === "custom" ? customGranularity(start, end) : granularity,
     });
     if (account) params.set("account_id", account);
     if (category) params.set("category", category);
@@ -204,15 +252,26 @@ export function InsightsDashboard({
         if (!controller.signal.aborted) setLoading(false);
       });
     return () => controller.abort();
-  }, [start, end, account, category, merchant, reviewType, basis, currency, reloadToken]);
+  }, [start, end, account, category, merchant, reviewType, basis, currency, granularity, preset, presetRangeReady, reloadToken]);
 
   function choosePreset(value: DatePreset) {
-    setPreset(value);
-    if (value !== "custom") {
-      const range = dateRangeForPreset(value);
-      setStart(range.start);
-      setEnd(range.end);
+    if (isServerDatePreset(value)) {
+      requestPresetRange(value);
+      return;
     }
+    presetRequestGate.current.cancel();
+    setPreset(value);
+    setPresetRangeReady(true);
+    setError("");
+    setLoading(false);
+  }
+
+  function retry() {
+    if (!presetRangeReady && isServerDatePreset(preset)) {
+      requestPresetRange(preset);
+      return;
+    }
+    setReloadToken((value) => value + 1);
   }
 
   function clearFilters() {
@@ -236,7 +295,7 @@ export function InsightsDashboard({
       <CompactMessage
         title="Insights unavailable"
         detail={error}
-        action={() => setReloadToken((value) => value + 1)}
+        action={retry}
       />
     );
   }
@@ -273,7 +332,7 @@ export function InsightsDashboard({
       {error ? (
         <div role="alert" className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-900">
           <span>{error} The last loaded view is still shown below.</span>
-          <Button variant="outline" size="sm" onClick={() => setReloadToken((value) => value + 1)}>
+          <Button variant="outline" size="sm" onClick={retry}>
             <RefreshCw className="h-4 w-4" /> Retry
           </Button>
         </div>

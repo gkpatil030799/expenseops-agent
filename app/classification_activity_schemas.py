@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import date, datetime
 from typing import Literal
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -14,6 +15,8 @@ from app.models import (
     ReplenishmentEligibility,
     SpendingParentCategory,
 )
+
+MAX_CLASSIFICATION_ACTIVITY_RANGE_DAYS = 90
 
 ClassificationActivityView = Literal[
     "summary",
@@ -31,6 +34,29 @@ ClassificationActivitySection = Literal[
     "new_categories",
     "receipt_matches",
     "new_household_items",
+    "cadence_updates",
+    "uncertain",
+]
+ClassificationActivityRangeView = Literal[
+    "summary",
+    "categories",
+    "new_categories",
+    "matches",
+    "staples",
+    "staple_candidates",
+    "aliases",
+    "cadence",
+    "uncertain",
+]
+ClassificationActivityRangeSection = Literal[
+    "transactions",
+    "receipt_items",
+    "categories",
+    "new_categories",
+    "receipt_matches",
+    "new_household_items",
+    "staple_candidates",
+    "aliases",
     "cadence_updates",
     "uncertain",
 ]
@@ -186,6 +212,49 @@ class ClassificationHouseholdItemActivity(ClassificationActivityModel):
         return self
 
 
+class ClassificationStapleCandidateActivity(ClassificationActivityModel):
+    decision_public_id: str = Field(min_length=1, max_length=128)
+    receipt_item_public_id: str = Field(min_length=1, max_length=128)
+    receipt_public_id: str = Field(min_length=1, max_length=128)
+    source_available: bool
+    merchant: str | None = Field(default=None, min_length=1, max_length=255)
+    name: str = Field(min_length=1, max_length=500)
+    parent_category: SpendingParentCategory
+    subcategory: str | None = Field(default=None, min_length=1, max_length=128)
+    concept: str | None = Field(default=None, min_length=1, max_length=255)
+    activity_type: ClassificationActivityType
+    replenishment_eligibility: Literal["replenishable", "potentially_replenishable"]
+    confidence: float = Field(ge=0, le=1)
+    confidence_band: ClassificationConfidenceBand
+    decision_state: ClassificationDecisionState
+    created_household_item: bool
+    household_item_public_id: str | None = Field(default=None, min_length=1, max_length=128)
+    household_item_name: str | None = Field(default=None, min_length=1, max_length=255)
+    learning_state: Literal["candidate", "learning", "tracked"]
+    applied_at: datetime
+
+    @model_validator(mode="after")
+    def validate_learning_state(self) -> ClassificationStapleCandidateActivity:
+        linked = self.household_item_public_id is not None
+        if linked != (self.household_item_name is not None):
+            raise ValueError("household item identifier and name must appear together")
+        if (self.learning_state == "candidate") == linked:
+            raise ValueError("only learning or tracked candidates may link a household item")
+        return self
+
+
+class ClassificationAliasActivity(ClassificationActivityModel):
+    public_id: str = Field(min_length=1, max_length=128)
+    concept: str = Field(min_length=1, max_length=255)
+    parent_category: SpendingParentCategory
+    raw_pattern: str = Field(min_length=1, max_length=500)
+    merchant: str | None = Field(default=None, min_length=1, max_length=255)
+    confidence: float = Field(ge=0, le=1)
+    authority: ClassificationAuthority
+    active: bool
+    created_at: datetime
+
+
 class ClassificationUncertainActivity(ClassificationActivityModel):
     kind: ClassificationUncertainKind
     public_id: str = Field(min_length=1, max_length=128)
@@ -253,3 +322,107 @@ class ClassificationActivityOut(ClassificationActivityModel):
     truncated_sections: list[ClassificationActivitySection] = Field(
         default_factory=list, max_length=8
     )
+
+
+class ClassificationActivityRangeCounts(ClassificationActivityModel):
+    transactions: int = Field(ge=0)
+    receipt_items: int = Field(ge=0)
+    categories: int = Field(ge=0)
+    new_categories: int = Field(ge=0)
+    receipt_matches: int = Field(ge=0)
+    new_household_items: int = Field(ge=0)
+    staple_candidates: int = Field(ge=0)
+    aliases: int = Field(ge=0)
+    cadence_updates: int = Field(ge=0)
+    uncertain: int = Field(ge=0)
+
+
+class ClassificationActivityRangeOut(ClassificationActivityModel):
+    """Agent-only bounded local-date retrospective; public v1.0 stays unchanged."""
+
+    schema_version: Literal["1.1"] = "1.1"
+    view: ClassificationActivityRangeView
+    start_date: date
+    end_date: date
+    timezone: str = Field(min_length=1, max_length=64)
+    as_of: datetime
+    counts: ClassificationActivityRangeCounts
+    transactions: list[ClassificationTransactionActivity] = Field(
+        default_factory=list, max_length=20
+    )
+    receipt_items: list[ClassificationReceiptItemActivity] = Field(
+        default_factory=list, max_length=20
+    )
+    categories: list[ClassificationCategoryActivity] = Field(default_factory=list, max_length=20)
+    new_categories: list[ClassificationNewCategoryActivity] = Field(
+        default_factory=list, max_length=20
+    )
+    receipt_matches: list[ClassificationReceiptMatchActivity] = Field(
+        default_factory=list, max_length=20
+    )
+    new_household_items: list[ClassificationHouseholdItemActivity] = Field(
+        default_factory=list, max_length=20
+    )
+    staple_candidates: list[ClassificationStapleCandidateActivity] = Field(
+        default_factory=list, max_length=20
+    )
+    aliases: list[ClassificationAliasActivity] = Field(default_factory=list, max_length=20)
+    cadence_updates: list[ClassificationHouseholdItemActivity] = Field(
+        default_factory=list, max_length=20
+    )
+    uncertain: list[ClassificationUncertainActivity] = Field(default_factory=list, max_length=20)
+    truncated_sections: list[ClassificationActivityRangeSection] = Field(
+        default_factory=list, max_length=10
+    )
+
+    @model_validator(mode="after")
+    def validate_range_and_view(self) -> ClassificationActivityRangeOut:
+        if self.start_date > self.end_date:
+            raise ValueError("start_date must not be after end_date")
+        if (self.end_date - self.start_date).days >= MAX_CLASSIFICATION_ACTIVITY_RANGE_DAYS:
+            raise ValueError(
+                "classification activity range cannot exceed "
+                f"{MAX_CLASSIFICATION_ACTIVITY_RANGE_DAYS} days"
+            )
+        try:
+            ZoneInfo(self.timezone)
+        except (ValueError, ZoneInfoNotFoundError) as exc:
+            raise ValueError("timezone must be a valid IANA timezone") from exc
+
+        rows = {
+            "transactions": self.transactions,
+            "receipt_items": self.receipt_items,
+            "categories": self.categories,
+            "new_categories": self.new_categories,
+            "receipt_matches": self.receipt_matches,
+            "new_household_items": self.new_household_items,
+            "staple_candidates": self.staple_candidates,
+            "aliases": self.aliases,
+            "cadence_updates": self.cadence_updates,
+            "uncertain": self.uncertain,
+        }
+        allowed = (
+            set(rows)
+            if self.view == "summary"
+            else {
+                "categories": {"categories"},
+                "new_categories": {"new_categories"},
+                "matches": {"receipt_matches"},
+                "staples": {"new_household_items"},
+                "staple_candidates": {"staple_candidates"},
+                "aliases": {"aliases"},
+                "cadence": {"cadence_updates"},
+                "uncertain": {"uncertain"},
+            }[self.view]
+        )
+        if any(rows[name] for name in set(rows) - allowed):
+            raise ValueError("classification activity view contains unrelated rows")
+        counts = self.counts.model_dump()
+        if any(len(values) > counts[name] for name, values in rows.items()):
+            raise ValueError("classification activity rows cannot exceed total counts")
+        expected_truncated = {name for name in allowed if counts[name] > len(rows[name])}
+        if set(self.truncated_sections) != expected_truncated:
+            raise ValueError("classification activity truncation must match visible counts")
+        if len(set(self.truncated_sections)) != len(self.truncated_sections):
+            raise ValueError("classification activity truncated sections must be unique")
+        return self

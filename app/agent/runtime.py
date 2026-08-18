@@ -88,6 +88,12 @@ from app.agent.contracts import (
     StrictAgentModel,
     hydrate_persisted_agent_response,
 )
+from app.agent.query_planning import (
+    AgentQueryPlan,
+    QueryObjective,
+    configured_zone,
+    plan_agent_query,
+)
 from app.agent.read_tools import build_read_tool_registry
 from app.agent.service import (
     AgentConflictError,
@@ -119,6 +125,7 @@ from app.models import (
     Errand,
     ExpenseTransaction,
     HouseholdItem,
+    ProactiveAttentionPreference,
     PromotionOffer,
     PurchaseReceipt,
 )
@@ -280,6 +287,8 @@ class RuntimeRequest:
     history: tuple[RuntimeHistoryMessage, ...]
     page_context: AgentPageContext | None
     current_date: date
+    timezone_name: str = "UTC"
+    query_plan: AgentQueryPlan | None = None
     exposed_tool_names: frozenset[str] | None = None
     action_tool_name: str | None = None
     mixed_read_action: bool = False
@@ -529,6 +538,18 @@ def build_run_evidence_bundle(
     )
 
 
+def _explicit_filter_in_user_text(value: Any, user_text: str | None) -> bool:
+    """Accept a model selector only when the user wrote the same bounded phrase."""
+
+    if not isinstance(value, str) or not value.strip() or not user_text:
+        return False
+    normalized_value = " ".join(re.findall(r"[a-z0-9]+", value.casefold()))
+    normalized_text = " ".join(re.findall(r"[a-z0-9]+", user_text.casefold()))
+    if not normalized_value or not normalized_text:
+        return False
+    return f" {normalized_value} " in f" {normalized_text} "
+
+
 class ReadToolExecutor:
     """One-run bridge through the trusted Day 1 registry and persistence layer."""
 
@@ -546,6 +567,7 @@ class ReadToolExecutor:
         progress: RuntimeProgressSink | None = None,
         contextual_policy: ContextualToolPolicy | None = None,
         forced_arguments_by_tool: dict[str, dict[str, Any]] | None = None,
+        forced_argument_overlay_tools: frozenset[str] = frozenset(),
         latest_user_text: str | None = None,
     ) -> None:
         self.registry = registry
@@ -563,6 +585,7 @@ class ReadToolExecutor:
             tool_name: dict(arguments)
             for tool_name, arguments in (forced_arguments_by_tool or {}).items()
         }
+        self.forced_argument_overlay_tools = forced_argument_overlay_tools
         self.call_count = 0
         self.evidence: list[ReadToolEvidence] = []
         self.failures: list[ReadToolFailure] = []
@@ -590,11 +613,28 @@ class ReadToolExecutor:
             # schema carries the nullable field so forced calls validate through
             # the same registry, but ordinary model calls cannot activate it.
             provider_arguments["comparison_mode"] = None
-        effective_arguments = (
-            dict(forced_arguments)
-            if forced_arguments is not None
-            else self.contextual_policy.apply(tool_name, provider_arguments)
-        )
+        overlay_forced_arguments = tool_name in self.forced_argument_overlay_tools
+        if forced_arguments is not None and not overlay_forced_arguments:
+            # Existing exact semantic plans are complete, pinned server plans.
+            # This preserves their protection against model-invented qualifiers.
+            effective_arguments = dict(forced_arguments)
+        elif forced_arguments is None:
+            effective_arguments = self.contextual_policy.apply(tool_name, provider_arguments)
+        else:
+            # A typed plan is complete for objective, dates, page context, and
+            # server-owned financial semantics. Preserve only a merchant/category
+            # selector that appears literally in the user's request; all other
+            # model-supplied selectors are ungrounded and must not narrow the
+            # canonical query or create mutually exclusive date shapes.
+            effective_arguments = dict(forced_arguments)
+            allowed_filters = {
+                "get_spending_insights": ("merchant", "category"),
+                "get_lifestyle_dining_insights": ("merchant",),
+            }.get(tool_name, ())
+            for name in allowed_filters:
+                value = provider_arguments.get(name)
+                if _explicit_filter_in_user_text(value, self.latest_user_text):
+                    effective_arguments[name] = value
         started = time.monotonic()
         await _emit_progress_safely(
             self.progress,
@@ -1031,16 +1071,26 @@ class OpenAIAgentsRuntime:
                 _action_instructions(
                     request.current_date,
                     request.action_tool_name,
+                    timezone_name=request.timezone_name,
                     mixed_read_action=request.mixed_read_action,
                 )
                 if action_mode
-                else _instructions(request.current_date)
+                else _instructions(
+                    request.current_date,
+                    timezone_name=request.timezone_name,
+                    query_plan=request.query_plan,
+                )
             ),
             tools=tools,
             model=OpenAIResponsesModel(self.model_name, client),
             model_settings=ModelSettings(
                 store=False,
                 max_tokens=MAX_AGENT_OUTPUT_TOKENS,
+                tool_choice=(
+                    request.query_plan.tool_name
+                    if request.query_plan is not None and not action_mode
+                    else None
+                ),
                 parallel_tool_calls=False,
                 include_usage=True,
             ),
@@ -1311,10 +1361,66 @@ class ReadOnlyAgentOrchestrator:
                     "invalid_tool_context",
                     "The authenticated workspace context is unavailable.",
                 )
-            current_date = self._now().astimezone(UTC).date()
+            now = self._now()
+            timezone_name = self._configured_agent_timezone(
+                workspace_id=workspace_id,
+                owner_user_id=owner_user_id,
+            )
+            _timezone_name, timezone = configured_zone(timezone_name)
+            current_date = (
+                (now if now.tzinfo is not None else now.replace(tzinfo=UTC))
+                .astimezone(timezone)
+                .date()
+            )
+            previous_user_texts = tuple(
+                message.content
+                for message in history
+                if message.role == "user"
+                and message.public_id != user_message_public_id
+                and isinstance(message.content, str)
+                and message.content.strip()
+            )
+            previous_query_plans: list[AgentQueryPlan] = []
+            bounded_previous_texts = previous_user_texts[-3:]
+            for index, previous_text in enumerate(bounded_previous_texts):
+                previous_plan = plan_agent_query(
+                    previous_text,
+                    now=now,
+                    timezone_name=timezone_name,
+                    page_context=page_context,
+                    previous_plans=tuple(previous_query_plans),
+                    previous_user_texts=bounded_previous_texts[:index],
+                )
+                if previous_plan is not None:
+                    previous_query_plans.append(previous_plan)
+            query_plan = plan_agent_query(
+                text,
+                now=now,
+                timezone_name=timezone_name,
+                page_context=page_context,
+                previous_plans=tuple(previous_query_plans),
+                previous_user_texts=previous_user_texts,
+            )
+            if query_plan is not None and query_plan.objective in {
+                QueryObjective.REPLENISHMENT_DUE,
+                QueryObjective.RECEIPT_STATUS,
+                QueryObjective.ATTENTION_SUMMARY,
+            }:
+                # Existing bounded multi-domain and entity policies remain
+                # authoritative outside the focused analytical objectives.
+                query_plan = None
+            if (
+                query_plan is not None
+                and query_plan.objective is QueryObjective.CHANGE_EXPLANATION
+                and re.search(r"\b(?:transactions?|charges?)\b", text, re.IGNORECASE)
+            ):
+                # This explicitly asks for both aggregate and row evidence; keep
+                # the existing two-tool composition rather than narrowing it.
+                query_plan = None
             forced_arguments_by_tool = dict(
                 _explicit_forced_tool_plan(text, current_date=current_date)
             )
+            forced_argument_overlay_tools: set[str] = set()
             for tool_name, arguments in _explicit_week_comparison_tool_plan(
                 text,
                 current_date=current_date,
@@ -1326,6 +1432,32 @@ class ReadOnlyAgentOrchestrator:
                     tool_name,
                     arguments,
                 )
+            if query_plan is not None:
+                planned_arguments = contextual_policy.apply(query_plan.tool_name, {})
+                if (
+                    query_plan.tool_name == "search_transactions"
+                    and query_plan.activity_type is not None
+                ):
+                    # A typed Lifestyle row follow-up owns its canonical category and
+                    # comparison scope. Stale page/entity recovery defaults cannot be
+                    # combined with that closed selector.
+                    for incompatible in ("category", "transaction_id", "review_status"):
+                        planned_arguments.pop(incompatible, None)
+                    if planned_arguments.get("review_type") == "attention":
+                        planned_arguments.pop("review_type", None)
+                # The typed objective and code-owned time resolver outrank page
+                # defaults. Compatible page-only selectors remain in place when
+                # the user did not replace them explicitly.
+                planned_arguments.update(query_plan.tool_arguments())
+                if query_plan.tool_name == "get_spending_insights":
+                    planned_arguments["comparison_mode"] = query_plan.comparison_mode
+                if re.search(r"\bactual[ -]share\b|\bmy actual share\b", text, re.IGNORECASE):
+                    planned_arguments["spend_basis"] = "actual_share"
+                elif re.search(r"\bcard spend\b", text, re.IGNORECASE):
+                    planned_arguments["spend_basis"] = "card"
+                forced_arguments_by_tool[query_plan.tool_name] = planned_arguments
+                if query_plan.comparison_mode is None:
+                    forced_argument_overlay_tools.add(query_plan.tool_name)
             executor = ReadToolExecutor(
                 registry=self.registry,
                 settings=self.settings,
@@ -1337,6 +1469,7 @@ class ReadOnlyAgentOrchestrator:
                 progress=progress,
                 contextual_policy=contextual_policy,
                 forced_arguments_by_tool=forced_arguments_by_tool,
+                forced_argument_overlay_tools=frozenset(forced_argument_overlay_tools),
                 latest_user_text=text,
             )
             runtime = self.runtime or OpenAIAgentsRuntime(self.settings)
@@ -1344,6 +1477,8 @@ class ReadOnlyAgentOrchestrator:
                 history=_bounded_history(history),
                 page_context=page_context,
                 current_date=current_date,
+                timezone_name=timezone_name,
+                query_plan=query_plan,
                 exposed_tool_names=(
                     (
                         frozenset({action_tool_name, *_TOOL_ORDER})
@@ -1352,7 +1487,8 @@ class ReadOnlyAgentOrchestrator:
                     )
                     if action_mode
                     else (
-                        _sdk_tool_exposure(text, page_context)
+                        (query_plan.exposed_tools if query_plan is not None else None)
+                        or _sdk_tool_exposure(text, page_context)
                         or (
                             frozenset(_TOOL_ORDER)
                             if self.settings.agent_write_actions_enabled
@@ -1371,6 +1507,8 @@ class ReadOnlyAgentOrchestrator:
             self.db.rollback()
             async with asyncio.timeout(MAX_AGENT_RUN_SECONDS):
                 runtime_result = await runtime.run(request, executor=executor)
+                if request.query_plan is not None:
+                    await _ensure_query_plan_evidence(request.query_plan, executor)
                 if action_mode:
                     composition_started = time.monotonic()
                     action_response = self._action_proposal_response(
@@ -1387,6 +1525,7 @@ class ReadOnlyAgentOrchestrator:
                             bundle,
                             user_text=text,
                             current_date=request.current_date,
+                            query_plan=request.query_plan,
                         )
                         response = AgentStructuredResponse(
                             blocks=[*read_response.blocks, *action_response.blocks]
@@ -1446,6 +1585,7 @@ class ReadOnlyAgentOrchestrator:
                 bundle,
                 user_text=text,
                 current_date=request.current_date,
+                query_plan=request.query_plan,
                 include_action_refusal=mixed_read_action,
             )
             composition_latency_ms = _elapsed_ms(composition_started)
@@ -1915,6 +2055,23 @@ class ReadOnlyAgentOrchestrator:
     def _require_read_enabled(self) -> None:
         if not self.settings.agent_enabled or not self.settings.agent_read_tools_enabled:
             raise AgentFeatureDisabledError("agent_disabled", "Agent is not available")
+
+    def _configured_agent_timezone(
+        self,
+        *,
+        workspace_id: int,
+        owner_user_id: int,
+    ) -> str:
+        """Read an existing user preference without creating or mutating one."""
+
+        value = self.db.scalar(
+            select(ProactiveAttentionPreference.timezone).where(
+                ProactiveAttentionPreference.workspace_id == workspace_id,
+                ProactiveAttentionPreference.user_id == owner_user_id,
+            )
+        )
+        timezone_name, _zone = configured_zone(value if isinstance(value, str) else "UTC")
+        return timezone_name
 
     def _validate_page_context(self, page_context: AgentPageContext | None) -> None:
         if page_context is None or page_context.entity is None:
@@ -2390,6 +2547,28 @@ def _has_positive_named_attention_area(user_text: str, pattern: str) -> bool:
     return False
 
 
+async def _ensure_query_plan_evidence(
+    plan: AgentQueryPlan,
+    executor: ReadToolExecutor,
+) -> None:
+    """Require one terminal outcome for a code-owned analytical objective."""
+
+    terminal = {
+        item.tool_name
+        for item in (
+            *executor.evidence,
+            *executor.failures,
+        )
+    }
+    if plan.tool_name in terminal:
+        return
+    try:
+        await executor.invoke(plan.tool_name, plan.tool_arguments())
+    except AgentRuntimeError as exc:
+        if not exc.partial_recoverable:
+            raise
+
+
 async def _ensure_explicit_attention_evidence(
     user_text: str,
     executor: ReadToolExecutor,
@@ -2708,10 +2887,28 @@ def _effective_spend_basis(
     return "card"
 
 
-def _instructions(current_date: date) -> str:
+def _instructions(
+    current_date: date,
+    *,
+    timezone_name: str = "UTC",
+    query_plan: AgentQueryPlan | None = None,
+) -> str:
+    objective_instruction = ""
+    if query_plan is not None:
+        period = (
+            f"{query_plan.date_range.start_date.isoformat()} through "
+            f"{query_plan.date_range.end_date.isoformat()}"
+            if query_plan.date_range is not None
+            else "the validated contextual scope"
+        )
+        objective_instruction = (
+            f"\n- The server resolved objective {query_plan.objective.value}, period {period}, "
+            f"and tool {query_plan.tool_name}. Call that exposed tool once; do not substitute "
+            "another objective, period, or domain."
+        )
     return f"""You are the ExpenseOps read-only household and financial assistant.
 Prompt version: {READ_ONLY_PROMPT_VERSION}.
-Current date: {current_date.isoformat()} (UTC; no user timezone is configured).
+Current date: {current_date.isoformat()} in {timezone_name}.
 
 Rules:
 - Use the supplied ExpenseOps tools for every user-specific transaction, spending,
@@ -2774,6 +2971,7 @@ Rules:
 - After selecting and running the required tools, return only the provided
   evidence_collected completion marker. Do not author facts, prose, cards, or totals;
   ExpenseOps code composes the canonical response from validated same-run evidence.
+{objective_instruction}
 """
 
 
@@ -2781,6 +2979,7 @@ def _action_instructions(
     current_date: date,
     action_tool_name: str | None,
     *,
+    timezone_name: str = "UTC",
     mixed_read_action: bool = False,
 ) -> str:
     if action_tool_name not in {
@@ -2833,7 +3032,7 @@ def _action_instructions(
     )
     return f"""You are the ExpenseOps controlled-action proposal assistant.
 Prompt version: {CONTROLLED_ACTION_PROMPT_VERSION}.
-Current date: {current_date.isoformat()} (UTC; no user timezone is configured).
+Current date: {current_date.isoformat()} in {timezone_name}.
 
 Rules:
 - {tool_rule}
@@ -2911,6 +3110,7 @@ def _grounded_response(
     *,
     user_text: str = "",
     current_date: date | None = None,
+    query_plan: AgentQueryPlan | None = None,
     include_action_refusal: bool = False,
 ) -> AgentStructuredResponse:
     bundle = build_run_evidence_bundle(executor.evidence, executor.failures)
@@ -2918,6 +3118,7 @@ def _grounded_response(
         bundle,
         user_text=user_text,
         current_date=current_date or datetime.now(UTC).date(),
+        query_plan=query_plan,
         include_action_refusal=include_action_refusal,
     )
 
@@ -2927,6 +3128,7 @@ def compose_grounded_response(
     *,
     user_text: str,
     current_date: date,
+    query_plan: AgentQueryPlan | None = None,
     include_action_refusal: bool = False,
 ) -> AgentStructuredResponse:
     """Build one bounded canonical response without trusting model-authored facts."""
@@ -2963,7 +3165,7 @@ def compose_grounded_response(
     elif len(bundle.evidence_sets) > 1 or bundle.unavailable_domains:
         response = _multi_domain_response(bundle)
     else:
-        response = _single_evidence_response(bundle.evidence_sets[0])
+        response = _single_evidence_response(bundle.evidence_sets[0], query_plan=query_plan)
 
     if include_action_refusal:
         response = AgentStructuredResponse(
@@ -2979,13 +3181,22 @@ def compose_grounded_response(
     return response
 
 
-def _single_evidence_response(evidence: ReadToolEvidence) -> AgentStructuredResponse:
+def _single_evidence_response(
+    evidence: ReadToolEvidence,
+    *,
+    query_plan: AgentQueryPlan | None = None,
+) -> AgentStructuredResponse:
+    if query_plan is not None and evidence.tool_name != query_plan.tool_name:
+        raise AgentRuntimeError(
+            "objective_evidence_mismatch",
+            "The retrieved evidence did not match the requested analytical objective.",
+        )
     if evidence.tool_name == "get_classification_activity":
-        return _classification_activity_response(evidence.output)
+        return _classification_activity_response(evidence.output, query_plan=query_plan)
     if evidence.tool_name == "get_spending_insights":
-        return _spending_response(evidence.output)
+        return _spending_response(evidence.output, query_plan=query_plan)
     if evidence.tool_name == "get_lifestyle_dining_insights":
-        return _lifestyle_response(evidence.output)
+        return _lifestyle_response(evidence.output, query_plan=query_plan)
     if evidence.tool_name == "search_transactions":
         return _transaction_response(evidence.output)
     if evidence.tool_name == "get_household_replenishment":
@@ -3741,7 +3952,11 @@ def _errand_is_time_sensitive(row: dict[str, Any], current_date: date) -> bool:
         return False
 
 
-def _lifestyle_response(output: dict[str, Any]) -> AgentStructuredResponse:
+def _lifestyle_response(
+    output: dict[str, Any],
+    *,
+    query_plan: AgentQueryPlan | None = None,
+) -> AgentStructuredResponse:
     summary = output["summary"]
     comparison = output.get("comparison")
     activity_type = str(output["activity_type"])
@@ -3757,7 +3972,7 @@ def _lifestyle_response(output: dict[str, Any]) -> AgentStructuredResponse:
     total = int(summary["total_cents"])
     count = int(summary["transaction_count"])
     average = int(summary["average_cents"])
-    text = (
+    generic_text = (
         f"{label} purchases totaled {_money(currency, total)} across {count} "
         f"transaction{'s' if count != 1 else ''}; the average was {_money(currency, average)}."
     )
@@ -3770,26 +3985,91 @@ def _lifestyle_response(output: dict[str, Any]) -> AgentStructuredResponse:
         previous_count = int(comparison["transaction_count"])
         previous_unknown_shares = int(comparison["unknown_share_transactions"])
         previous_unknown_credit_shares = int(comparison["unknown_credit_share_transactions"])
-        text += (
+        generic_text += (
             f" The comparable prior period had {previous_count} purchase"
             f"{'s' if previous_count != 1 else ''} totaling {_money(currency, previous_total)}."
         )
     unknown_shares = int(summary["unknown_share_transactions"])
     unknown_credit_shares = int(summary["unknown_credit_share_transactions"])
     if unknown_shares or previous_unknown_shares:
-        text += " Actual-share comparisons use confirmed allocations only."
+        generic_text += " Actual-share comparisons use confirmed allocations only."
     if int(output.get("uncertain_transaction_count") or 0):
-        text += " Some Food & Dining transactions remained unclassified by lifestyle subtype."
+        generic_text += (
+            " Some Food & Dining transactions remained unclassified by lifestyle subtype."
+        )
+    objective = query_plan.objective if query_plan is not None else None
+    period_label = _query_period_label(
+        query_plan,
+        start=date.fromisoformat(output["start_date"]),
+        end=date.fromisoformat(output["end_date"]),
+    )
     activities = [
         AgentLifestyleBreakdownItem.model_validate(item)
         for item in list(output.get("activities") or [])[:4]
     ]
+    merchant_limit = (
+        min(query_plan.top_n or 5, 8)
+        if objective is QueryObjective.TOP_MERCHANTS and query_plan is not None
+        else 8
+    )
     merchants = [
         AgentLifestyleBreakdownItem.model_validate(item)
-        for item in list(output.get("top_merchants") or [])[:8]
+        for item in list(output.get("top_merchants") or [])[:merchant_limit]
     ]
+    block_title = f"{label} summary"
+    if objective is QueryObjective.AVERAGE_CHECK:
+        text = (
+            f"Your average {label.casefold()} check {period_label} was "
+            f"{_money(currency, average)} across {count} purchase"
+            f"{'s' if count != 1 else ''}."
+        )
+    elif objective is QueryObjective.CHANGE_EXPLANATION and isinstance(comparison, dict):
+        text = _lifestyle_change_explanation(
+            output,
+            label=label,
+        )
+    elif objective is QueryObjective.LIFESTYLE_FREQUENCY:
+        text = (
+            f"You made {count} {label.casefold()} purchase"
+            f"{'s' if count != 1 else ''} {period_label}, totaling {_money(currency, total)}."
+        )
+    elif objective is QueryObjective.TOP_MERCHANTS:
+        merchant_subject = {
+            "all": "lifestyle and dining",
+            "coffee": "coffee",
+            "restaurants": "restaurant",
+            "delivery": "food-delivery",
+            "nightlife": "nightlife",
+        }[activity_type]
+        block_title = f"Top {merchant_subject} merchants"
+        if merchants:
+            first = merchants[0]
+            text = (
+                f"{first.name} was your top {merchant_subject} merchant {period_label} at "
+                f"{_money(currency, first.amount_cents)} across {first.transaction_count} "
+                f"transaction{'s' if first.transaction_count != 1 else ''}. The "
+                f"{len(merchants)} available top {merchant_subject} merchant"
+                f"{'s are' if len(merchants) != 1 else ' is'} listed below."
+            )
+        else:
+            text = f"ExpenseOps found no eligible {merchant_subject} merchants {period_label}."
+    elif objective is QueryObjective.LIFESTYLE_TOTAL:
+        spend_subject = {
+            "all": "lifestyle and dining",
+            "coffee": "coffee",
+            "restaurants": "restaurants",
+            "delivery": "food delivery",
+            "nightlife": "nightlife",
+        }[activity_type]
+        text = (
+            f"You spent {_money(currency, total)} on {spend_subject} {period_label} across "
+            f"{count} purchase{'s' if count != 1 else ''}; the average was "
+            f"{_money(currency, average)}."
+        )
+    else:
+        text = generic_text
     block = AgentLifestyleSummaryBlock(
-        title=f"{label} summary",
+        title=block_title,
         start_date=date.fromisoformat(output["start_date"]),
         end_date=date.fromisoformat(output["end_date"]),
         previous_start_date=(
@@ -3830,7 +4110,49 @@ def _lifestyle_response(output: dict[str, Any]) -> AgentStructuredResponse:
     return AgentStructuredResponse(blocks=[AgentTextBlock(text=text), block])
 
 
-def _spending_response(output: dict[str, Any]) -> AgentStructuredResponse:
+def _lifestyle_change_explanation(
+    output: dict[str, Any],
+    *,
+    label: str,
+) -> str:
+    currency = str(output["currency_code"])
+    current = output["summary"]
+    previous = output["comparison"]
+    total_delta = int(current["total_cents"]) - int(previous["total_cents"])
+    count_delta = int(current["transaction_count"]) - int(previous["transaction_count"])
+    average_delta = int(current["average_cents"]) - int(previous["average_cents"])
+    if total_delta > 0:
+        lead = f"{label} spending increased by {_money(currency, total_delta)}."
+    elif total_delta < 0:
+        lead = f"{label} spending decreased by {_money(currency, abs(total_delta))}."
+    else:
+        lead = f"{label} spending did not change."
+    text = (
+        f"{lead} Purchase count changed from {int(previous['transaction_count'])} to "
+        f"{int(current['transaction_count'])} ({count_delta:+d}), while the average check "
+        f"changed from {_money(currency, int(previous['average_cents']))} to "
+        f"{_money(currency, int(current['average_cents']))} "
+        f"({_signed_money(currency, average_delta)})."
+    )
+    merchant_changes = [
+        row
+        for row in list(output.get("merchant_changes") or [])
+        if isinstance(row, dict) and int(row.get("delta_cents") or 0) > 0
+    ]
+    if merchant_changes:
+        details = ", ".join(
+            f"{str(row['name'])} ({_signed_money(currency, int(row['delta_cents']))})"
+            for row in merchant_changes[:2]
+        )
+        text += f" The largest measured merchant increases were {details}."
+    return text
+
+
+def _spending_response(
+    output: dict[str, Any],
+    *,
+    query_plan: AgentQueryPlan | None = None,
+) -> AgentStructuredResponse:
     summary = output["summary"]
     comparison = output["comparison"]
     currency = output["currency_code"]
@@ -3882,19 +4204,95 @@ def _spending_response(output: dict[str, Any]) -> AgentStructuredResponse:
             detail = change.get("detail") if isinstance(change, dict) else None
             if isinstance(detail, str) and detail.strip():
                 highlights.append(detail[:500])
-    text, change_percent = _spending_comparison_text(output)
-    top_categories = [
+    default_text, change_percent = _spending_comparison_text(output)
+    all_categories = [
         AgentSpendingBreakdownItem.model_validate(item)
         for item in output.get("categories", [])[:10]
     ]
-    top_merchants = [
+    all_merchants = [
         AgentSpendingBreakdownItem.model_validate(item) for item in output.get("merchants", [])[:10]
     ]
+    objective = query_plan.objective if query_plan is not None else None
+    focus: Literal[
+        "summary",
+        "comparison",
+        "top_categories",
+        "top_merchants",
+        "change_explanation",
+    ] = "summary"
+    requested_limit: int | None = None
+    top_categories = all_categories
+    top_merchants = all_merchants
+    title = "Spending summary"
+    period_label = _query_period_label(query_plan, start=start, end=end)
+    if objective is QueryObjective.TOP_CATEGORIES:
+        focus = "top_categories"
+        requested_limit = query_plan.top_n or 1
+        top_categories = all_categories[:requested_limit]
+        top_merchants = []
+        title = "Top spending categories"
+        if top_categories:
+            first = top_categories[0]
+            coverage = (
+                "confirmed eligible purchase spending"
+                if unknown_shares
+                else "eligible purchase spending"
+            )
+            text = (
+                f"{first.name} was your largest spending category {period_label} at "
+                f"{_money(currency, first.amount_cents)}, representing "
+                f"{first.percentage:.1f}% of {coverage} across "
+                f"{first.transaction_count} transaction"
+                f"{'s' if first.transaction_count != 1 else ''}."
+            )
+        else:
+            text = f"No eligible purchase spending was found {period_label}."
+    elif objective is QueryObjective.TOP_MERCHANTS:
+        focus = "top_merchants"
+        requested_limit = query_plan.top_n or 5
+        top_categories = []
+        top_merchants = all_merchants[:requested_limit]
+        title = f"Top {requested_limit} merchants"
+        if top_merchants:
+            first = top_merchants[0]
+            text = (
+                f"{first.name} was your top merchant {period_label} at "
+                f"{_money(currency, first.amount_cents)} across {first.transaction_count} "
+                f"transaction{'s' if first.transaction_count != 1 else ''}. "
+                f"The {len(top_merchants)} available top merchant"
+                f"{'s are' if len(top_merchants) != 1 else ' is'} listed below."
+            )
+        else:
+            text = f"No eligible merchant purchase spending was found {period_label}."
+    elif objective is QueryObjective.TOTAL_SPEND:
+        top_categories = all_categories[:3]
+        top_merchants = []
+        text = f"You spent {_money(currency, total)} {period_label} on eligible purchases."
+        if credits:
+            text += f" {credits_label} of {_money(currency, credits)} are reported separately."
+        if unknown_shares:
+            text += " My Actual Share uses confirmed allocations only."
+    elif objective is QueryObjective.COMPARE_SPENDING:
+        focus = "comparison"
+        title = "Spending comparison"
+        top_categories = all_categories[:3]
+        top_merchants = []
+        text, change_percent = _direct_spending_comparison_text(output)
+    elif objective is QueryObjective.CHANGE_EXPLANATION:
+        focus = "change_explanation"
+        title = "What changed"
+        top_categories = all_categories[:4]
+        top_merchants = all_merchants[:4]
+        text = _spending_change_explanation(output)
+    else:
+        text = default_text
     return AgentStructuredResponse(
         blocks=[
             AgentTextBlock(text=text),
             AgentSpendingSummaryBlock(
-                title="Spending summary",
+                focus=focus,
+                requested_limit=requested_limit,
+                title=title,
                 start_date=start,
                 end_date=end,
                 currency_code=currency,
@@ -3914,6 +4312,103 @@ def _spending_response(output: dict[str, Any]) -> AgentStructuredResponse:
             ),
         ]
     )
+
+
+def _query_period_label(
+    query_plan: AgentQueryPlan | None,
+    *,
+    start: date,
+    end: date,
+) -> str:
+    if (
+        query_plan is not None
+        and query_plan.date_range is not None
+        and query_plan.date_range.start_date == start
+        and query_plan.date_range.end_date == end
+    ):
+        return query_plan.date_range.label
+    return f"from {start.isoformat()} to {end.isoformat()}"
+
+
+def _direct_spending_comparison_text(output: dict[str, Any]) -> tuple[str, float | None]:
+    currency = str(output["currency_code"])
+    total = int(output["summary"]["total_cents"])
+    previous = int(output["comparison"]["total_cents"])
+    delta = total - previous
+    incomplete = bool(
+        int(output["summary"]["unknown_share_transactions"])
+        or int(output["comparison"]["unknown_share_transactions"])
+    )
+    percent = (
+        round(delta / previous * 100, 1)
+        if previous >= NEAR_ZERO_SPENDING_COMPARISON_CENTS and not incomplete
+        else None
+    )
+    comparison_label = (
+        "the same weekdays last week"
+        if output.get("comparison_mode") == "same_weekdays_last_week"
+        else "the comparable prior period"
+    )
+    if delta > 0:
+        conclusion = "Yes."
+        direction = f"up {_money(currency, delta)}"
+    elif delta < 0:
+        conclusion = "No."
+        direction = f"down {_money(currency, abs(delta))}"
+    else:
+        conclusion = "No."
+        direction = "unchanged"
+    if percent is not None and delta:
+        direction += f" ({abs(percent):.1f}% {'higher' if delta > 0 else 'lower'})"
+    subject = (
+        "Within confirmed actual-share data, eligible purchase spending"
+        if incomplete
+        else "Eligible purchase spending"
+    )
+    text = (
+        f"{conclusion} {subject} is {direction} versus "
+        f"{comparison_label}: {_money(currency, total)} compared with "
+        f"{_money(currency, previous)}."
+    )
+    if incomplete:
+        text += " Confirmed allocations only; an exact percentage is not shown."
+    return text, percent
+
+
+def _spending_change_explanation(output: dict[str, Any]) -> str:
+    currency = str(output["currency_code"])
+    current = output["summary"]
+    previous = output["comparison"]
+    total_delta = int(current["total_cents"]) - int(previous["total_cents"])
+    count_delta = int(current["transaction_count"]) - int(previous["transaction_count"])
+    average_delta = int(current["average_cents"]) - int(previous["average_cents"])
+    if total_delta > 0:
+        lead = f"Eligible purchase spending increased by {_money(currency, total_delta)}."
+    elif total_delta < 0:
+        lead = f"Eligible purchase spending decreased by {_money(currency, abs(total_delta))}."
+    else:
+        lead = "Eligible purchase spending did not change."
+    text = (
+        f"{lead} Purchase count changed from {int(previous['transaction_count'])} to "
+        f"{int(current['transaction_count'])} ({count_delta:+d}), while the average purchase "
+        f"changed from {_money(currency, int(previous['average_cents']))} to "
+        f"{_money(currency, int(current['average_cents']))} "
+        f"({_signed_money(currency, average_delta)})."
+    )
+    contributors: list[tuple[int, str]] = []
+    for item in [*list(output.get("categories") or []), *list(output.get("merchants") or [])]:
+        previous_amount = item.get("previous_amount_cents") if isinstance(item, dict) else None
+        if isinstance(previous_amount, int):
+            delta = int(item["amount_cents"]) - previous_amount
+            if delta > 0:
+                contributors.append((delta, str(item["name"])))
+    contributors.sort(key=lambda value: (-value[0], value[1].casefold()))
+    if contributors:
+        details = ", ".join(
+            f"{name} ({_signed_money(currency, delta)})" for delta, name in contributors[:2]
+        )
+        text += f" The largest measured increases were {details}."
+    return text
 
 
 def _spending_comparison_text(output: dict[str, Any]) -> tuple[str, float | None]:
@@ -4094,23 +4589,47 @@ def _household_response(
     )
 
 
-def _classification_activity_response(output: dict[str, Any]) -> AgentStructuredResponse:
+def _classification_activity_response(
+    output: dict[str, Any],
+    *,
+    query_plan: AgentQueryPlan | None = None,
+) -> AgentStructuredResponse:
     view = str(output.get("view") or "summary")
     counts = dict(output.get("counts") or {})
+    schema_version = str(output.get("schema_version") or "1.0")
+    range_output = schema_version == "1.1"
+    summary_count_keys = (
+        "transactions",
+        "receipt_items",
+        "categories",
+        "new_categories",
+        "receipt_matches",
+        "new_household_items",
+        "staple_candidates",
+        "aliases",
+        "cadence_updates",
+        "uncertain",
+    )
     relevant_count = {
-        "summary": int(counts.get("transactions") or 0)
-        + int(counts.get("receipt_items") or 0)
-        + int(counts.get("receipt_matches") or 0)
-        + int(counts.get("new_household_items") or 0)
-        + int(counts.get("cadence_updates") or 0),
+        "summary": sum(int(counts.get(key) or 0) for key in summary_count_keys),
         "categories": int(counts.get("categories") or 0),
         "new_categories": int(counts.get("new_categories") or 0),
         "matches": int(counts.get("receipt_matches") or 0),
         "staples": int(counts.get("new_household_items") or 0),
+        "staple_candidates": int(counts.get("staple_candidates") or 0),
+        "aliases": int(counts.get("aliases") or 0),
         "cadence": int(counts.get("cadence_updates") or 0),
         "uncertain": int(counts.get("uncertain") or 0),
     }.get(view, 0)
     activity_date = str(output.get("activity_date") or "")
+    start_date = str(output.get("start_date") or activity_date)
+    end_date = str(output.get("end_date") or activity_date)
+    timezone_name = str(output.get("timezone") or "UTC")
+    period = (
+        f"on {start_date} in {timezone_name}"
+        if start_date == end_date
+        else f"from {start_date} through {end_date} in {timezone_name}"
+    )
     if not relevant_count:
         titles = {
             "summary": "No classification activity",
@@ -4118,6 +4637,8 @@ def _classification_activity_response(output: dict[str, Any]) -> AgentStructured
             "new_categories": "No new categories recorded",
             "matches": "No receipt matches recorded",
             "staples": "No new staples recorded",
+            "staple_candidates": "No recent staple candidates",
+            "aliases": "No learned aliases recorded",
             "cadence": "No cadence estimates recorded",
             "uncertain": "Nothing uncertain recorded",
         }
@@ -4126,8 +4647,7 @@ def _classification_activity_response(output: dict[str, Any]) -> AgentStructured
                 AgentEmptyStateBlock(
                     title=titles.get(view, "No classification activity"),
                     message=(
-                        f"ExpenseOps did not record matching classification activity on "
-                        f"{activity_date} UTC."
+                        f"ExpenseOps did not record matching classification activity {period}."
                     ),
                 )
             ]
@@ -4138,63 +4658,123 @@ def _classification_activity_response(output: dict[str, Any]) -> AgentStructured
         "new_categories": "New categories created",
         "matches": "Receipt matches",
         "staples": "New household staples",
+        "staple_candidates": "Potential household staples",
+        "aliases": "Learned aliases",
         "cadence": "Cadence estimates",
         "uncertain": "Optional classification review",
     }
-    descriptions = {
-        "summary": (
-            f"ExpenseOps recorded {int(counts.get('transactions') or 0)} transaction "
-            f"classification decision"
-            f"{'s' if int(counts.get('transactions') or 0) != 1 else ''} and "
-            f"{int(counts.get('receipt_items') or 0)} receipt-item decision"
-            f"{'s' if int(counts.get('receipt_items') or 0) != 1 else ''} on "
-            f"{activity_date} UTC."
+    staple_candidates = list(output.get("staple_candidates") or [])
+    uncertain = list(output.get("uncertain") or [])
+    aliases = list(output.get("aliases") or [])
+    candidate_names = [
+        str(row.get("name") or "").strip()
+        for row in staple_candidates[:5]
+        if isinstance(row, dict) and str(row.get("name") or "").strip()
+    ]
+    uncertain_names = [
+        str(row.get("label") or "").strip()
+        for row in uncertain[:5]
+        if isinstance(row, dict) and str(row.get("label") or "").strip()
+    ]
+    alias_names = [
+        str(row.get("concept") or "").strip()
+        for row in aliases[:5]
+        if isinstance(row, dict) and str(row.get("concept") or "").strip()
+    ]
+    summary_fact_labels = (
+        (
+            "transactions",
+            "transaction classification decision",
+            "transaction classification decisions",
         ),
+        ("receipt_items", "receipt-item decision", "receipt-item decisions"),
+        ("categories", "category used", "categories used"),
+        ("new_categories", "new category", "new categories"),
+        ("receipt_matches", "receipt match outcome", "receipt match outcomes"),
+        ("new_household_items", "new household item", "new household items"),
+        ("staple_candidates", "staple candidate", "staple candidates"),
+        ("aliases", "learned alias", "learned aliases"),
+        ("cadence_updates", "cadence update", "cadence updates"),
+        ("uncertain", "uncertain outcome", "uncertain outcomes"),
+    )
+    summary_facts = [
+        f"{count} {singular if count == 1 else plural}"
+        for key, singular, plural in summary_fact_labels
+        if (count := int(counts.get(key) or 0)) > 0
+    ]
+    summary_detail = (
+        summary_facts[0]
+        if len(summary_facts) == 1
+        else ", ".join(summary_facts[:-1]) + f", and {summary_facts[-1]}"
+    )
+    descriptions = {
+        "summary": f"ExpenseOps recorded {summary_detail} {period}.",
         "categories": (
             f"ExpenseOps used {relevant_count} category group"
-            f"{'s' if relevant_count != 1 else ''} on {activity_date} UTC."
+            f"{'s' if relevant_count != 1 else ''} {period}."
         ),
         "new_categories": (
             f"ExpenseOps created {relevant_count} subcategor"
-            f"{'y' if relevant_count == 1 else 'ies'} on {activity_date} UTC."
+            f"{'y' if relevant_count == 1 else 'ies'} {period}."
         ),
         "matches": (
             f"ExpenseOps recorded {relevant_count} receipt match outcome"
-            f"{'s' if relevant_count != 1 else ''} on {activity_date} UTC."
+            f"{'s' if relevant_count != 1 else ''} {period}."
         ),
         "staples": (
             f"ExpenseOps added {relevant_count} household staple"
-            f"{'s' if relevant_count != 1 else ''} from classification evidence on "
-            f"{activity_date} UTC."
+            f"{'s' if relevant_count != 1 else ''} from classification evidence {period}."
+        ),
+        "staple_candidates": (
+            f"ExpenseOps found {relevant_count} recent purchase"
+            f"{'s' if relevant_count != 1 else ''} that could become household staples"
+            + (f": {', '.join(candidate_names)}." if candidate_names else ".")
+            + " These are learning candidates, not items predicted due."
+        ),
+        "aliases": (
+            f"ExpenseOps learned {relevant_count} alias"
+            f"{'es' if relevant_count != 1 else ''} {period}"
+            + (f": {', '.join(alias_names)}." if alias_names else ".")
         ),
         "cadence": (
             f"ExpenseOps recorded {relevant_count} cadence estimate"
-            f"{'s' if relevant_count != 1 else ''} on {activity_date} UTC."
+            f"{'s' if relevant_count != 1 else ''} {period}."
         ),
         "uncertain": (
             f"ExpenseOps recorded {relevant_count} uncertain outcome"
-            f"{'s' if relevant_count != 1 else ''} on {activity_date} UTC. "
-            "Review is optional and remains correctable."
+            f"{'s' if relevant_count != 1 else ''} {period}"
+            + (f": {', '.join(uncertain_names)}. " if uncertain_names else ". ")
+            + "Review is optional and remains correctable."
         ),
     }
-    block = AgentClassificationActivityBlock.model_validate(
-        {
-            "title": titles.get(view, "Classification activity"),
-            "view": view,
-            "activity_date": activity_date,
-            "timezone": output.get("timezone") or "UTC",
-            "counts": counts,
-            "transactions": output.get("transactions") or [],
-            "receipt_items": output.get("receipt_items") or [],
-            "categories": output.get("categories") or [],
-            "new_categories": output.get("new_categories") or [],
-            "receipt_matches": output.get("receipt_matches") or [],
-            "new_household_items": output.get("new_household_items") or [],
-            "cadence_updates": output.get("cadence_updates") or [],
-            "uncertain": output.get("uncertain") or [],
-            "truncated_sections": output.get("truncated_sections") or [],
-        }
-    )
+    block_payload = {
+        "block_version": schema_version,
+        "title": titles.get(view, "Classification activity"),
+        "view": view,
+        "timezone": timezone_name,
+        "counts": counts,
+        "transactions": output.get("transactions") or [],
+        "receipt_items": output.get("receipt_items") or [],
+        "categories": output.get("categories") or [],
+        "new_categories": output.get("new_categories") or [],
+        "receipt_matches": output.get("receipt_matches") or [],
+        "new_household_items": output.get("new_household_items") or [],
+        "cadence_updates": output.get("cadence_updates") or [],
+        "uncertain": uncertain,
+        "truncated_sections": output.get("truncated_sections") or [],
+    }
+    if range_output:
+        block_payload.update(
+            {
+                "start_date": start_date,
+                "end_date": end_date,
+                "staple_candidates": staple_candidates,
+                "aliases": aliases,
+            }
+        )
+    else:
+        block_payload["activity_date"] = activity_date
+    block = AgentClassificationActivityBlock.model_validate(block_payload)
     return AgentStructuredResponse(blocks=[AgentTextBlock(text=descriptions[view]), block])
 
 
@@ -4597,6 +5177,13 @@ def _money(currency_code: str, amount_cents: int) -> str:
     return f"{sign}{currency_code.upper()} {absolute // 100:,}.{absolute % 100:02d}"
 
 
+def _signed_money(currency_code: str, amount_cents: int) -> str:
+    if amount_cents == 0:
+        return _money(currency_code, 0)
+    sign = "+" if amount_cents > 0 else "-"
+    return f"{sign}{_money(currency_code, abs(amount_cents))}"
+
+
 def _turn_out(
     run: AgentRun,
     user_message: AgentMessage,
@@ -4753,7 +5340,7 @@ def _tool_activity(tool_name: str | None) -> tuple[str, str, str] | None:
         return ("spending", "Checking your spending…", "Spending data is ready.")
     if tool_name == "get_lifestyle_dining_insights":
         return (
-            "spending",
+            "lifestyle",
             "Checking lifestyle and dining activity…",
             "Lifestyle and dining data is ready.",
         )
