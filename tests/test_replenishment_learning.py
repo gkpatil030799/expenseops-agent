@@ -56,6 +56,7 @@ def db(tmp_path):
     )
     Base.metadata.create_all(engine)
     session = sessionmaker(bind=engine)()
+    session.info["workspace_id"] = 1
     try:
         yield session
     finally:
@@ -502,12 +503,14 @@ def test_telegram_gmail_plaid_representations_create_one_acquisition(db):
     db.commit()
     parser = StaticParser(parsed_receipt())
     service = ReceiptIngestionService(db, settings(), parser)
+    shared_artifact = "same receipt artifact"
     telegram = service.ingest_text(
-        source="telegram", source_external_id="tg-dedupe", text="telegram representation"
+        source="telegram", source_external_id="tg-dedupe", text=shared_artifact
     )
     gmail = service.ingest_text(
-        source="gmail", source_external_id="gm-dedupe", text="gmail representation"
+        source="gmail", source_external_id="gm-dedupe", text=shared_artifact
     )
+    assert gmail.id == telegram.id
     service.confirm(telegram.id)
     service.confirm(gmail.id)
     assert db.scalar(select(func.count(HouseholdItemAcquisition.id))) == 1

@@ -296,3 +296,54 @@ def test_alembic_head_matches_sqlalchemy_metadata(tmp_path, monkeypatch):
     get_settings.cache_clear()
     command.check(Config("alembic.ini"))
     get_settings.cache_clear()
+
+
+def test_day16_used_schema_accepts_corrections_and_downgrades_cadence_sources(
+    tmp_path, monkeypatch
+):
+    database_url = f"sqlite:///{tmp_path / 'day16-used-roundtrip.db'}"
+    _upgrade(monkeypatch, database_url, "head")
+    engine = create_engine(database_url)
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                "INSERT INTO classification_decisions "
+                "(workspace_id, source_type, source_entity_id, version, "
+                "spending_parent_category, item_activity_type, replenishment_eligibility, "
+                "confidence, confidence_band, authority, provenance_json, decision_state, "
+                "finalized_at, created_subcategory, created_concept, created_alias, "
+                "created_household_item, created_at) VALUES "
+                "(1, 'transaction', 42, 1, 'food_dining', 'restaurant_meal', "
+                "'not_replenishable', 1.0, 'high', 'user_correction', '[]', 'corrected', "
+                "CURRENT_TIMESTAMP, false, false, false, false, CURRENT_TIMESTAMP)"
+            )
+        )
+        connection.execute(
+            text(
+                "INSERT INTO household_items "
+                "(workspace_id, name, replenishment_mode, cadence_days, cadence_source, "
+                "cadence_confidence, cadence_min_days, cadence_max_days, "
+                "cadence_provenance_json, enabled, created_at, updated_at) VALUES "
+                "(1, 'Used prior item', 'either', 14, 'category_prior', 0.7, 7, 21, "
+                "'{\"source\": \"category_prior\"}', true, CURRENT_TIMESTAMP, "
+                "CURRENT_TIMESTAMP)"
+            )
+        )
+
+    monkeypatch.setenv("DATABASE_URL", database_url)
+    get_settings.cache_clear()
+    command.downgrade(Config("alembic.ini"), "20260817_0032")
+    get_settings.cache_clear()
+    with engine.connect() as connection:
+        assert connection.scalar(
+            text("SELECT cadence_source FROM household_items WHERE name = 'Used prior item'")
+        ) == "adaptive"
+
+    _upgrade(monkeypatch, database_url, "head")
+    with engine.connect() as connection:
+        assert connection.scalar(
+            text("SELECT COUNT(*) FROM classification_decisions")
+        ) == 0
+        assert connection.scalar(
+            text("SELECT cadence_source FROM household_items WHERE name = 'Used prior item'")
+        ) == "adaptive"

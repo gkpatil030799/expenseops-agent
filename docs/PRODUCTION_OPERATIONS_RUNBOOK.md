@@ -84,22 +84,27 @@ Railway upload can run.
 7. Store the public TLS `expenseops_migrator` URL only as the protected GitHub
    `production` environment secret `EXPENSEOPS_MIGRATION_DATABASE_URL`; do not
    put it on any Railway service. Put only the private runtime URL on web,
-   outbox, and both Gmail cron services. Every URL must identify the same
+   outbox, the classification finalizer, and both Gmail cron services. Every URL must identify the same
    production Postgres host/database while using its assigned role. Stage
    variable changes without deploying and verify usernames and the
    secret-free database target fingerprint against the selected production
    Postgres service. The Railway-provided `postgres` URL must not remain on a
    deployed service.
 8. Assign the explicit config paths: web `/railway.web.json`, outbox
-   `/railway.outbox.json`, Gmail receipts
+   `/railway.outbox.json`, classification finalizer
+   `/railway.classification-finalizer.json`, Gmail receipts
    `/railway.gmail-receipts.json`, and Gmail promotions
    `/railway.gmail-promotions.json`. The shared `/railway.json` stays neutral.
 9. Explicitly set `AGENT_WRITE_ACTIONS_ENABLED`, `AGENT_PROACTIVE_ENABLED`, and
-   `AGENT_PURCHASING_ENABLED` to `false` on the outbox and Gmail runtime services.
+   `AGENT_PURCHASING_ENABLED` to `false` on the outbox, classification-finalizer,
+   and Gmail runtime services.
    Keep `AGENT_PURCHASING_ENABLED=false` on web. For web write actions and proactive
    attention, select the exact reviewed rollout state in the protected release inputs;
    the workflow verifies those values against Railway without changing them. Both inputs
    default to `false`, and enabling either still requires production-environment approval.
+   The separate protected `expected_autonomous_classification_enabled` input likewise
+   verifies one identical `AUTONOMOUS_CLASSIFICATION_ENABLED` value across web and every
+   worker; it defaults to `false` and never changes Railway variables.
 10. Configure the protected GitHub `production` environment with the exact
     backup/migration credential and public-certificate contract described
     below. Keep the certificate private key and its password offline and
@@ -150,6 +155,7 @@ The service config paths are part of the release boundary:
 | --- | --- | --- | --- |
 | `expenseops` web | `/railway.web.json` | Restricted runtime role | Uvicorn only; never Alembic |
 | Outbox worker | `/railway.outbox.json` | Restricted runtime role | `python -m app.jobs.outbox` |
+| Classification finalizer | `/railway.classification-finalizer.json` | Restricted runtime role | `python -m app.jobs.classification_finalizer --forever` |
 | Gmail receipts cron | `/railway.gmail-receipts.json` | Restricted runtime role | `python -m app.jobs.gmail_receipts --max-results 25` |
 | Gmail promotions cron | `/railway.gmail-promotions.json` | Restricted runtime role | `python -m app.jobs.promotions sync` |
 
@@ -157,7 +163,9 @@ Set each absolute path in the service's Railway **Settings → Config as Code** 
 does not choose a custom config file. See Railway's
 [custom config file instructions](https://docs.railway.com/config-as-code#using-a-custom-config-as-code-file).
 
-The two cron config files intentionally do not set a schedule. Keep each existing schedule in its
+The classification finalizer is an always-running, bounded polling worker; its default 300-second
+interval is controlled by `CLASSIFICATION_FINALIZER_POLL_SECONDS` and must remain between 30 and
+3,600 seconds. The two Gmail cron config files intentionally do not set a schedule. Keep each existing schedule in its
 Railway service settings, record it before assigning the custom config path, and verify it is
 unchanged afterward. Do not convert a cron into an always-running service during this change.
 
@@ -166,7 +174,7 @@ independent GitHub-push deployments across services. The manual workflow is the 
 a failed migration stage, worker deployment, or cron deployment cannot activate the new web
 revision.
 
-Web, outbox, and crons use `expenseops_runtime`: database `CONNECT`, schema
+Web, outbox, the classification finalizer, and crons use `expenseops_runtime`: database `CONNECT`, schema
 `USAGE`, application-table DML, application-sequence `USAGE`/`SELECT`, and the
 five exact routing-function executions. It has no superuser, `BYPASSRLS`,
 database/schema ownership or creation, temporary-table, role membership, type,
@@ -201,6 +209,7 @@ material.
 The remaining non-secret variables are `RAILWAY_PROJECT_ID`,
 `RAILWAY_PRODUCTION_ENVIRONMENT_ID`,
 `RAILWAY_OUTBOX_SERVICE_ID`,
+`RAILWAY_CLASSIFICATION_FINALIZER_SERVICE_ID`,
 `RAILWAY_GMAIL_RECEIPTS_SERVICE_ID`, `RAILWAY_GMAIL_PROMOTIONS_SERVICE_ID`,
 `RAILWAY_WEB_SERVICE_ID`, `RAILWAY_POSTGRES_SERVICE_ID`, and
 `PRODUCTION_BASE_URL`. Require a reviewer on that environment. The
@@ -254,7 +263,7 @@ revision in that case. Never run the compatibility migration phase against an
 `0029` database, deploy the pre-cutover application, or downgrade `0029`.
 
 For data damage, freeze releases and stop every writer, including web, outbox,
-and cron executions. Select an earlier 90-day encrypted logical artifact,
+the classification finalizer, and cron executions. Select an earlier 90-day encrypted logical artifact,
 retrieve the private key and password only in a trusted offline recovery
 environment, and follow the authenticated, non-streaming procedure in
 **Offline recovery drill** below. Restore into an isolated PostgreSQL 18 target;

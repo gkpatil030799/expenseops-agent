@@ -63,6 +63,13 @@ DAY13_TENANT_TABLES = {
     "proactive_attention_preferences",
     "proactive_attention_deliveries",
 }
+DAY16_TENANT_TABLES = {
+    "classification_subcategories",
+    "classification_concepts",
+    "classification_concept_aliases",
+    "classification_settings",
+    "classification_decisions",
+}
 
 EXPECTED_ROUTING_SIGNATURES = {
     "public.expenseops_route_plaid_item(text)",
@@ -102,7 +109,14 @@ def test_tenant_routing_and_policy_hardening_are_linear_head():
         receipt_revision = scripts.get_revision("20260817_0030")
         memory_revision = scripts.get_revision("20260817_0031")
         attention_revision = scripts.get_revision("20260817_0032")
-        if attention_revision is not None:
+        classification_revision = scripts.get_revision("20260817_0033")
+        if classification_revision is not None:
+            assert receipt_revision.down_revision == "20260815_0029"
+            assert memory_revision.down_revision == "20260817_0030"
+            assert attention_revision.down_revision == "20260817_0031"
+            assert classification_revision.down_revision == "20260817_0032"
+            assert scripts.get_current_head() == "20260817_0033"
+        elif attention_revision is not None:
             assert receipt_revision.down_revision == "20260815_0029"
             assert memory_revision.down_revision == "20260817_0030"
             assert attention_revision.down_revision == "20260817_0031"
@@ -210,7 +224,7 @@ def test_policy_hardening_covers_exact_tenant_model_set_without_escape(monkeypat
         if issubclass(mapper.class_, TenantScoped)
     }
     assert set(migration.TENANT_TABLES) == EXPECTED_TENANT_TABLES
-    assert model_tables == EXPECTED_TENANT_TABLES | DAY13_TENANT_TABLES
+    assert model_tables == EXPECTED_TENANT_TABLES | DAY13_TENANT_TABLES | DAY16_TENANT_TABLES
     assert len(migration.TENANT_TABLES) == len(set(migration.TENANT_TABLES)) == 34
     protected_tables = {*migration.TENANT_TABLES, *migration.TENANT_CHILD_POLICIES}
     assert len(migration.TENANT_CHILD_POLICIES) == 7
@@ -272,6 +286,40 @@ def test_proactive_attention_migration_force_enables_exact_workspace_rls(monkeyp
         assert "WITH CHECK (workspace_id =" in policy
         assert "current_setting('expenseops.workspace_id', true)" in policy
         assert " OR " not in policy
+
+
+def test_classification_migration_force_enables_exact_workspace_rls_and_child_guards(
+    monkeypatch,
+):
+    migration = _migration("20260817_0033")
+    recorder = _RecordingOp()
+    monkeypatch.setattr(migration, "op", recorder)
+
+    migration._install_postgres_tenant_guards()
+
+    assert set(migration.DIRECT_TENANT_TABLES) == DAY16_TENANT_TABLES
+    assert len(migration.DIRECT_TENANT_TABLES) == len(set(migration.DIRECT_TENANT_TABLES)) == 5
+    for table in DAY16_TENANT_TABLES:
+        assert f'ALTER TABLE public."{table}" ENABLE ROW LEVEL SECURITY' in recorder.statements
+        assert f'ALTER TABLE public."{table}" FORCE ROW LEVEL SECURITY' in recorder.statements
+        policy = next(
+            statement
+            for statement in recorder.statements
+            if statement.startswith(
+                f'CREATE POLICY expenseops_workspace_isolation ON public."{table}"'
+            )
+        )
+        assert "USING (workspace_id =" in policy
+        assert "WITH CHECK (workspace_id =" in policy
+        assert "current_setting('expenseops.workspace_id', true)" in policy
+        assert " OR " not in policy
+    joined = "\n".join(recorder.statements)
+    assert "classification_subcategory_id IS NULL OR EXISTS" in joined
+    assert "classification_concept_id IS NULL OR EXISTS" in joined
+    assert "cross-workspace classification subcategory link" in joined
+    assert "cross-workspace classification concept link" in joined
+    assert "cross-workspace receipt transaction link" in joined
+    assert joined.count("ERRCODE = '23514'") >= 4
 
 
 @pytest.mark.skipif(

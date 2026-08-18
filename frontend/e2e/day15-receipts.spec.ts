@@ -3,6 +3,7 @@ import { expect, test, type Page, type TestInfo } from "@playwright/test";
 
 import type { PurchaseReceipt } from "../src/types";
 import { mockAgentApp } from "./fixtures/agent";
+import { emptyClassificationActivity } from "./fixtures/classification";
 
 const COMPLETE_RECEIPT: PurchaseReceipt = {
   id: 151,
@@ -69,6 +70,9 @@ async function installHouseholdReceiptApi(page: Page) {
           accuracy: { evaluated_predictions: 0, confidence_level: "insufficient" },
         },
       });
+    }
+    if (url.pathname === "/api/replenishment/classification-activity") {
+      return route.fulfill({ json: emptyClassificationActivity });
     }
     if (url.pathname === "/api/replenishment/receipts") {
       const bucket = url.searchParams.get("bucket");

@@ -187,6 +187,8 @@ def test_legal_pages_are_public_and_explain_customer_data_controls():
     assert "Information we process" in privacy.text
     assert "does not sell" in privacy.text
     assert "Retention and deletion" in privacy.text
+    assert "receipt photo or PDF bytes" in privacy.text
+    assert "transaction merchant, description, and provider-category evidence" in privacy.text
     assert terms.status_code == 200
     assert "Third-party services" in terms.text
     assert terms.headers["x-content-type-options"] == "nosniff"

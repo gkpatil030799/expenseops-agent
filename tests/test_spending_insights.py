@@ -94,6 +94,41 @@ def test_clean_spend_rules_and_totals_reconcile(tmp_path):
     assert result["data_quality"]["uncategorized_cents"] == 1_000
 
 
+def test_current_canonical_category_overrides_raw_provider_with_legacy_fallback(tmp_path):
+    db, item = _db(tmp_path)
+    canonical = _tx(item, "canonical-coffee", 900, "Travel")
+    canonical.provider_category = "Travel / Lodging"
+    canonical.spending_parent_category = "food_dining"
+    canonical.classification_subcategory_name = "Coffee shops"
+    canonical.classification_activity_type = "coffee_beverage"
+    canonical.replenishment_eligibility = "not_replenishable"
+    canonical.classification_applied_at = datetime.now(UTC)
+    legacy = _tx(item, "legacy-travel", 1_100, "Travel")
+    db.add_all([canonical, legacy])
+    db.commit()
+
+    result = SpendingInsightsService(db).build(
+        start_date=date(2026, 8, 1), end_date=date(2026, 8, 31)
+    )
+
+    assert result["category_breakdown"] == [
+        {
+            "name": "Travel",
+            "amount_cents": 1_100,
+            "transaction_count": 1,
+            "percentage": 55.0,
+            "previous_amount_cents": 0,
+        },
+        {
+            "name": "Food & Dining",
+            "amount_cents": 900,
+            "transaction_count": 1,
+            "percentage": 45.0,
+            "previous_amount_cents": 0,
+        },
+    ]
+
+
 def test_actual_share_uses_signed_in_viewers_owed_share_and_reports_unknown(tmp_path):
     db, item = _db(tmp_path)
     db.add(

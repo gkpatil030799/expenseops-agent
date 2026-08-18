@@ -59,6 +59,7 @@ def db(tmp_path):
     )
     Base.metadata.create_all(engine)
     session = sessionmaker(bind=engine)()
+    session.info["workspace_id"] = 1
     try:
         yield session
     finally:
@@ -317,6 +318,50 @@ def test_parser_sends_original_image_with_private_cost_bounded_payload_and_no_oc
     assert observation.request_count == 1
     assert observation.retry_reason is None
     assert observation.estimated_cost_micros is None
+
+
+def test_parser_preserves_explicit_return_lines_as_signed_nonlearning_adjustments():
+    value = _response_json()
+    value["items"].append(
+        {
+            "name": "RETURNED STORAGE BIN",
+            "quantity": 1,
+            "unit": "each",
+            "unit_price_cents": -1000,
+            "line_total_cents": -1000,
+            "brand": None,
+            "category": "Return",
+            "confidence": 0.97,
+            "is_household_purchase": False,
+            "classification": "non_product_line",
+            "classification_confidence": 0.99,
+            "canonical_name": None,
+        }
+    )
+    value["subtotal_cents"] = 6500
+    value["total_cents"] = 7560
+    captured = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.append(json.loads(request.content))
+        return _provider_response(value)
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        parsed = OpenAIReceiptParser(_settings(), client).parse_attachment(
+            _image_bytes(), "image/jpeg", "receipt.jpg"
+        )
+
+    returned = parsed.items[-1]
+    assert returned.line_total_cents == -1000
+    assert returned.unit_price_cents == -1000
+    assert returned.classification == "non_product_line"
+    assessment = assess_parsed_receipt(parsed)
+    assert assessment.arithmetic_status == "reconciled"
+    assert assessment.quality == "complete"
+    line_schema = captured[0]["text"]["format"]["schema"]["properties"]["items"][
+        "items"
+    ]["properties"]["line_total_cents"]
+    assert line_schema["anyOf"][0]["minimum"] < 0
 
 
 def test_parser_retries_once_for_materially_incomplete_image_and_keeps_better_parse():
@@ -950,7 +995,7 @@ def test_gmail_sync_routes_image_attachment_bytes_into_canonical_ingestion(db, m
         )
 
     class FakeIngestion:
-        def __init__(self, _db, _settings):
+        def __init__(self, _db, _settings, **_kwargs):
             pass
 
         def ingest_attachment(self, **kwargs):

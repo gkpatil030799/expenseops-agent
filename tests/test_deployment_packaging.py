@@ -113,6 +113,11 @@ def test_migration_railway_config_is_one_shot_and_fail_closed():
     [
         ("railway.outbox.json", "python -m app.jobs.outbox", "ON_FAILURE"),
         (
+            "railway.classification-finalizer.json",
+            "python -m app.jobs.classification_finalizer --forever",
+            "ON_FAILURE",
+        ),
+        (
             "railway.gmail-receipts.json",
             "python -m app.jobs.gmail_receipts --max-results 25",
             "NEVER",
@@ -183,6 +188,7 @@ def test_production_release_is_manual_and_all_runtimes_precede_web():
         "EXPENSEOPS_MIGRATION_DATABASE_URL: ${{ secrets.EXPENSEOPS_MIGRATION_DATABASE_URL }}"
     ) in workflow
     assert "RAILWAY_OUTBOX_SERVICE_ID" in workflow
+    assert "RAILWAY_CLASSIFICATION_FINALIZER_SERVICE_ID" in workflow
     assert "RAILWAY_GMAIL_RECEIPTS_SERVICE_ID" in workflow
     assert "RAILWAY_GMAIL_PROMOTIONS_SERVICE_ID" in workflow
     assert "RAILWAY_WEB_SERVICE_ID" in workflow
@@ -191,14 +197,25 @@ def test_production_release_is_manual_and_all_runtimes_precede_web():
         "Apply migrations and reconcile grants before any Railway deployment"
     )
     outbox_step = workflow.index("Deploy outbox worker after migrations succeed")
-    receipts_step = workflow.index("Deploy Gmail receipts cron after outbox succeeds")
+    finalizer_step = workflow.index("Deploy classification finalizer after outbox succeeds")
+    receipts_step = workflow.index(
+        "Deploy Gmail receipts cron after classification finalizer succeeds"
+    )
     promotions_step = workflow.index("Deploy Gmail promotions cron after receipts succeeds")
     web_step = workflow.index("Deploy web only after every runtime succeeds")
-    assert migration_step < outbox_step < receipts_step < promotions_step < web_step
-    assert workflow.count('"${RELEASE_SHA}"') == 4
+    assert (
+        migration_step
+        < outbox_step
+        < finalizer_step
+        < receipts_step
+        < promotions_step
+        < web_step
+    )
+    assert workflow.count('"${RELEASE_SHA}"') == 5
     assert "continue-on-error" not in workflow
     assert "/railway.migrations.json" not in workflow
     assert "/railway.outbox.json" in workflow
+    assert "/railway.classification-finalizer.json" in workflow
     assert "/railway.gmail-receipts.json" in workflow
     assert "/railway.gmail-promotions.json" in workflow
     assert "/railway.web.json" in workflow
@@ -207,10 +224,17 @@ def test_production_release_is_manual_and_all_runtimes_precede_web():
     assert "AGENT_PURCHASING_ENABLED" in workflow
     assert "expected_web_agent_write_actions_enabled:" in workflow
     assert "expected_web_agent_proactive_enabled:" in workflow
+    assert "expected_autonomous_classification_enabled:" in workflow
     assert "Verify approved Agent rollout flags" in workflow
     assert "Verify the Agent remains read only" not in workflow
     assert (
         workflow.count('verify_service_flags "${RAILWAY_OUTBOX_SERVICE_ID}" false false false') == 1
+    )
+    assert (
+        workflow.count(
+            '"${RAILWAY_CLASSIFICATION_FINALIZER_SERVICE_ID}" false false false'
+        )
+        == 1
     )
     assert (
         workflow.count(
@@ -227,6 +251,9 @@ def test_production_release_is_manual_and_all_runtimes_precede_web():
     assert "${EXPECTED_WEB_AGENT_WRITE_ACTIONS_ENABLED}" in workflow
     assert "${EXPECTED_WEB_AGENT_PROACTIVE_ENABLED}" in workflow
     assert "Expected Agent rollout inputs must be true or false." in workflow
+    assert "AUTONOMOUS_CLASSIFICATION_ENABLED does not match the approved release state" in workflow
+    assert workflow.count('verify_classification_flag "${service_id}"') == 1
+    assert workflow.count('"${RAILWAY_CLASSIFICATION_FINALIZER_SERVICE_ID}"') >= 8
     receipt_configuration = workflow[
         workflow.index("Verify receipt processing configuration") : workflow.index(
             "Verify database credentials are isolated by service"
@@ -241,6 +268,15 @@ def test_production_release_is_manual_and_all_runtimes_precede_web():
     assert 'verify_receipt_runtime "${RAILWAY_OUTBOX_SERVICE_ID}"' in receipt_configuration
     assert 'verify_receipt_runtime "${RAILWAY_GMAIL_RECEIPTS_SERVICE_ID}"' in receipt_configuration
     assert 'verify_receipt_runtime "${RAILWAY_WEB_SERVICE_ID}"' in receipt_configuration
+    classification_configuration = workflow[
+        workflow.index("Verify autonomous classification finalizer configuration") : workflow.index(
+            "Verify receipt processing configuration"
+        )
+    ]
+    assert "RAILWAY_CLASSIFICATION_FINALIZER_SERVICE_ID" in classification_configuration
+    assert 'CLASSIFICATION_MODEL // ""' in classification_configuration
+    assert 'OPENAI_API_KEY // ""' in classification_configuration
+    assert '"${classification_model}" != "gpt-5.6-luna"' in classification_configuration
     assert "REQUESTED_RELEASE_SHA: ${{ inputs.release_sha }}" in workflow
     assert "RELEASE_PHASE: ${{ inputs.release_phase }}" in workflow
     assert "COMPATIBILITY_SHA_INPUT: ${{ inputs.compatibility_sha }}" in workflow
@@ -301,7 +337,7 @@ def test_production_release_preflights_topology_hobby_recovery_and_credentials()
     assert "EXPENSEOPS_ROLE_UTILITY=" in workflow
     assert "EXPENSEOPS_RAILWAY_DEPLOY_HELPER=" in workflow
     assert workflow.count('python "${EXPENSEOPS_ROLE_UTILITY}" --reconcile-runtime-grants') == 2
-    assert workflow.count('bash "${EXPENSEOPS_RAILWAY_DEPLOY_HELPER}"') == 4
+    assert workflow.count('bash "${EXPENSEOPS_RAILWAY_DEPLOY_HELPER}"') == 5
     assert "Migration URL does not target the selected production Postgres." in workflow
     assert (
         "EXPENSEOPS_BACKUP_DATABASE_URL: ${{ secrets.EXPENSEOPS_BACKUP_DATABASE_URL }}"
@@ -348,7 +384,8 @@ def test_production_release_preflights_topology_hobby_recovery_and_credentials()
     assert '"20260813_0023"' in recovery
     assert '"20260815_0029"' in recovery
     assert '"20260817_0031"' in recovery
-    assert 'CURRENT_REVISIONS = frozenset({"20260817_0032"})' in recovery
+    assert 'ATTENTION_REVISIONS = frozenset({"20260817_0032"})' in recovery
+    assert 'CURRENT_REVISIONS = frozenset({"20260817_0033"})' in recovery
     assert "tables = APPLICATION_TABLES - PROACTIVE_ATTENTION_TABLES" in recovery
     assert "relations != reviewed_relations" in recovery
     assert "source table inventory differs from the reviewed" in recovery
@@ -483,6 +520,42 @@ def test_production_release_has_explicit_cutover_normal_and_rollback_guards():
     assert "if: ${{ inputs.release_phase != 'rollback' }}" in workflow
 
 
+def test_rollback_does_not_require_or_deploy_day16_finalizer_topology():
+    workflow = (ROOT / ".github/workflows/production-release.yml").read_text(encoding="utf-8")
+
+    required_config = workflow[
+        workflow.index("Verify release commit and required configuration") : workflow.index(
+            "Set up Node.js for the pinned Railway CLI"
+        )
+    ]
+    topology = workflow[
+        workflow.index("Verify Railway service topology before any upload") : workflow.index(
+            "Verify Railway PITR defense in depth"
+        )
+    ]
+    flags = workflow[
+        workflow.index("Verify approved Agent rollout flags") : workflow.index(
+            "Verify receipt processing configuration"
+        )
+    ]
+    database_roles = workflow[
+        workflow.index("Verify database credentials are isolated by service") : workflow.index(
+            "Apply migrations and reconcile grants before any Railway deployment"
+        )
+    ]
+    deploy = workflow[
+        workflow.index("Deploy classification finalizer after outbox succeeds") : workflow.index(
+            "Deploy Gmail receipts cron after classification finalizer succeeds"
+        )
+    ]
+
+    for section in (required_config, topology, flags, database_roles):
+        assert '[[ "${RELEASE_PHASE}" != "rollback" ]]' in section
+        assert "RAILWAY_CLASSIFICATION_FINALIZER_SERVICE_ID" in section
+    assert "if: ${{ inputs.release_phase != 'rollback' }}" in deploy
+    assert "/railway.classification-finalizer.json" in deploy
+
+
 def test_hardened_release_parses_latest_successful_railway_deployment():
     workflow = (ROOT / ".github/workflows/production-release.yml").read_text(encoding="utf-8")
     jq_filter = (
@@ -540,8 +613,10 @@ def test_hobby_recovery_inventory_is_revision_aware_for_attention_migration():
         "APPLICATION_TABLES",
         "AGENT_TABLES",
         "PROACTIVE_ATTENTION_TABLES",
+        "CLASSIFICATION_TABLES",
         "PRE_AGENT_REVISIONS",
         "AGENT_REVISIONS",
+        "ATTENTION_REVISIONS",
         "CURRENT_REVISIONS",
     }
     selected_nodes: list[ast.stmt] = []
@@ -566,11 +641,21 @@ def test_hobby_recovery_inventory_is_revision_aware_for_attention_migration():
     revision_0030 = set(expected_relations("20260817_0030"))
     revision_0031 = set(expected_relations("20260817_0031"))
     revision_0032 = set(expected_relations("20260817_0032"))
+    revision_0033 = set(expected_relations("20260817_0033"))
+    classification_tables = {
+        ("public", "classification_concept_aliases"),
+        ("public", "classification_concepts"),
+        ("public", "classification_decisions"),
+        ("public", "classification_settings"),
+        ("public", "classification_subcategories"),
+    }
 
     assert revision_0030 == revision_0031
     assert revision_0030.isdisjoint(attention_tables)
     assert attention_tables <= revision_0032
     assert revision_0032 - revision_0031 == attention_tables
+    assert revision_0032.isdisjoint(classification_tables)
+    assert revision_0033 - revision_0032 == classification_tables
 
 
 def test_railway_waiter_requires_success_and_fails_closed():
@@ -595,16 +680,65 @@ def test_railway_waiter_requires_success_and_fails_closed():
 
 
 @pytest.mark.parametrize(
-    ("terminal_status", "manifest_matches", "expected_returncode"),
+    (
+        "terminal_status",
+        "manifest_matches",
+        "expected_returncode",
+        "service_id",
+        "config_file",
+        "component",
+    ),
     [
-        ("SUCCESS", True, 0),
-        ("SUCCESS", False, 1),
-        ("FAILED", True, 1),
-        ("CRASHED", True, 1),
+        (
+            "SUCCESS",
+            True,
+            0,
+            "migration-service",
+            "/railway.migrations.json",
+            "migrations",
+        ),
+        (
+            "SUCCESS",
+            False,
+            1,
+            "migration-service",
+            "/railway.migrations.json",
+            "migrations",
+        ),
+        (
+            "FAILED",
+            True,
+            1,
+            "migration-service",
+            "/railway.migrations.json",
+            "migrations",
+        ),
+        (
+            "CRASHED",
+            True,
+            1,
+            "migration-service",
+            "/railway.migrations.json",
+            "migrations",
+        ),
+        (
+            "SUCCESS",
+            True,
+            0,
+            "classification-finalizer-service",
+            "/railway.classification-finalizer.json",
+            "classification-finalizer",
+        ),
     ],
 )
 def test_railway_waiter_blocks_non_successful_terminal_states(
-    tmp_path, terminal_status, manifest_matches, expected_returncode
+    tmp_path,
+    terminal_status,
+    manifest_matches,
+    expected_returncode,
+    service_id,
+    config_file,
+    component,
 ):
     fake_railway = tmp_path / "railway"
     state_file = tmp_path / "deployment-created"
@@ -615,8 +749,8 @@ if [[ "${1:-}" == "link" ]]; then
   exit 0
 fi
 if [[ "${1:-} ${2:-}" == "environment config" ]]; then
-  payload_format='{"services":{"migration-service":{"configFile":"%s"}}}'
-  printf "${payload_format}\\n" "${FAKE_PREFLIGHT_CONFIG_FILE}"
+  payload_format='{"services":{"%s":{"configFile":"%s"}}}'
+  printf "${payload_format}\\n" "${FAKE_SERVICE_ID}" "${FAKE_PREFLIGHT_CONFIG_FILE}"
   exit 0
 fi
 if [[ "${1:-} ${2:-}" == "deployment list" ]]; then
@@ -637,7 +771,7 @@ exit 64
     )
     fake_railway.chmod(0o755)
     release_sha = "a" * 40
-    deploy_manifest = _json_file("railway.migrations.json")["deploy"]
+    deploy_manifest = _json_file(config_file.removeprefix("/"))["deploy"]
     if not manifest_matches:
         deploy_manifest = {**deploy_manifest, "startCommand": "sh -c 'exec false'"}
     deployment_payload = [
@@ -645,8 +779,8 @@ exit 64
             "id": "new-deployment",
             "status": terminal_status,
             "meta": {
-                "cliMessage": f"ExpenseOps production migrations {release_sha}",
-                "configFile": "/railway.migrations.json",
+                "cliMessage": f"ExpenseOps production {component} {release_sha}",
+                "configFile": config_file,
                 "serviceManifest": {"deploy": deploy_manifest},
             },
         }
@@ -654,7 +788,8 @@ exit 64
     env = os.environ.copy()
     env.update(
         {
-            "FAKE_PREFLIGHT_CONFIG_FILE": "/railway.migrations.json",
+            "FAKE_PREFLIGHT_CONFIG_FILE": config_file,
+            "FAKE_SERVICE_ID": service_id,
             "FAKE_DEPLOYMENT_JSON": json.dumps(deployment_payload),
             "FAKE_RAILWAY_STATE": str(state_file),
             "RAILWAY_BIN": str(fake_railway),
@@ -669,10 +804,10 @@ exit 64
         [
             "bash",
             str(ROOT / "scripts/railway_deploy_and_wait.sh"),
-            "migration-service",
-            "/railway.migrations.json",
+            service_id,
+            config_file,
             release_sha,
-            "migrations",
+            component,
         ],
         cwd=ROOT,
         env=env,

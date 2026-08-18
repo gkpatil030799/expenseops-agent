@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   AgentProtocolError,
   parseAgentActionConfirmation,
+  parseClassificationActivityOut,
   parseAgentConversationDetail,
   parseAgentFeedback,
   parseAgentStreamEvent,
@@ -286,6 +287,42 @@ function attentionSummary(overrides: Record<string, unknown> = {}) {
   };
 }
 
+function classificationActivity(overrides: Record<string, unknown> = {}) {
+  return {
+    type: "classification_activity_summary",
+    block_version: "1.0",
+    title: "Categories used",
+    view: "categories",
+    activity_date: "2026-08-17",
+    timezone: "UTC",
+    counts: {
+      transactions: 1,
+      receipt_items: 1,
+      categories: 1,
+      new_categories: 0,
+      receipt_matches: 0,
+      new_household_items: 0,
+      cadence_updates: 0,
+      uncertain: 0,
+    },
+    transactions: [],
+    receipt_items: [],
+    categories: [{
+      parent_category: "food_dining",
+      transaction_count: 1,
+      receipt_item_count: 1,
+      total_count: 2,
+    }],
+    new_categories: [],
+    receipt_matches: [],
+    new_household_items: [],
+    cadence_updates: [],
+    uncertain: [],
+    truncated_sections: [],
+    ...overrides,
+  };
+}
+
 describe("Agent structured-response validation", () => {
   it("accepts the bounded read-only renderer block types", () => {
     const response = supportedResponse();
@@ -503,6 +540,27 @@ describe("Agent structured-response validation", () => {
     expect(parseAgentStructuredResponse(response)).toBe(response);
   });
 
+  it("requires a complete canonical taxonomy when a receipt line carries Day 16 fields", () => {
+    const response = structuredClone(supportedResponse()) as {
+      blocks: Record<string, unknown>[];
+    };
+    const receipt = response.blocks.find((block) => block.type === "receipt_summary");
+    if (!receipt || !Array.isArray(receipt.items)) throw new Error("receipt fixture is missing");
+    const line = receipt.items[0] as Record<string, unknown>;
+    Object.assign(line, {
+      parent_category: "household_home",
+      subcategory: "Paper goods",
+      concept: "Paper towels",
+      activity_type: "household_consumable",
+      replenishment_eligibility: "replenishable",
+      classification_confidence: 0.94,
+    });
+
+    expect(parseAgentStructuredResponse(response)).toBe(response);
+    delete line.activity_type;
+    expect(() => parseAgentStructuredResponse(response)).toThrow(AgentProtocolError);
+  });
+
   it("accepts allowlisted navigation with omitted or compatible entity fields", () => {
     const response = {
       schema_version: "1.0",
@@ -534,6 +592,48 @@ describe("Agent structured-response validation", () => {
     const response = { schema_version: "1.0", blocks: [block] };
 
     expect(parseAgentStructuredResponse(response)).toBe(response);
+  });
+
+  it("accepts a strict bounded classification retrospective", () => {
+    const block = classificationActivity();
+    const response = { schema_version: "1.0", blocks: [block] };
+
+    expect(parseAgentStructuredResponse(response)).toBe(response);
+  });
+
+  it("strictly validates the direct Classification Activity API projection", () => {
+    const block = classificationActivity();
+    const { type: _type, block_version: _blockVersion, title: _title, ...activity } = block;
+    const response = {
+      schema_version: "1.0",
+      as_of: "2026-08-17T18:00:00Z",
+      ...activity,
+    };
+
+    expect(parseClassificationActivityOut(response)).toBe(response);
+    expect(() => parseClassificationActivityOut({ ...response, raw_evidence_json: {} }))
+      .toThrow(AgentProtocolError);
+  });
+
+  it.each([
+    classificationActivity({ block_version: "2.0" }),
+    classificationActivity({ timezone: "America/Phoenix" }),
+    classificationActivity({ secret_provider_payload: { account_id: "forbidden" } }),
+    classificationActivity({
+      categories: [{
+        parent_category: "food_dining",
+        transaction_count: 1,
+        receipt_item_count: 1,
+        total_count: 3,
+      }],
+    }),
+    classificationActivity({ truncated_sections: ["categories"] }),
+    classificationActivity({
+      transactions: [{ merchant: "Must not appear in the categories view" }],
+    }),
+  ])("rejects malformed or inconsistent classification activity", (block) => {
+    expect(() => parseAgentStructuredResponse({ schema_version: "1.0", blocks: [block] }))
+      .toThrow(AgentProtocolError);
   });
 
   it.each([
@@ -864,7 +964,7 @@ describe("Agent semantic-event validation", () => {
     ).toThrow(AgentProtocolError);
   });
 
-  it.each(["replenishment", "receipts", "deals", "errands", "integrations"])(
+  it.each(["replenishment", "receipts", "deals", "errands", "integrations", "classification"])(
     "accepts the safe %s progress activity",
     (activity) => {
       const event = {

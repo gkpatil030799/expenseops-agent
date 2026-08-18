@@ -7,6 +7,24 @@ from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from app.classification_activity_schemas import (
+    ClassificationActivityCounts,
+    ClassificationActivitySection,
+    ClassificationActivityView,
+    ClassificationCategoryActivity,
+    ClassificationHouseholdItemActivity,
+    ClassificationNewCategoryActivity,
+    ClassificationReceiptItemActivity,
+    ClassificationReceiptMatchActivity,
+    ClassificationTransactionActivity,
+    ClassificationUncertainActivity,
+)
+from app.models import (
+    ClassificationActivityType,
+    ReplenishmentEligibility,
+    SpendingParentCategory,
+)
+
 AGENT_CONTRACT_VERSION = "1.0"
 MAX_AGENT_PAGE_CONTEXT_BYTES = 1_536
 
@@ -384,7 +402,31 @@ class AgentReceiptLineSummary(StrictAgentModel):
     line_total_cents: int | None = None
     match_status: Literal["matched", "possible", "unmatched", "ignored"] = "unmatched"
     household_item_name: str | None = Field(default=None, min_length=1, max_length=255)
+    parent_category: SpendingParentCategory | None = None
+    subcategory: str | None = Field(default=None, min_length=1, max_length=128)
+    concept: str | None = Field(default=None, min_length=1, max_length=255)
+    activity_type: ClassificationActivityType | None = None
+    replenishment_eligibility: ReplenishmentEligibility | None = None
+    classification_confidence: float | None = Field(default=None, ge=0, le=1)
     confirmed_acquisition: bool = False
+
+    @model_validator(mode="after")
+    def validate_taxonomy_projection(self) -> AgentReceiptLineSummary:
+        required = (
+            self.parent_category,
+            self.activity_type,
+            self.replenishment_eligibility,
+            self.classification_confidence,
+        )
+        if any(value is not None for value in required) and any(
+            value is None for value in required
+        ):
+            raise ValueError("receipt taxonomy projection must be complete")
+        if self.parent_category is None and (
+            self.subcategory is not None or self.concept is not None
+        ):
+            raise ValueError("receipt taxonomy labels require a complete projection")
+        return self
 
 
 class AgentReceiptSummaryBlock(AgentResponseBlockBase):
@@ -413,6 +455,75 @@ class AgentReceiptSummaryBlock(AgentResponseBlockBase):
     @model_validator(mode="after")
     def preserve_legacy_line_count(self) -> AgentReceiptSummaryBlock:
         self.total_line_count = max(self.total_line_count, len(self.items))
+        return self
+
+
+class AgentClassificationActivityBlock(AgentResponseBlockBase):
+    type: Literal["classification_activity_summary"] = "classification_activity_summary"
+    block_version: Literal["1.0"] = "1.0"
+    title: str = Field(min_length=1, max_length=160)
+    view: ClassificationActivityView
+    activity_date: date
+    timezone: Literal["UTC"] = "UTC"
+    counts: ClassificationActivityCounts
+    transactions: list[ClassificationTransactionActivity] = Field(
+        default_factory=list, max_length=20
+    )
+    receipt_items: list[ClassificationReceiptItemActivity] = Field(
+        default_factory=list, max_length=20
+    )
+    categories: list[ClassificationCategoryActivity] = Field(default_factory=list, max_length=20)
+    new_categories: list[ClassificationNewCategoryActivity] = Field(
+        default_factory=list, max_length=20
+    )
+    receipt_matches: list[ClassificationReceiptMatchActivity] = Field(
+        default_factory=list, max_length=20
+    )
+    new_household_items: list[ClassificationHouseholdItemActivity] = Field(
+        default_factory=list, max_length=20
+    )
+    cadence_updates: list[ClassificationHouseholdItemActivity] = Field(
+        default_factory=list, max_length=20
+    )
+    uncertain: list[ClassificationUncertainActivity] = Field(default_factory=list, max_length=20)
+    truncated_sections: list[ClassificationActivitySection] = Field(
+        default_factory=list, max_length=8
+    )
+
+    @model_validator(mode="after")
+    def validate_view_payload(self) -> AgentClassificationActivityBlock:
+        rows = {
+            "transactions": self.transactions,
+            "receipt_items": self.receipt_items,
+            "categories": self.categories,
+            "new_categories": self.new_categories,
+            "receipt_matches": self.receipt_matches,
+            "new_household_items": self.new_household_items,
+            "cadence_updates": self.cadence_updates,
+            "uncertain": self.uncertain,
+        }
+        counts = self.counts.model_dump()
+        allowed = (
+            set(rows)
+            if self.view == "summary"
+            else {
+                "categories": {"categories"},
+                "new_categories": {"new_categories"},
+                "matches": {"receipt_matches"},
+                "staples": {"new_household_items"},
+                "cadence": {"cadence_updates"},
+                "uncertain": {"uncertain"},
+            }[self.view]
+        )
+        if any(rows[name] for name in set(rows) - allowed):
+            raise ValueError("classification activity view contains unrelated rows")
+        if any(len(values) > counts[name] for name, values in rows.items()):
+            raise ValueError("classification activity rows cannot exceed total counts")
+        expected_truncated = {name for name in allowed if counts[name] > len(rows[name])}
+        if set(self.truncated_sections) != expected_truncated:
+            raise ValueError("classification activity truncation must match visible counts")
+        if len(set(self.truncated_sections)) != len(self.truncated_sections):
+            raise ValueError("classification activity truncated sections must be unique")
         return self
 
 
@@ -516,6 +627,7 @@ AgentEvidenceDomain = Literal[
     "deals",
     "errands",
     "integrations",
+    "classification",
 ]
 AgentAttentionPriority = Literal[
     "action_required",
@@ -532,6 +644,7 @@ _EVIDENCE_DOMAIN_ORDER = (
     "deals",
     "errands",
     "integrations",
+    "classification",
 )
 _ATTENTION_PRIORITY_ORDER = (
     "action_required",
@@ -554,8 +667,8 @@ class AgentAttentionSummaryBlock(AgentResponseBlockBase):
     block_version: Literal["1.0"] = "1.0"
     title: str = Field(min_length=1, max_length=160)
     status: Literal["complete", "partial"]
-    checked_domains: list[AgentEvidenceDomain] = Field(min_length=1, max_length=8)
-    unavailable_domains: list[AgentEvidenceDomain] = Field(default_factory=list, max_length=8)
+    checked_domains: list[AgentEvidenceDomain] = Field(min_length=1, max_length=9)
+    unavailable_domains: list[AgentEvidenceDomain] = Field(default_factory=list, max_length=9)
     items: list[AgentAttentionItem] = Field(default_factory=list, max_length=12)
     items_truncated: bool = False
 
@@ -660,6 +773,7 @@ AgentResponseBlock = Annotated[
     | AgentReplenishmentSummaryBlock
     | AgentDealListBlock
     | AgentReceiptSummaryBlock
+    | AgentClassificationActivityBlock
     | AgentErrandSummaryBlock
     | AgentIntegrationStatusBlock
     | AgentAttentionSummaryBlock
@@ -848,6 +962,7 @@ class AgentToolStartedEvent(AgentStreamEventBase):
         "deals",
         "errands",
         "integrations",
+        "classification",
     ]
     message: str = Field(min_length=1, max_length=160)
 
@@ -862,6 +977,7 @@ class AgentToolCompletedEvent(AgentStreamEventBase):
         "deals",
         "errands",
         "integrations",
+        "classification",
     ]
     message: str = Field(min_length=1, max_length=160)
 

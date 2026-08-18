@@ -53,6 +53,11 @@ APPLICATION_TABLES = (
     "audit_events",
     "auth_identities",
     "auth_sessions",
+    "classification_concept_aliases",
+    "classification_concepts",
+    "classification_decisions",
+    "classification_settings",
+    "classification_subcategories",
     "data_consents",
     "errand_household_items",
     "errand_plan_stop_errands",
@@ -99,6 +104,11 @@ APPLICATION_TABLES = (
     "workspaces",
 )
 
+# The classification ledger is append-only for the application role. Corrections
+# are represented by a new version linked through ``corrects_decision_id``; only
+# the migrator/owner may alter history for lifecycle or recovery operations.
+RUNTIME_APPEND_ONLY_TABLES = ("classification_decisions",)
+
 ROUTING_FUNCTIONS = (
     "public.expenseops_route_plaid_item(text)",
     "public.expenseops_route_telegram_identity(text,text)",
@@ -109,6 +119,11 @@ ROUTING_FUNCTIONS = (
 
 APPLICATION_FUNCTIONS = (
     "public.expenseops_agent_proposal_snapshot_immutable()",
+    "public.expenseops_validate_acquisition_provenance_workspace()",
+    "public.expenseops_validate_classification_decision_source_workspace()",
+    "public.expenseops_validate_receipt_item_classification_workspace()",
+    "public.expenseops_validate_receipt_transaction_workspace()",
+    "public.expenseops_validate_replenishment_feedback_workspace()",
     *ROUTING_FUNCTIONS,
 )
 
@@ -123,6 +138,7 @@ def _text_array(values: Sequence[str]) -> str:
 
 
 TABLE_ARRAY_SQL = _text_array(APPLICATION_TABLES)
+RUNTIME_APPEND_ONLY_TABLE_ARRAY_SQL = _text_array(RUNTIME_APPEND_ONLY_TABLES)
 FUNCTION_ARRAY_SQL = _text_array(APPLICATION_FUNCTIONS)
 ROUTING_FUNCTION_ARRAY_SQL = _text_array(ROUTING_FUNCTIONS)
 
@@ -569,6 +585,11 @@ BEGIN
             IF object_name = 'alembic_version' THEN
                 EXECUTE format(
                     'GRANT SELECT ON TABLE %s TO {RUNTIME_ROLE}',
+                    relation_oid
+                );
+            ELSIF object_name = ANY ({RUNTIME_APPEND_ONLY_TABLE_ARRAY_SQL}) THEN
+                EXECUTE format(
+                    'GRANT SELECT, INSERT ON TABLE %s TO {RUNTIME_ROLE}',
                     relation_oid
                 );
             ELSE
@@ -1281,6 +1302,17 @@ BEGIN
                OR pg_catalog.has_table_privilege('{RUNTIME_ROLE}', relation_oid, 'REFERENCES')
                OR pg_catalog.has_table_privilege('{RUNTIME_ROLE}', relation_oid, 'TRIGGER') THEN
                 RAISE EXCEPTION 'runtime alembic_version privileges are unsafe';
+            END IF;
+        ELSIF object_name = ANY ({RUNTIME_APPEND_ONLY_TABLE_ARRAY_SQL}) THEN
+            IF NOT pg_catalog.has_table_privilege('{RUNTIME_ROLE}', relation_oid, 'SELECT')
+               OR NOT pg_catalog.has_table_privilege('{RUNTIME_ROLE}', relation_oid, 'INSERT')
+               OR pg_catalog.has_table_privilege('{RUNTIME_ROLE}', relation_oid, 'UPDATE')
+               OR pg_catalog.has_table_privilege('{RUNTIME_ROLE}', relation_oid, 'DELETE')
+               OR pg_catalog.has_table_privilege('{RUNTIME_ROLE}', relation_oid, 'TRUNCATE')
+               OR pg_catalog.has_table_privilege('{RUNTIME_ROLE}', relation_oid, 'REFERENCES')
+               OR pg_catalog.has_table_privilege('{RUNTIME_ROLE}', relation_oid, 'TRIGGER') THEN
+                RAISE EXCEPTION 'runtime append-only table privileges are unsafe for public.%',
+                    object_name;
             END IF;
         ELSIF NOT pg_catalog.has_table_privilege('{RUNTIME_ROLE}', relation_oid, 'SELECT')
            OR NOT pg_catalog.has_table_privilege('{RUNTIME_ROLE}', relation_oid, 'INSERT')

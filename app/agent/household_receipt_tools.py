@@ -9,13 +9,16 @@ from sqlalchemy.orm import Session, aliased
 
 from app.agent.tooling import AgentTool, AgentToolContext, AgentToolRegistry, ToolEffect
 from app.models import (
+    ClassificationActivityType,
     ExpenseTransaction,
     HouseholdItem,
     HouseholdItemAcquisition,
     PurchaseReceipt,
     PurchaseReceiptItem,
     ReceiptParseStatus,
+    ReplenishmentEligibility,
     ReplenishmentPrediction,
+    SpendingParentCategory,
     TransactionStatus,
     utc_now,
 )
@@ -121,7 +124,7 @@ class HouseholdReplenishmentOutput(HouseholdReceiptToolModel):
 
 
 class ReceiptsInput(HouseholdReceiptToolModel):
-    view: Literal["recent", "needs_review", "detail"] = "recent"
+    view: Literal["recent", "needs_review", "detail", "latest"] = "recent"
     receipt_id: int | None = Field(default=None, ge=1, le=MAX_DATABASE_IDENTIFIER)
     merchant: str | None = Field(default=None, min_length=1, max_length=255)
     ingested_start_date: str | None = Field(
@@ -151,6 +154,8 @@ class ReceiptsInput(HouseholdReceiptToolModel):
                 raise ValueError("detail cannot be combined with receipt search filters")
         elif self.receipt_id is not None:
             raise ValueError("receipt_id is only supported for detail")
+        if self.view == "latest" and (self.merchant or start or end):
+            raise ValueError("latest cannot be combined with receipt search filters")
         return self
 
 
@@ -194,6 +199,11 @@ class ReceiptLineItem(HouseholdReceiptToolModel):
     ]
     classification_confidence: float = Field(ge=0, le=1)
     canonical_name: str | None = Field(default=None, min_length=1, max_length=255)
+    parent_category: SpendingParentCategory
+    subcategory: str | None = Field(default=None, min_length=1, max_length=128)
+    concept: str | None = Field(default=None, min_length=1, max_length=255)
+    activity_type: ClassificationActivityType
+    replenishment_eligibility: ReplenishmentEligibility
     confirmed_acquisition: bool
 
 
@@ -202,7 +212,7 @@ class ReceiptDetailItem(ReceiptSummaryItem):
 
 
 class ReceiptsOutput(HouseholdReceiptToolModel):
-    view: Literal["recent", "needs_review", "detail"]
+    view: Literal["recent", "needs_review", "detail", "latest"]
     receipts: list[ReceiptSummaryItem] = Field(max_length=MAX_RECEIPT_RESULTS)
     receipt: ReceiptDetailItem | None = None
     total_count: int = Field(ge=0)
@@ -214,6 +224,9 @@ class ReceiptsOutput(HouseholdReceiptToolModel):
         if self.view == "detail":
             if self.receipt is None or self.receipts:
                 raise ValueError("detail view requires exactly one receipt detail")
+        elif self.view == "latest":
+            if self.receipts:
+                raise ValueError("latest view cannot contain receipt list rows")
         elif self.receipt is not None:
             raise ValueError("receipt lists cannot contain a receipt detail")
         return self
@@ -239,7 +252,8 @@ def register_household_receipt_tools(registry: AgentToolRegistry) -> None:
         AgentTool(
             name="get_receipts",
             description=(
-                "Read bounded recent receipts, receipts needing review, or one safe receipt "
+                "Read bounded recent receipts, receipts needing review, the latest receipt "
+                "with categorized lines, or one safe receipt "
                 "detail from the authenticated ExpenseOps workspace. Recent and needs-review "
                 "list rows include bounded tenant-verified confirmed household-item links. "
                 "Use recent when one question combines review status with recent confirmed "
@@ -249,7 +263,7 @@ def register_household_receipt_tools(registry: AgentToolRegistry) -> None:
             input_model=ReceiptsInput,
             output_model=ReceiptsOutput,
             handler=_get_receipts,
-            version="1.2",
+            version="1.3",
         )
     )
 
@@ -469,7 +483,7 @@ def _resolve_household_item_query(
 
 
 def _get_receipts(context: AgentToolContext, values: ReceiptsInput) -> dict:
-    if values.view == "detail":
+    if values.view in {"detail", "latest"}:
         return _receipt_detail(context, values)
 
     criteria = [PurchaseReceipt.workspace_id == context.workspace_id]
@@ -544,14 +558,25 @@ def _get_receipts(context: AgentToolContext, values: ReceiptsInput) -> dict:
 
 
 def _receipt_detail(context: AgentToolContext, values: ReceiptsInput) -> dict:
-    receipt = context.db.scalar(
-        select(PurchaseReceipt).where(
-            PurchaseReceipt.workspace_id == context.workspace_id,
-            PurchaseReceipt.id == values.receipt_id,
+    query = select(PurchaseReceipt).where(PurchaseReceipt.workspace_id == context.workspace_id)
+    if values.view == "detail":
+        query = query.where(PurchaseReceipt.id == values.receipt_id)
+    else:
+        query = query.order_by(PurchaseReceipt.created_at.desc(), PurchaseReceipt.id.desc()).limit(
+            1
         )
-    )
+    receipt = context.db.scalar(query)
     if receipt is None:
-        raise ValueError("Receipt not found.")
+        if values.view == "detail":
+            raise ValueError("Receipt not found.")
+        return {
+            "view": "latest",
+            "receipts": [],
+            "receipt": None,
+            "total_count": 0,
+            "result_limit": values.line_limit,
+            "truncated": False,
+        }
 
     line_scope = (
         PurchaseReceipt.workspace_id == context.workspace_id,
@@ -625,6 +650,13 @@ def _receipt_detail(context: AgentToolContext, values: ReceiptsInput) -> dict:
                 "classification": line.classification or "uncertain",
                 "classification_confidence": float(line.classification_confidence or 0.0),
                 "canonical_name": _clean_optional(line.canonical_name),
+                "parent_category": SpendingParentCategory(line.spending_parent_category),
+                "subcategory": _clean_optional(line.classification_subcategory_name),
+                "concept": _clean_optional(line.classification_concept_name),
+                "activity_type": ClassificationActivityType(line.item_activity_type),
+                "replenishment_eligibility": ReplenishmentEligibility(
+                    line.replenishment_eligibility
+                ),
                 "confirmed_acquisition": line.id in confirmed_line_ids,
             }
             for line in lines

@@ -3,17 +3,23 @@ from __future__ import annotations
 import hashlib
 import logging
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
-from difflib import SequenceMatcher
+from threading import Lock
 
-from sqlalchemy import case, select
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy import and_, case, func, or_, select, update
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session, selectinload
 
 from app.config import Settings, get_settings
 from app.logging_config import log_event
 from app.models import (
-    ExpenseTransaction,
+    ClassificationAuthority,
+    ClassificationConcept,
+    ClassificationDecisionState,
+    DataConsent,
     HouseholdCadenceSource,
     HouseholdItem,
     PurchaseReceipt,
@@ -25,6 +31,11 @@ from app.models import (
     utc_now,
 )
 from app.services.acquisition_service import AcquisitionService
+from app.services.autonomous_classification_service import AutonomousClassificationService
+from app.services.classification_taxonomy_service import (
+    ClassificationTaxonomyError,
+    ClassificationTaxonomyService,
+)
 from app.services.item_normalization_service import (
     ItemNormalizationService,
     normalize_item_name,
@@ -45,8 +56,24 @@ from app.services.receipt_parser_service import (
     assess_parsed_receipt,
     build_receipt_parser,
 )
+from app.services.receipt_transaction_reconciliation_service import (
+    ReceiptTransactionMatchStatus,
+    ReceiptTransactionReconciliationService,
+)
 
 logger = logging.getLogger(__name__)
+
+_RECEIPT_FINGERPRINT_LOCK_NAMESPACE = 1_165_528_402
+
+
+@dataclass
+class _FingerprintLockEntry:
+    lock: Lock = field(default_factory=Lock)
+    users: int = 0
+
+
+_fingerprint_lock_guard = Lock()
+_fingerprint_locks: dict[str, _FingerprintLockEntry] = {}
 
 _REPROCESSABLE_RECEIPT_FAILURE_CODES = frozenset(
     {
@@ -68,10 +95,20 @@ class ReceiptIngestionService:
         db: Session,
         settings: Settings | None = None,
         parser: ReceiptParser | None = None,
+        *,
+        owner_user_id: int | None = None,
     ):
         self.db = db
         self.settings = settings or get_settings()
+        self._parser_requires_stored_consent = bool(
+            parser is None and self.settings.receipt_parser_provider == "openai"
+        )
         self.parser = parser or build_receipt_parser(self.settings)
+        self.owner_user_id = (
+            owner_user_id
+            if isinstance(owner_user_id, int) and owner_user_id > 0
+            else _active_owner_user_id(db)
+        )
 
     def ingest_attachment(
         self,
@@ -93,6 +130,7 @@ class ReceiptIngestionService:
         )
         if existing:
             return existing
+        self._ensure_model_receipt_consent()
         try:
             artifact = build_receipt_artifact(
                 source=source,
@@ -163,7 +201,7 @@ class ReceiptIngestionService:
                 assessment.failure_code or "receipt_image_unreadable",
             )
         self._ensure_scope_still_active()
-        receipt = self._persist(
+        receipt = self._persist_serialized(
             source,
             source_external_id,
             fingerprint,
@@ -201,6 +239,7 @@ class ReceiptIngestionService:
         )
         if existing:
             return existing
+        self._ensure_model_receipt_consent()
         try:
             parsed = self.parser.parse_text(text)
         except ReceiptParserError as exc:
@@ -214,7 +253,7 @@ class ReceiptIngestionService:
                 assessment.failure_code or "receipt_text_unreadable",
             )
         self._ensure_scope_still_active()
-        return self._persist(
+        return self._persist_serialized(
             source,
             source_external_id,
             fingerprint,
@@ -222,6 +261,73 @@ class ReceiptIngestionService:
             failure_code=assessment.failure_code,
             auto_confirm_high_confidence=auto_confirm_high_confidence,
         )
+
+    def _persist_serialized(
+        self,
+        source: str,
+        external_id: str,
+        fingerprint: str,
+        parsed: ParsedReceipt,
+        *,
+        failure_code: str | None,
+        auto_confirm_high_confidence: bool,
+    ) -> PurchaseReceipt:
+        """Claim one successful receipt representation per artifact/workspace.
+
+        The provider call intentionally happens before this short critical
+        section. PostgreSQL's transaction-scoped advisory lock serializes
+        workers across processes; the bounded in-process lock gives SQLite
+        fixtures the same behavior. A second worker always rechecks durable
+        state after acquiring the claim and returns the canonical receipt.
+        """
+
+        with self._fingerprint_ingestion_lock(fingerprint):
+            existing = self._existing(
+                source,
+                external_id,
+                fingerprint,
+                reprocess_transient_failure=True,
+            )
+            if existing is not None:
+                return existing
+            return self._persist(
+                source,
+                external_id,
+                fingerprint,
+                parsed,
+                failure_code=failure_code,
+                auto_confirm_high_confidence=auto_confirm_high_confidence,
+            )
+
+    @contextmanager
+    def _fingerprint_ingestion_lock(self, fingerprint: str) -> Iterator[None]:
+        workspace_id = self.db.info.get("workspace_id")
+        if not isinstance(workspace_id, int) or workspace_id <= 0:
+            raise ValueError("A trusted workspace is required for receipt ingestion.")
+        lock_key = f"{workspace_id}:{fingerprint}"
+        with _fingerprint_lock_guard:
+            entry = _fingerprint_locks.setdefault(lock_key, _FingerprintLockEntry())
+            entry.users += 1
+        entry.lock.acquire()
+        try:
+            if self.db.get_bind().dialect.name == "postgresql":
+                digest = hashlib.sha256(lock_key.encode("utf-8")).digest()
+                signed_key = int.from_bytes(digest[:4], "big", signed=True)
+                self.db.execute(
+                    select(
+                        func.pg_advisory_xact_lock(
+                            _RECEIPT_FINGERPRINT_LOCK_NAMESPACE,
+                            signed_key,
+                        )
+                    )
+                )
+            yield
+        finally:
+            entry.lock.release()
+            with _fingerprint_lock_guard:
+                entry.users -= 1
+                if entry.users == 0:
+                    _fingerprint_locks.pop(lock_key, None)
 
     def get(self, receipt_id: int) -> PurchaseReceipt:
         receipt = self.db.execute(
@@ -260,10 +366,13 @@ class ReceiptIngestionService:
                 line.household_item_id is not None
                 and line.match_status == ReceiptItemMatchStatus.MATCHED.value
             ):
+                if not user_confirmed and not _automatic_acquisition_safe(receipt, line):
+                    continue
                 household_item = self.db.scalar(
                     select(HouseholdItem).where(
                         HouseholdItem.workspace_id == receipt.workspace_id,
                         HouseholdItem.id == line.household_item_id,
+                        HouseholdItem.enabled.is_(True),
                     )
                 )
                 if household_item is None:
@@ -279,10 +388,8 @@ class ReceiptIngestionService:
                     quantity_confidence=line.quantity_confidence,
                     merchant=receipt.merchant_normalized,
                     logical_purchase_key=_logical_purchase_key(
-                        line.household_item_id,
-                        receipt.merchant_normalized,
-                        receipt.purchased_at or receipt.created_at,
-                        receipt.total_cents,
+                        receipt.workspace_id,
+                        line.id,
                     ),
                     receipt_item_id=line.id,
                     transaction_id=receipt.transaction_id,
@@ -298,6 +405,35 @@ class ReceiptIngestionService:
                     merchant=receipt.merchant_normalized,
                     source="confirmed_receipt",
                     confidence=line.match_confidence or 1.0,
+                )
+        taxonomy = ClassificationTaxonomyService(self.db)
+        for line in receipt.items:
+            if line.classification_concept_id is None:
+                continue
+            if not user_confirmed and not _automatic_acquisition_safe(receipt, line):
+                continue
+            concept = self.db.scalar(
+                select(ClassificationConcept).where(
+                    ClassificationConcept.workspace_id == receipt.workspace_id,
+                    ClassificationConcept.id == line.classification_concept_id,
+                )
+            )
+            if concept is None:
+                continue
+            try:
+                with self.db.begin_nested():
+                    taxonomy.learn_alias(
+                        concept,
+                        line.raw_name,
+                        merchant=receipt.merchant_normalized or receipt.merchant_raw,
+                        confidence=1.0,
+                        source=ClassificationAuthority.CONFIRMED_ALIAS,
+                    )
+            except ClassificationTaxonomyError as exc:
+                log_event(
+                    logger,
+                    "confirmed_receipt_classification_alias_skipped",
+                    error_type=type(exc).__name__,
                 )
         receipt.parse_status = ReceiptParseStatus.CONFIRMED.value
         receipt.confirmed_at = utc_now()
@@ -414,9 +550,21 @@ class ReceiptIngestionService:
 
     def ignore(self, receipt_id: int) -> PurchaseReceipt:
         receipt = self.get(receipt_id)
+        linked_transaction_id = receipt.transaction_id
         receipt.parse_status = ReceiptParseStatus.IGNORED.value
         receipt.ignored_at = utc_now()
         receipt.updated_at = utc_now()
+        autonomous = AutonomousClassificationService(
+            self.db,
+            self.settings,
+        )
+        autonomous.revert_ignored_receipt_learning(receipt.id, commit=False)
+        ReceiptTransactionReconciliationService(self.db).reconcile_receipt(receipt)
+        if linked_transaction_id is not None:
+            autonomous.recompute_transaction_from_receipt_state(
+                linked_transaction_id,
+                commit=False,
+            )
         self.db.commit()
         return self.get(receipt.id)
 
@@ -427,6 +575,9 @@ class ReceiptIngestionService:
         receipt.parse_status = ReceiptParseStatus.NEEDS_REVIEW.value
         receipt.ignored_at = None
         receipt.updated_at = utc_now()
+        ReceiptTransactionReconciliationService(self.db).reconcile_receipt(receipt)
+        if self.settings.autonomous_classification_enabled:
+            self._classify_receipt_nonblocking(receipt)
         self.db.commit()
         return self.get(receipt.id)
 
@@ -488,10 +639,8 @@ class ReceiptIngestionService:
                     quantity_confidence=1.0,
                     merchant=receipt.merchant_normalized,
                     logical_purchase_key=_logical_purchase_key(
-                        item.id,
-                        receipt.merchant_normalized,
-                        receipt.purchased_at or receipt.created_at,
-                        receipt.total_cents,
+                        receipt.workspace_id,
+                        line.id,
                     ),
                     receipt_item_id=line.id,
                     transaction_id=receipt.transaction_id,
@@ -574,7 +723,14 @@ class ReceiptIngestionService:
         auto_confirm_high_confidence: bool,
     ) -> PurchaseReceipt:
         merchant_key = normalize_merchant(parsed.merchant)
+        assessment = assess_parsed_receipt(parsed)
+        arithmetic_status = {
+            "reconciled": "verified",
+            "mismatch": "mismatch",
+            "not_checkable": "insufficient_data",
+        }[assessment.arithmetic_status]
         receipt = PurchaseReceipt(
+            owner_user_id=self.owner_user_id,
             source=source,
             source_external_id=external_id,
             content_sha256=fingerprint,
@@ -583,15 +739,17 @@ class ReceiptIngestionService:
             purchased_at=parsed.purchased_at,
             subtotal_cents=parsed.subtotal_cents,
             tax_cents=parsed.tax_cents,
+            tip_cents=parsed.tip_cents,
+            discount_cents=parsed.discount_cents,
             total_cents=parsed.total_cents,
             currency=parsed.currency,
+            line_items_complete=parsed.line_items_complete,
+            quality_warnings_json=list(assessment.warnings),
+            arithmetic_status=arithmetic_status,
             parse_status=ReceiptParseStatus.NEEDS_REVIEW.value,
             parse_confidence=parsed.confidence,
             failure_code=failure_code,
         )
-        receipt.transaction_id, transaction_match_ambiguous = self._reconcile_transaction(receipt)
-        if transaction_match_ambiguous and receipt.failure_code is None:
-            receipt.failure_code = "receipt_transaction_match_ambiguous"
         self.db.add(receipt)
         self.db.flush()
         normalizer = ItemNormalizationService(self.db)
@@ -677,6 +835,23 @@ class ReceiptIngestionService:
                     ),
                 )
             )
+        self.db.flush()
+        # Reconcile only after the complete line set is durable in this
+        # transaction. Only a shared non-null artifact hash may establish a
+        # cross-channel duplicate; equal parsed fields never collapse purchases.
+        transaction_match = ReceiptTransactionReconciliationService(self.db).reconcile_receipt(
+            receipt
+        )
+        transaction_match_ambiguous = (
+            transaction_match.status == ReceiptTransactionMatchStatus.AMBIGUOUS
+        )
+        # Preserve the legacy API/UI disclosure while consumers migrate to the
+        # explicit reconciliation projection. The match service remains the
+        # source of truth for status, evidence, confidence, and timestamps.
+        if transaction_match_ambiguous and receipt.failure_code is None:
+            receipt.failure_code = "receipt_transaction_match_ambiguous"
+        if self.settings.autonomous_classification_enabled:
+            self._classify_receipt_nonblocking(receipt)
         record_audit_once(
             self.db,
             event_type="first_receipt_processed",
@@ -725,6 +900,54 @@ class ReceiptIngestionService:
         ):
             return self.confirm(receipt.id, user_confirmed=False)
         return receipt
+
+    def _classify_receipt_nonblocking(self, receipt: PurchaseReceipt) -> None:
+        """Apply all internal receipt effects atomically or schedule repair."""
+
+        try:
+            # Internal taxonomy, household learning, and cadence estimates are
+            # deliberately best-effort. A classification/storage outage must
+            # never turn a readable receipt into a failed ingestion or restore.
+            with self.db.begin_nested():
+                classification = AutonomousClassificationService(
+                    self.db, self.settings
+                ).classify_receipt(receipt, commit=False)
+                if classification.failures:
+                    # The autonomous service converts bounded apply errors into
+                    # a summary. Raising inside this outer savepoint rolls back a
+                    # new FINAL projection together with incomplete learning.
+                    raise ValueError("autonomous_receipt_classification_incomplete")
+        except (SQLAlchemyError, ValueError) as exc:
+            # New work is unapplied after savepoint rollback. A restored receipt
+            # may retain its prior FINAL projection while its acquisition was
+            # deliberately undone by Ignore. Both states are durable, bounded
+            # repair targets; user corrections are never enrolled.
+            self.db.execute(
+                update(PurchaseReceiptItem)
+                .where(
+                    PurchaseReceiptItem.receipt_id == receipt.id,
+                    or_(
+                        PurchaseReceiptItem.classification_applied_at.is_(None),
+                        and_(
+                            PurchaseReceiptItem.classification_applied_at.is_not(None),
+                            PurchaseReceiptItem.classification_decision_state
+                            == ClassificationDecisionState.FINAL.value,
+                        ),
+                    ),
+                    or_(
+                        PurchaseReceiptItem.classification_authority.is_(None),
+                        PurchaseReceiptItem.classification_authority
+                        != ClassificationAuthority.USER_CORRECTION.value,
+                    ),
+                )
+                .values(classification_retry_at=utc_now())
+            )
+            log_event(
+                logger,
+                "receipt_autonomous_classification_deferred",
+                error_type=type(exc).__name__,
+                retry_scheduled=True,
+            )
 
     def _existing(
         self,
@@ -786,6 +1009,7 @@ class ReceiptIngestionService:
         self, source: str, external_id: str, fingerprint: str, code: str
     ) -> PurchaseReceipt:
         receipt = PurchaseReceipt(
+            owner_user_id=self.owner_user_id,
             source=source,
             source_external_id=external_id,
             content_sha256=fingerprint,
@@ -808,7 +1032,7 @@ class ReceiptIngestionService:
         """Recheck request/job authority after the potentially slow provider call."""
 
         workspace_id = self.db.info.get("workspace_id")
-        user_id = self.db.info.get("user_id")
+        user_id = self.owner_user_id
         if not isinstance(workspace_id, int) or not isinstance(user_id, int):
             return
         membership = self.db.scalar(
@@ -823,38 +1047,28 @@ class ReceiptIngestionService:
         if membership is None or active_user is None:
             raise PermissionError("receipt_scope_revoked")
 
-    def _reconcile_transaction(self, receipt: PurchaseReceipt) -> tuple[int | None, bool]:
-        if receipt.total_cents is None or receipt.purchased_at is None:
-            return None, False
-        purchased = receipt.purchased_at.date()
-        candidates = self.db.execute(
-            select(ExpenseTransaction).where(
-                ExpenseTransaction.amount_cents.between(
-                    max(0, receipt.total_cents - 2), receipt.total_cents + 2
-                ),
-                ExpenseTransaction.date.between(
-                    purchased - timedelta(days=2), purchased + timedelta(days=2)
-                ),
+    def _ensure_model_receipt_consent(self) -> None:
+        if not self._parser_requires_stored_consent:
+            return
+        workspace_id = self.db.info.get("workspace_id")
+        if not isinstance(workspace_id, int):
+            # Unscoped local parser harnesses retain their existing behavior;
+            # every production request/job enters an explicit workspace first.
+            return
+        user_id = self.owner_user_id
+        if not isinstance(user_id, int):
+            raise PermissionError("model_receipt_processing_consent_required")
+        consent = self.db.scalar(
+            select(DataConsent.id).where(
+                DataConsent.workspace_id == workspace_id,
+                DataConsent.user_id == user_id,
+                DataConsent.purpose == "model_receipt_processing",
+                DataConsent.granted.is_(True),
+                DataConsent.revoked_at.is_(None),
             )
-        ).scalars()
-        matches: list[tuple[float, ExpenseTransaction]] = []
-        for tx in candidates:
-            tx_merchant = normalize_merchant(tx.merchant_name or tx.name)
-            score = SequenceMatcher(None, receipt.merchant_normalized or "", tx_merchant).ratio()
-            if score >= 0.55:
-                matches.append((score, tx))
-        matches.sort(key=lambda value: (-value[0], value[1].id))
-        if not matches:
-            return None, False
-        if len(matches) > 1 and abs(matches[0][0] - matches[1][0]) <= 0.05:
-            log_event(
-                logger,
-                "receipt_transaction_match_ambiguous",
-                candidate_count=len(matches),
-            )
-            return None, True
-        log_event(logger, "receipt_transaction_match_success", candidate_count=len(matches))
-        return matches[0][1].id, False
+        )
+        if consent is None:
+            raise PermissionError("model_receipt_processing_consent_required")
 
     def _log_parse_result(
         self,
@@ -898,21 +1112,34 @@ class ReceiptIngestionService:
 
 
 def _logical_purchase_key(
-    household_item_id: int,
-    merchant: str | None,
-    purchased_at,
-    total_cents: int | None,
+    workspace_id: int,
+    receipt_item_id: int,
 ) -> str:
-    identity = "|".join(
-        [
-            str(household_item_id),
-            merchant or "",
-            purchased_at.date().isoformat(),
-            str(total_cents) if total_cents is not None else "unknown",
-        ]
-    )
+    identity = f"receipt-item|{workspace_id}|{receipt_item_id}"
     return hashlib.sha256(identity.encode("utf-8")).hexdigest()
+
+
+def _automatic_acquisition_safe(
+    receipt: PurchaseReceipt,
+    line: PurchaseReceiptItem,
+) -> bool:
+    if receipt.purchased_at is None:
+        return False
+    purchased_at = _aware(receipt.purchased_at)
+    ingested_at = _aware(receipt.created_at)
+    return bool(
+        ingested_at - timedelta(days=730) <= purchased_at <= ingested_at + timedelta(days=1)
+        and receipt.arithmetic_status == "verified"
+        and receipt.line_items_complete
+        and line.line_total_cents is not None
+        and line.line_total_cents > 0
+    )
 
 
 def _aware(value: datetime) -> datetime:
     return value if value.tzinfo else value.replace(tzinfo=UTC)
+
+
+def _active_owner_user_id(db: Session) -> int | None:
+    user_id = db.info.get("user_id")
+    return user_id if isinstance(user_id, int) and user_id > 0 else None

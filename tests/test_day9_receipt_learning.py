@@ -31,6 +31,7 @@ def db(tmp_path):
     )
     Base.metadata.create_all(engine)
     session = sessionmaker(bind=engine)()
+    session.info["workspace_id"] = 1
     try:
         yield session
     finally:

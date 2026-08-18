@@ -6,6 +6,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from sqlalchemy import func, or_, select
 
+from app.agent.classification_activity_tool import register_classification_activity_tool
 from app.agent.deals_errands_tools import register_deals_errands_tools
 from app.agent.household_receipt_tools import register_household_receipt_tools
 from app.agent.integration_read_tool import register_integration_read_tool
@@ -299,6 +300,7 @@ class TransactionSearchOutput(ReadToolModel):
 
 def build_read_tool_registry(settings: Settings) -> AgentToolRegistry:
     registry = AgentToolRegistry(settings)
+    register_classification_activity_tool(registry)
     registry.register(
         AgentTool(
             name="get_spending_insights",

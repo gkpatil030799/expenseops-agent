@@ -14,7 +14,7 @@ def test_application_table_allowlist_matches_metadata_plus_alembic_version():
         *Base.metadata.tables,
         "alembic_version",
     }
-    assert len(bootstrap.APPLICATION_TABLES) == len(set(bootstrap.APPLICATION_TABLES)) == 54
+    assert len(bootstrap.APPLICATION_TABLES) == len(set(bootstrap.APPLICATION_TABLES)) == 59
 
 
 def test_role_plan_has_exact_attributes_and_no_membership_inheritance():
@@ -55,6 +55,14 @@ def test_role_plan_establishes_owner_and_least_privilege_default_acls():
     assert "GRANT USAGE ON SCHEMA public TO expenseops_backup" in plan
     assert plan.count("REVOKE ALL PRIVILEGES ON SCHEMA public FROM PUBLIC") == 2
     assert "GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE %s TO expenseops_runtime" in plan
+    assert bootstrap.RUNTIME_APPEND_ONLY_TABLES == ("classification_decisions",)
+    assert "GRANT SELECT, INSERT ON TABLE %s TO expenseops_runtime" in plan
+    append_only_grant = plan.split(
+        "ELSIF object_name = ANY (ARRAY['classification_decisions']::text[]) THEN",
+        maxsplit=1,
+    )[1].split("ELSE", maxsplit=1)[0]
+    assert "UPDATE" not in append_only_grant
+    assert "DELETE" not in append_only_grant
     assert "GRANT USAGE, SELECT ON SEQUENCE %s TO expenseops_runtime" in plan
     assert "GRANT SELECT ON TABLE %s TO expenseops_backup" in plan
     assert "GRANT SELECT ON SEQUENCE %s TO expenseops_backup" in plan
@@ -205,6 +213,20 @@ def test_runtime_function_allowlist_is_exact_and_secret_routed():
     assert "GRANT EXECUTE ON ALL FUNCTIONS" not in plan
     assert "allowed_function_oids" in plan
     assert "runtime function privilege is unsafe" in plan
+
+
+def test_application_function_allowlist_includes_day16_tenant_guards_without_runtime_execute():
+    tenant_guard_functions = {
+        "public.expenseops_validate_acquisition_provenance_workspace()",
+        "public.expenseops_validate_classification_decision_source_workspace()",
+        "public.expenseops_validate_receipt_item_classification_workspace()",
+        "public.expenseops_validate_receipt_transaction_workspace()",
+        "public.expenseops_validate_replenishment_feedback_workspace()",
+    }
+
+    assert tenant_guard_functions <= set(bootstrap.APPLICATION_FUNCTIONS)
+    assert tenant_guard_functions.isdisjoint(bootstrap.ROUTING_FUNCTIONS)
+    assert len(bootstrap.APPLICATION_FUNCTIONS) == len(set(bootstrap.APPLICATION_FUNCTIONS))
 
 
 def test_default_invocation_is_non_connecting_secret_free_dry_run(monkeypatch, capsys):

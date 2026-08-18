@@ -6,6 +6,15 @@
  * the canonical runtime validator and authorization boundary.
  */
 
+import type {
+  ClassificationActivityCounts,
+  ClassificationActivityRows,
+  ClassificationActivityView,
+  ClassificationActivityType,
+  ReplenishmentEligibility,
+  SpendingParentCategory,
+} from "../classificationActivity";
+
 export const AGENT_SCHEMA_VERSION = "1.0" as const;
 
 export type AgentSchemaVersion = typeof AGENT_SCHEMA_VERSION;
@@ -255,6 +264,12 @@ export type AgentReceiptLineSummary = {
   line_total_cents?: number | null;
   match_status: "matched" | "possible" | "unmatched" | "ignored";
   household_item_name?: string | null;
+  parent_category?: SpendingParentCategory | null;
+  subcategory?: string | null;
+  concept?: string | null;
+  activity_type?: ClassificationActivityType | null;
+  replenishment_eligibility?: ReplenishmentEligibility | null;
+  classification_confidence?: number | null;
   confirmed_acquisition: boolean;
 };
 
@@ -343,6 +358,18 @@ export type AgentIntegrationStatusBlock = AgentResponseBlockBase & {
   integrations: AgentIntegrationStatusItem[];
 };
 
+export type AgentClassificationActivityBlock =
+  AgentResponseBlockBase &
+  ClassificationActivityRows & {
+    type: "classification_activity_summary";
+    block_version: "1.0";
+    title: string;
+    view: ClassificationActivityView;
+    activity_date: string;
+    timezone: "UTC";
+    counts: ClassificationActivityCounts;
+  };
+
 export type AgentAttentionDomain =
   | "spending"
   | "lifestyle"
@@ -351,7 +378,8 @@ export type AgentAttentionDomain =
   | "receipts"
   | "deals"
   | "errands"
-  | "integrations";
+  | "integrations"
+  | "classification";
 
 export type AgentAttentionPriority =
   | "action_required"
@@ -458,6 +486,7 @@ export type AgentResponseBlock =
   | AgentReceiptSummaryBlock
   | AgentErrandSummaryBlock
   | AgentIntegrationStatusBlock
+  | AgentClassificationActivityBlock
   | AgentAttentionSummaryBlock
   | AgentNavigationBlock
   | AgentActionConfirmationBlock
@@ -564,7 +593,8 @@ export type AgentToolActivity =
   | "receipts"
   | "deals"
   | "errands"
-  | "integrations";
+  | "integrations"
+  | "classification";
 
 export type AgentToolStartedEvent = AgentStreamEventBase & {
   type: "tool_started";

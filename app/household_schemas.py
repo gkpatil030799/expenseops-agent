@@ -69,7 +69,15 @@ class HouseholdItemOut(BaseModel):
     preferred_place_address: str | None
     replenishment_mode: ReplenishmentModeValue
     cadence_days: int | None
-    cadence_source: Literal["configured", "learning", "observed", "adaptive"]
+    cadence_source: Literal[
+        "configured",
+        "learning",
+        "category_prior",
+        "model_prior",
+        "observed",
+        "quantity_adjusted",
+        "adaptive",
+    ]
     last_acquired_at: datetime | None
     snoozed_until: datetime | None
     enabled: bool

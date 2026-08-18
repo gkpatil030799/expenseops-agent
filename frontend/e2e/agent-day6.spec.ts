@@ -16,6 +16,7 @@ import {
   waitForAgentStreamPause,
   type RecordedAgentStreamCall,
 } from "./fixtures/agent";
+import { emptyClassificationActivity } from "./fixtures/classification";
 
 const ATTENTION_RESPONSE: AgentStructuredResponse = {
   schema_version: "1.0",
@@ -485,6 +486,7 @@ async function mockHouseholdItem(page: Page): Promise<void> {
           decision_reason: null,
         },
       },
+      "/api/replenishment/classification-activity": emptyClassificationActivity,
       "/api/replenishment/gmail/status": { configured: true, last_successful_sync_at: null, latest_receipt_at: null },
     };
     if (url.pathname === "/api/replenishment/receipts") return route.fulfill({ json: emptyPage });

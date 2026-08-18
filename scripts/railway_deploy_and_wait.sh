@@ -22,6 +22,7 @@ fi
 case "${release_component}:${expected_config_file}" in
   migrations:/railway.migrations.json \
     |outbox:/railway.outbox.json \
+    |classification-finalizer:/railway.classification-finalizer.json \
     |gmail-receipts:/railway.gmail-receipts.json \
     |gmail-promotions:/railway.gmail-promotions.json \
     |web:/railway.web.json)
