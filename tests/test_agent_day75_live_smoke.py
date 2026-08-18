@@ -195,7 +195,7 @@ def test_live_day75_purchase_spend_comparison_and_category_ranking() -> None:
             assert [(call.tool_name, call.status) for call in comparison_calls] == [
                 ("get_spending_insights", "completed")
             ]
-            assert comparison_calls[0].tool_version == "1.2"
+            assert comparison_calls[0].tool_version == "1.3"
             comparison_arguments = comparison_calls[0].arguments_json
             assert comparison_arguments["spend_basis"] in {None, "card"}
             assert {

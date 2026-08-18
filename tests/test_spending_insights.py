@@ -680,3 +680,102 @@ def test_default_comparison_mode_remains_immediately_preceding(tmp_path):
     assert result["range"]["comparison_mode"] == "immediately_preceding"
     assert result["range"]["previous_start_date"] == "2026-08-07"
     assert result["range"]["previous_end_date"] == "2026-08-09"
+
+
+def test_explicit_spending_comparison_uses_exact_canonical_period(tmp_path):
+    db, item = _db(tmp_path)
+    current = _tx(
+        item,
+        "current-bistro",
+        3_000,
+        "Restaurants",
+        occurred_on=date(2026, 8, 10),
+    )
+    previous = _tx(
+        item,
+        "previous-bistro",
+        1_700,
+        "Restaurants",
+        occurred_on=date(2026, 6, 15),
+    )
+    current.merchant_name = previous.merchant_name = "Bistro"
+    db.add_all([current, previous])
+    db.commit()
+
+    result = SpendingInsightsService(db).build(
+        start_date=date(2026, 8, 1),
+        end_date=date(2026, 8, 17),
+        comparison_start_date=date(2026, 6, 1),
+        comparison_end_date=date(2026, 6, 30),
+    )
+
+    assert result["range"]["previous_start_date"] == "2026-06-01"
+    assert result["range"]["previous_end_date"] == "2026-06-30"
+    assert result["summary"]["total_cents"] == 3_000
+    assert result["comparison"]["total_cents"] == 1_700
+    assert result["merchant_breakdown"][0]["previous_amount_cents"] == 1_700
+
+
+@pytest.mark.parametrize(
+    "comparison_values",
+    [
+        {"comparison_start_date": date(2026, 7, 1)},
+        {
+            "comparison_start_date": date(2026, 7, 31),
+            "comparison_end_date": date(2026, 7, 1),
+        },
+        {
+            "comparison_start_date": date(2024, 1, 1),
+            "comparison_end_date": date(2026, 1, 2),
+        },
+        {
+            "comparison_start_date": date(2026, 7, 1),
+            "comparison_end_date": date(2026, 7, 31),
+            "comparison_mode": "same_weekdays_last_week",
+        },
+    ],
+    ids=["partial", "reversed", "over-bound", "mode-conflict"],
+)
+def test_explicit_spending_comparison_rejects_invalid_contract(
+    tmp_path,
+    comparison_values,
+):
+    db, _item = _db(tmp_path)
+
+    with pytest.raises(ValueError):
+        SpendingInsightsService(db).build(
+            start_date=date(2026, 8, 1),
+            end_date=date(2026, 8, 17),
+            **comparison_values,
+        )
+
+
+def test_merchant_breakdown_carries_canonical_previous_period_amounts(tmp_path):
+    db, item = _db(tmp_path)
+    current = _tx(item, "current-cafe", 2_500, "Restaurants")
+    current.merchant_name = "Corner Cafe"
+    previous = _tx(
+        item,
+        "previous-cafe",
+        1_600,
+        "Restaurants",
+        occurred_on=date(2026, 7, 10),
+    )
+    previous.merchant_name = "Corner Cafe"
+    db.add_all([current, previous])
+    db.commit()
+
+    result = SpendingInsightsService(db).build(
+        start_date=date(2026, 8, 1),
+        end_date=date(2026, 8, 31),
+    )
+
+    assert result["merchant_breakdown"] == [
+        {
+            "name": "Corner Cafe",
+            "amount_cents": 2_500,
+            "transaction_count": 1,
+            "percentage": 100.0,
+            "previous_amount_cents": 1_600,
+        }
+    ]

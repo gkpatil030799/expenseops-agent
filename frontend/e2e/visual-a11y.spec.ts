@@ -2,6 +2,7 @@ import AxeBuilder from "@axe-core/playwright";
 import { expect, test, type Page } from "@playwright/test";
 
 import { emptyClassificationActivity } from "./fixtures/classification";
+import { mockInsightsDateRanges } from "./fixtures/insights";
 
 const context = {
   user: {
@@ -59,6 +60,7 @@ async function mockExpenseDashboard(page: Page, transactions: unknown[] = []) {
 }
 
 async function mockSpendingInsights(page: Page) {
+  await mockInsightsDateRanges(page);
   await page.route("**/api/insights/spending?**", (route) => route.fulfill({ json: {
     range: {
       start_date: "2026-07-14",

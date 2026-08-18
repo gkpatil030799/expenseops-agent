@@ -206,12 +206,20 @@ export async function streamAgentTurn({
   const parser = new AgentSseParser();
   let terminal = false;
   let expectedSequence = 0;
+  let streamRunPublicId: string | null = null;
   const acceptEvent = (event: AgentStreamEvent) => {
     if (terminal) {
       throw new AgentProtocolError("ExpenseOps received data after the Agent turn ended.");
     }
     if (event.sequence !== expectedSequence) {
       throw new AgentProtocolError("ExpenseOps received an out-of-order Agent response.");
+    }
+    if (event.run_public_id !== null) {
+      if (streamRunPublicId === null) {
+        streamRunPublicId = event.run_public_id;
+      } else if (event.run_public_id !== streamRunPublicId) {
+        throw new AgentProtocolError("ExpenseOps received an Agent response for another run.");
+      }
     }
     expectedSequence += 1;
     onEvent(event);

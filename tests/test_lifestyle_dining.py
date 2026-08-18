@@ -1,6 +1,7 @@
 import json
 from datetime import UTC, date, datetime
 
+import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
@@ -88,6 +89,47 @@ def test_lifestyle_uses_purchase_only_canonical_spend_and_preserves_uncertainty(
     assert sum(row["amount_cents"] for row in all_lifestyle["activities"]) == 9_800
     assert all_lifestyle["uncertain_transaction_count"] == 1
     assert "groceries" not in {row["name"] for row in all_lifestyle["top_merchants"]}
+
+
+def test_lifestyle_merchant_limit_bounds_canonical_ranking(tmp_path):
+    db, item, _ = _db(tmp_path)
+    db.add_all(
+        [
+            _tx(
+                item,
+                f"restaurant-{index}",
+                amount,
+                "FOOD_AND_DRINK / RESTAURANT",
+                date(2026, 8, 12),
+                merchant=merchant,
+            )
+            for index, (merchant, amount) in enumerate(
+                (("Mesa Kitchen", 6_000), ("Tempe Table", 3_000), ("Desert Grill", 1_000)),
+                start=1,
+            )
+        ]
+    )
+    db.commit()
+
+    result = LifestyleDiningService(db).build(
+        start_date=date(2026, 8, 1),
+        end_date=date(2026, 8, 17),
+        activity_type="restaurants",
+        include_comparison=False,
+        merchant_limit=2,
+    )
+
+    assert [row["name"] for row in result["top_merchants"]] == [
+        "Mesa Kitchen",
+        "Tempe Table",
+    ]
+    with pytest.raises(ValueError, match="merchant_limit"):
+        LifestyleDiningService(db).build(
+            start_date=date(2026, 8, 1),
+            end_date=date(2026, 8, 17),
+            activity_type="restaurants",
+            merchant_limit=9,
+        )
 
 
 def test_lifestyle_prefers_canonical_activity_over_conflicting_provider_label(tmp_path):
@@ -218,6 +260,164 @@ def test_lifestyle_copy_is_factual_and_not_judgmental(tmp_path):
         word in text
         for word in ("addict", "problem", "unhealthy", "relationship", "religion", "moral")
     )
+
+
+def test_lifestyle_merchant_changes_use_canonical_purchase_deltas(tmp_path):
+    db, item, _ = _db(tmp_path)
+    db.add_all(
+        [
+            _tx(
+                item,
+                "current-bistro-1",
+                3_000,
+                "FOOD_AND_DRINK / RESTAURANT",
+                date(2026, 8, 12),
+                merchant="Bistro",
+            ),
+            _tx(
+                item,
+                "current-bistro-2",
+                2_000,
+                "FOOD_AND_DRINK / RESTAURANT",
+                date(2026, 8, 13),
+                merchant="Bistro",
+            ),
+            _tx(
+                item,
+                "current-bistro-credit",
+                -1_500,
+                "FOOD_AND_DRINK / RESTAURANT",
+                date(2026, 8, 14),
+                merchant="Bistro",
+            ),
+            _tx(
+                item,
+                "prior-bistro",
+                2_000,
+                "FOOD_AND_DRINK / RESTAURANT",
+                date(2026, 8, 5),
+                merchant="Bistro",
+            ),
+            _tx(
+                item,
+                "prior-diner",
+                2_500,
+                "FOOD_AND_DRINK / RESTAURANT",
+                date(2026, 8, 6),
+                merchant="Diner",
+            ),
+        ]
+    )
+    db.commit()
+
+    result = LifestyleDiningService(db).build(
+        start_date=date(2026, 8, 9),
+        end_date=date(2026, 8, 16),
+        activity_type="restaurants",
+    )
+
+    assert result["summary"]["total_cents"] == 5_000
+    assert result["summary"]["credits_cents"] == 1_500
+    assert result["comparison"]["total_cents"] == 4_500
+    assert result["merchant_changes"] == [
+        {
+            "name": "Bistro",
+            "current_amount_cents": 5_000,
+            "previous_amount_cents": 2_000,
+            "delta_cents": 3_000,
+            "current_transaction_count": 2,
+            "previous_transaction_count": 1,
+        },
+        {
+            "name": "Diner",
+            "current_amount_cents": 0,
+            "previous_amount_cents": 2_500,
+            "delta_cents": -2_500,
+            "current_transaction_count": 0,
+            "previous_transaction_count": 1,
+        },
+    ]
+
+    without_comparison = LifestyleDiningService(db).build(
+        start_date=date(2026, 8, 9),
+        end_date=date(2026, 8, 16),
+        activity_type="restaurants",
+        include_comparison=False,
+    )
+    assert without_comparison["merchant_changes"] == []
+
+
+def test_lifestyle_explicit_comparison_uses_exact_canonical_period(tmp_path):
+    db, item, _ = _db(tmp_path)
+    db.add_all(
+        [
+            _tx(
+                item,
+                "current-bistro",
+                5_000,
+                "FOOD_AND_DRINK / RESTAURANT",
+                date(2026, 8, 10),
+                merchant="Bistro",
+            ),
+            _tx(
+                item,
+                "previous-bistro",
+                2_100,
+                "FOOD_AND_DRINK / RESTAURANT",
+                date(2026, 6, 15),
+                merchant="Bistro",
+            ),
+        ]
+    )
+    db.commit()
+
+    result = LifestyleDiningService(db).build(
+        start_date=date(2026, 8, 1),
+        end_date=date(2026, 8, 17),
+        activity_type="restaurants",
+        comparison_start_date=date(2026, 6, 1),
+        comparison_end_date=date(2026, 6, 30),
+    )
+
+    assert result["previous_start_date"] == "2026-06-01"
+    assert result["previous_end_date"] == "2026-06-30"
+    assert result["summary"]["total_cents"] == 5_000
+    assert result["comparison"]["total_cents"] == 2_100
+    assert result["merchant_changes"][0]["delta_cents"] == 2_900
+
+
+@pytest.mark.parametrize(
+    "comparison_values",
+    [
+        {"comparison_start_date": date(2026, 7, 1)},
+        {
+            "comparison_start_date": date(2026, 7, 31),
+            "comparison_end_date": date(2026, 7, 1),
+        },
+        {
+            "comparison_start_date": date(2024, 1, 1),
+            "comparison_end_date": date(2026, 1, 2),
+        },
+        {
+            "comparison_start_date": date(2026, 7, 1),
+            "comparison_end_date": date(2026, 7, 31),
+            "include_comparison": False,
+        },
+    ],
+    ids=["partial", "reversed", "over-bound", "comparison-disabled"],
+)
+def test_lifestyle_explicit_comparison_rejects_invalid_contract(
+    tmp_path,
+    comparison_values,
+):
+    db, _item, _other = _db(tmp_path)
+
+    with pytest.raises(ValueError):
+        LifestyleDiningService(db).build(
+            start_date=date(2026, 8, 1),
+            end_date=date(2026, 8, 17),
+            **comparison_values,
+        )
 
 
 def test_lifestyle_accepts_bounded_legacy_subtype_categories_without_merchant_catalog(

@@ -783,6 +783,9 @@ test("all six Day 4 write requests stay read-only and cause zero domain or provi
     await composer.fill(writePrompts[index]);
     await composer.press("Enter");
     await expect.poll(() => agentStreamCallCount(page)).toBe(index + 1);
+    await expect(
+      panel.getByLabel("ExpenseOps Agent response in progress"),
+    ).toHaveCount(0);
     await expect(composer).toBeEnabled();
     await expect(panel.getByText(READ_ONLY_TEXT, { exact: true })).toBeVisible();
   }

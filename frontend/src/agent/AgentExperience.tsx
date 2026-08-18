@@ -289,7 +289,7 @@ export default function AgentExperience({
               }
             }}
             rows={1}
-            disabled={controller.sending || controller.conversationBusy}
+            disabled={controller.conversationBusy}
             placeholder="Ask about spending, household, receipts, deals, or errands"
             className="max-h-32 min-h-11 min-w-0 flex-1 resize-none bg-transparent px-2 py-2.5 text-base leading-6 text-slate-950 outline-none placeholder:text-slate-500 disabled:opacity-60 sm:text-sm"
           />
@@ -345,7 +345,8 @@ function AgentMessageView({
     );
   }
   return (
-    <article className="max-w-[96%] rounded-2xl rounded-bl-md border border-slate-200 bg-white p-4 shadow-sm" aria-label="ExpenseOps Agent response">
+    <article className="min-w-0 max-w-[96%] rounded-2xl rounded-bl-md border border-slate-200 bg-white p-4 shadow-sm" aria-label="ExpenseOps Agent response">
+      <h2 className="sr-only">ExpenseOps answer</h2>
       {message.text ? <p className="whitespace-pre-wrap text-sm leading-6 text-slate-800 [overflow-wrap:anywhere]">{message.text}</p> : null}
       {message.structured_response ? (
         <AgentResponseRenderer
@@ -528,7 +529,8 @@ function StreamingAssistant({
   onNavigate?: (request: AgentNavigationRequest) => void;
 }) {
   return (
-    <article className="max-w-[96%] rounded-2xl rounded-bl-md border border-indigo-200 bg-white p-4 shadow-sm" aria-label="ExpenseOps Agent response in progress">
+    <article className="min-w-0 max-w-[96%] rounded-2xl rounded-bl-md border border-indigo-200 bg-white p-4 shadow-sm" aria-label="ExpenseOps Agent response in progress">
+      <h2 className="sr-only">ExpenseOps answer in progress</h2>
       {progress ? (
         <div className="mb-3 flex items-center gap-2 text-sm font-medium text-indigo-700">
           <LoaderCircle className="size-4 animate-spin motion-reduce:animate-none" aria-hidden="true" />

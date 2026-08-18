@@ -46,7 +46,10 @@ import {
   isAgentNavigationRequest,
   type AgentNavigationRequest,
 } from "./pageContext";
-import { AgentProtocolError, parseAgentStructuredResponse } from "./validation";
+import {
+  AGENT_RESPONSE_UNAVAILABLE_MESSAGE,
+  parseAgentStructuredResponse,
+} from "./validation";
 
 export type { AgentNavigationRequest } from "./pageContext";
 
@@ -71,12 +74,8 @@ export function AgentResponseRenderer({
 }) {
   try {
     parseAgentStructuredResponse(response);
-  } catch (error) {
-    const message =
-      error instanceof AgentProtocolError
-        ? error.message
-        : "ExpenseOps cannot safely display this response.";
-    return <UnsupportedResponse message={message} onRetry={onRetry} />;
+  } catch {
+    return <UnsupportedResponse onRetry={onRetry} />;
   }
 
   return (
@@ -259,17 +258,21 @@ function ActionConfirmationCard({
 function ReplenishmentSummaryCard({ block, onNavigate }: { block: AgentReplenishmentSummaryBlock; onNavigate?: (request: AgentNavigationRequest) => void }) {
   return (
     <Card>
-      <CardHeader className="pb-3">
+      <CardHeader className="p-4 pb-3 sm:p-4 sm:pb-3">
         <CardHeading icon={<PackageCheck className="size-5" aria-hidden="true" />} title={block.title} subtitle={`${block.items.length} of ${block.total_count}`} />
       </CardHeader>
-      <CardContent className="space-y-3 pt-0">
+      <CardContent className="space-y-3 px-4 pb-4 pt-0 sm:px-4 sm:pb-4">
         {block.items.length ? (
           <div className="divide-y divide-slate-200 overflow-hidden rounded-control border border-slate-200 bg-white">
             {block.items.map((item) => (
-              <div key={item.public_id} className="flex min-h-14 items-start justify-between gap-3 px-3 py-2.5">
-                <div className="min-w-0 flex-1">
-                  <p className="font-semibold text-slate-900 [overflow-wrap:anywhere]">{item.name}</p>
-                  <p className="mt-0.5 text-xs text-slate-600 [overflow-wrap:anywhere]">
+              <div
+                key={item.public_id}
+                className="grid min-h-14 min-w-0 grid-cols-[minmax(0,1fr)_auto] items-start gap-x-2 gap-y-2 px-3 py-2.5"
+                data-testid="agent-replenishment-row"
+              >
+                <div className="col-span-2 min-w-0">
+                  <p className="break-words font-semibold text-slate-900">{item.name}</p>
+                  <p className="mt-0.5 break-words text-xs text-slate-600">
                     {item.reason || replenishmentStateLabel(item.due_state)}
                   </p>
                   <p className="mt-1 text-xs text-slate-500">
@@ -279,7 +282,9 @@ function ReplenishmentSummaryCard({ block, onNavigate }: { block: AgentReplenish
                     {[item.quantity ? `${item.quantity}${item.unit ? ` ${item.unit}` : ""}` : null, item.last_acquired_on ? `Last acquired ${formatDate(item.last_acquired_on)}` : "No confirmed purchase yet"].filter(Boolean).join(" · ")}
                   </p>
                 </div>
-                <Badge variant="secondary" className="shrink-0">{replenishmentStateLabel(item.due_state)}</Badge>
+                <Badge variant="secondary" className="min-w-0 max-w-full justify-self-start whitespace-normal text-left">
+                  {replenishmentStateLabel(item.due_state)}
+                </Badge>
                 <EntityNavigationButton label={`Open ${item.name}`} request={{ target_surface: "household_staples", entity: { kind: "household_item", public_id: item.public_id } }} onNavigate={onNavigate} />
               </div>
             ))}
@@ -509,6 +514,9 @@ function ClassificationActivityCard({
   onNavigate?: (request: AgentNavigationRequest) => void;
 }) {
   const decisionCount = block.counts.transactions + block.counts.receipt_items;
+  const isRange = block.block_version === "1.1";
+  const stapleCandidates = isRange ? block.staple_candidates : [];
+  const aliases = isRange ? block.aliases : [];
   return (
     <Card
       data-testid="agent-classification-activity"
@@ -518,16 +526,22 @@ function ClassificationActivityCard({
         <CardHeading
           icon={<Brain className="size-5" aria-hidden="true" />}
           title={block.title}
-          subtitle={`${formatDate(block.activity_date)} · ${block.timezone}`}
+          subtitle={`${isRange ? formatDateRange(block.start_date, block.end_date) : formatDate(block.activity_date)} · ${block.timezone}`}
         />
       </CardHeader>
       <CardContent className="min-w-0 space-y-4 pt-0">
         {block.view === "summary" ? (
-          <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 xl:grid-cols-5" aria-label="Classification activity totals">
+          <div
+            className="grid gap-2"
+            style={{ gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 7rem), 1fr))" }}
+            aria-label="Classification activity totals"
+          >
             <ClassificationMetric label="Decisions" value={decisionCount} />
             <ClassificationMetric label="Categories used" value={block.counts.categories} />
             <ClassificationMetric label="New categories" value={block.counts.new_categories} />
             <ClassificationMetric label="Receipt matches" value={block.counts.receipt_matches} />
+            {isRange ? <ClassificationMetric label="Staple candidates" value={block.counts.staple_candidates} /> : null}
+            {isRange ? <ClassificationMetric label="Aliases learned" value={block.counts.aliases} /> : null}
             <ClassificationMetric label="Optional review" value={block.counts.uncertain} />
           </div>
         ) : null}
@@ -618,6 +632,30 @@ function ClassificationActivityCard({
           ))}
         </ClassificationSection>
 
+        <ClassificationSection title="Staple candidates" visible={stapleCandidates.length > 0}>
+          {stapleCandidates.map((row) => (
+            <ClassificationRow
+              key={row.decision_public_id}
+              title={row.name}
+              detail={`${row.merchant ? `${row.merchant} · ` : ""}${classificationCategoryLabel(row.parent_category)} · ${classificationCandidateHouseholdItemLabel(row)} · ${Math.round(row.confidence * 100)}% confidence`}
+              badge={classificationLearningStateLabel(row.learning_state)}
+              navigation={classificationCandidateNavigation(row)}
+              onNavigate={onNavigate}
+            />
+          ))}
+        </ClassificationSection>
+
+        <ClassificationSection title="Merchant aliases learned" visible={aliases.length > 0}>
+          {aliases.map((row) => (
+            <ClassificationRow
+              key={row.public_id}
+              title={`${row.raw_pattern} → ${row.concept}`}
+              detail={`${row.merchant ? `${row.merchant} · ` : ""}${classificationCategoryLabel(row.parent_category)} · ${Math.round(row.confidence * 100)}% confidence`}
+              badge={row.active ? "Learned alias" : "Inactive alias"}
+            />
+          ))}
+        </ClassificationSection>
+
         <ClassificationSection title="Cadence learned" visible={block.cadence_updates.length > 0}>
           {block.cadence_updates.map((row) => (
             <ClassificationRow
@@ -660,7 +698,7 @@ function ClassificationActivityCard({
 function ClassificationMetric({ label, value }: { label: string; value: number }) {
   return (
     <div className="min-w-0 rounded-control border border-slate-200 bg-white/90 p-3">
-      <p className="text-xs leading-4 text-slate-600 [overflow-wrap:anywhere]">{label}</p>
+      <p className="break-words text-xs leading-4 text-slate-600">{label}</p>
       <p className="mt-1 text-xl font-semibold tabular-nums text-slate-950">{value}</p>
     </div>
   );
@@ -700,12 +738,17 @@ function ClassificationRow({
   onNavigate?: (request: AgentNavigationRequest) => void;
 }) {
   return (
-    <div className="flex min-w-0 items-start gap-3 px-3 py-2.5">
-      <div className="min-w-0 flex-1">
-        <p className="text-sm font-semibold text-slate-900 [overflow-wrap:anywhere]">{title}</p>
-        <p className="mt-0.5 text-xs leading-5 text-slate-600 [overflow-wrap:anywhere]">{detail}</p>
+    <div
+      className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-start gap-x-2 gap-y-2 px-3 py-2.5"
+      data-testid="agent-classification-row"
+    >
+      <div className="col-span-2 min-w-0">
+        <p className="break-words text-sm font-semibold text-slate-900">{title}</p>
+        <p className="mt-0.5 break-words text-xs leading-5 text-slate-600">{detail}</p>
       </div>
-      <Badge variant="secondary" className="max-w-28 shrink-0 truncate">{badge}</Badge>
+      <Badge variant="secondary" className="min-w-0 max-w-full justify-self-start whitespace-normal text-left">
+        {badge}
+      </Badge>
       {navigation ? (
         <EntityNavigationButton label={`Open ${title}`} request={navigation} onNavigate={onNavigate} />
       ) : null}
@@ -737,6 +780,37 @@ function classificationUncertainNavigation(
   return receiptId
     ? { target_surface: "household_receipts", entity: { kind: "receipt", public_id: receiptId } }
     : null;
+}
+
+function classificationCandidateNavigation(
+  row: Extract<AgentClassificationActivityBlock, { block_version: "1.1" }>["staple_candidates"][number],
+): AgentNavigationRequest | null {
+  if (row.household_item_public_id) {
+    return {
+      target_surface: "household_staples",
+      entity: { kind: "household_item", public_id: row.household_item_public_id },
+    };
+  }
+  return row.source_available
+    ? {
+        target_surface: "household_receipts",
+        entity: { kind: "receipt", public_id: row.receipt_public_id },
+      }
+    : null;
+}
+
+function classificationCandidateHouseholdItemLabel(
+  row: Extract<AgentClassificationActivityBlock, { block_version: "1.1" }>["staple_candidates"][number],
+): string {
+  return row.created_household_item ? "Household item created" : "No household item created";
+}
+
+function classificationLearningStateLabel(
+  value: Extract<AgentClassificationActivityBlock, { block_version: "1.1" }>["staple_candidates"][number]["learning_state"],
+): string {
+  if (value === "candidate") return "Learning · not due";
+  if (value === "learning") return "Learning";
+  return "Tracked";
 }
 
 function AttentionSummaryCard({
@@ -954,10 +1028,13 @@ function LifestyleSummaryCard({ block }: { block: AgentLifestyleSummaryBlock }) 
         </div>
       </CardHeader>
       <CardContent className="space-y-4 pt-0">
-        <div className="grid gap-2 sm:grid-cols-3">
+        <div
+          className="grid gap-2"
+          style={{ gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 8rem), 1fr))" }}
+        >
           <LifestyleMetric label={basisLabel} value={formatMinor(block.total_cents, block.currency_code)} />
           <LifestyleMetric label="Purchases" value={String(block.transaction_count)} />
-          <LifestyleMetric label="Typical check" value={formatMinor(block.average_cents, block.currency_code)} />
+          <LifestyleMetric label="Average check" value={formatMinor(block.average_cents, block.currency_code)} />
         </div>
         {block.previous_total_cents !== null && block.previous_transaction_count !== null ? (
           <p className="text-xs text-slate-600">
@@ -992,12 +1069,27 @@ function LifestyleSummaryCard({ block }: { block: AgentLifestyleSummaryBlock }) 
 }
 
 function LifestyleMetric({ label, value }: { label: string; value: string }) {
-  return <div className="min-w-0 rounded-control bg-white/80 p-3"><p className="text-xs font-medium text-slate-600">{label}</p><p className="mt-1 truncate text-xl font-semibold text-slate-950">{value}</p></div>;
+  return <div className="min-w-0 rounded-control bg-white/80 p-3"><p className="text-xs font-medium text-slate-600">{label}</p><p className="mt-1 break-words text-xl font-semibold tabular-nums text-slate-950">{value}</p></div>;
 }
 
 function LifestyleBreakdown({ title, rows, currency }: { title: string; rows: AgentLifestyleSummaryBlock["top_merchants"]; currency: string }) {
   if (!rows.length) return null;
-  return <section aria-label={title}><h4 className="text-xs font-semibold uppercase tracking-wide text-slate-500">{title}</h4><div className="mt-2 divide-y divide-slate-200 rounded-control border border-slate-200 bg-white/80">{rows.map((row) => <div key={row.name} className="flex min-h-11 items-center justify-between gap-3 px-3 py-2 text-sm"><span className="min-w-0 truncate font-medium text-slate-800">{humanize(row.name)} · {row.transaction_count}</span><span className="shrink-0 tabular-nums text-slate-600">{formatMinor(row.amount_cents, currency)}</span></div>)}</div></section>;
+  return (
+    <section aria-label={title}>
+      <h4 className="text-xs font-semibold uppercase tracking-wide text-slate-500">{title}</h4>
+      <ol className="mt-2 divide-y divide-slate-200 rounded-control border border-slate-200 bg-white/80" aria-label={title}>
+        {rows.map((row, index) => (
+          <li key={row.name} className="min-w-0 px-3 py-2 text-sm">
+            <p className="break-words font-medium text-slate-800"><span className="text-slate-500">{index + 1}.</span> {humanize(row.name)}</p>
+            <div className="mt-1 flex min-w-0 flex-wrap items-baseline justify-between gap-x-3 gap-y-1 text-xs text-slate-600">
+              <span>{purchaseCountLabel(row.transaction_count)} · {formatSharePercentage(row.percentage)} of spend</span>
+              <span className="max-w-full break-words font-medium tabular-nums text-slate-700">{formatMinor(row.amount_cents, currency)}</span>
+            </div>
+          </li>
+        ))}
+      </ol>
+    </section>
+  );
 }
 
 function SpendingSummaryCard({
@@ -1007,8 +1099,12 @@ function SpendingSummaryCard({
   block: AgentSpendingSummaryBlock;
   onOpenInsights?: () => void;
 }) {
+  const focus = block.focus ?? "summary";
+  const showSummary = focus === "summary" || focus === "comparison" || focus === "change_explanation";
+  const showCategories = focus !== "top_merchants";
+  const showMerchants = focus !== "top_categories";
   return (
-    <Card className="overflow-hidden border-indigo-200 bg-gradient-to-br from-white to-indigo-50/70">
+    <Card data-testid="agent-spending-summary" className="overflow-hidden border-indigo-200 bg-gradient-to-br from-white to-indigo-50/70">
       <CardHeader className="pb-3">
         <div className="flex items-start justify-between gap-3">
           <div>
@@ -1023,7 +1119,7 @@ function SpendingSummaryCard({
         </div>
       </CardHeader>
       <CardContent className="space-y-4 pt-0">
-        <div>
+        {showSummary ? <div>
           <p className="text-xs font-medium text-slate-600">
             {block.spend_basis === "actual_share" ? "My actual share" : "Total card spend"}
           </p>
@@ -1068,7 +1164,7 @@ function SpendingSummaryCard({
                 : ""}
             </p>
           ) : null}
-        </div>
+        </div> : null}
         {block.highlights.length ? (
           <ul className="grid gap-1.5 text-sm text-slate-700">
             {block.highlights.map((highlight) => (
@@ -1079,8 +1175,8 @@ function SpendingSummaryCard({
             ))}
           </ul>
         ) : null}
-        <Breakdown title="Top categories" rows={block.top_categories} currency={block.currency_code} />
-        <Breakdown title="Top merchants" rows={block.top_merchants} currency={block.currency_code} />
+        {showCategories ? <Breakdown title="Top categories" rows={block.top_categories} currency={block.currency_code} /> : null}
+        {showMerchants ? <Breakdown title="Top merchants" rows={block.top_merchants} currency={block.currency_code} /> : null}
         {onOpenInsights ? (
           <Button variant="ghost" size="sm" onClick={onOpenInsights}>
             Open Insights <ArrowRight className="size-4" aria-hidden="true" />
@@ -1104,16 +1200,19 @@ function Breakdown({
   return (
     <section aria-label={title}>
       <h4 className="text-xs font-semibold uppercase tracking-wide text-slate-500">{title}</h4>
-      <div className="mt-2 divide-y divide-slate-200 rounded-control border border-slate-200 bg-white/80">
-        {rows.slice(0, 5).map((row) => (
-          <div key={row.name} className="flex min-h-11 items-center justify-between gap-3 px-3 py-2 text-sm">
-            <span className="min-w-0 truncate font-medium text-slate-800">{row.name}</span>
-            <span className="shrink-0 tabular-nums text-slate-600">
-              {formatMinor(row.amount_cents, currency)}
-            </span>
-          </div>
+      <ol className="mt-2 divide-y divide-slate-200 rounded-control border border-slate-200 bg-white/80" aria-label={title}>
+        {rows.map((row, index) => (
+          <li key={row.name} className="min-w-0 px-3 py-2 text-sm">
+            <p className="break-words font-medium text-slate-800"><span className="text-slate-500">{index + 1}.</span> {row.name}</p>
+            <div className="mt-1 flex min-w-0 flex-wrap items-baseline justify-between gap-x-3 gap-y-1 text-xs text-slate-600">
+              <span>{purchaseCountLabel(row.transaction_count)} · {formatSharePercentage(row.percentage)} of spend</span>
+              <span className="max-w-full break-words font-medium tabular-nums text-slate-700">
+                {formatMinor(row.amount_cents, currency)}
+              </span>
+            </div>
+          </li>
         ))}
-      </div>
+      </ol>
     </section>
   );
 }
@@ -1221,7 +1320,7 @@ function AgentEmptyCard({
   );
 }
 
-function UnsupportedResponse({ message, onRetry }: { message?: string; onRetry?: () => void }) {
+function UnsupportedResponse({ onRetry }: { onRetry?: () => void }) {
   return (
     <Card className="border-amber-200 bg-amber-50/70">
       <CardContent className="p-4 sm:p-4">
@@ -1230,7 +1329,7 @@ function UnsupportedResponse({ message, onRetry }: { message?: string; onRetry?:
           <div>
             <p className="font-semibold text-amber-950">Response unavailable</p>
             <p className="mt-1 text-sm text-amber-800 [overflow-wrap:anywhere]">
-              {message || "ExpenseOps cannot safely display this Agent response yet."}
+              {AGENT_RESPONSE_UNAVAILABLE_MESSAGE}
             </p>
             {onRetry ? (
               <Button className="mt-3" size="sm" variant="outline" onClick={onRetry}>
@@ -1280,6 +1379,14 @@ function humanize(value: string): string {
     .filter(Boolean)
     .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
     .join(" ");
+}
+
+function purchaseCountLabel(value: number): string {
+  return `${value} purchase${value === 1 ? "" : "s"}`;
+}
+
+function formatSharePercentage(value: number): string {
+  return `${new Intl.NumberFormat("en-US", { maximumFractionDigits: 1 }).format(value)}%`;
 }
 
 function replenishmentStateLabel(value: string): string {

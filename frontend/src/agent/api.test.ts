@@ -284,6 +284,29 @@ describe("streamAgentTurn", () => {
     ).rejects.toThrow(/out-of-order Agent response/i);
     expect(received).toEqual([first]);
   });
+
+  it("rejects a mid-stream run identity change before dispatching it", async () => {
+    const first = deltaEvent(0, "Grounded prefix");
+    const switchedRun = {
+      ...deltaEvent(1, "Must stay isolated"),
+      run_public_id: "run-public-2",
+    };
+    const bytes = new TextEncoder().encode(
+      `${frame(first)}${frame(switchedRun)}${frame(completedEvent(2))}`,
+    );
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(responseFromChunks([bytes])));
+    const received: AgentStreamEvent[] = [];
+
+    await expect(
+      streamAgentTurn({
+        conversationPublicId: "conversation-1",
+        text: "Show spending",
+        clientMessageId: "browser-message-run-identity",
+        onEvent: (event) => received.push(event),
+      }),
+    ).rejects.toThrow(/another run/i);
+    expect(received).toEqual([first]);
+  });
 });
 
 describe("submitAgentFeedback", () => {

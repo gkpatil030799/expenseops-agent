@@ -109,7 +109,8 @@ test("desktop renders the bounded lifestyle card without action controls", async
 
   await expect(panel.getByText("Coffee summary")).toBeVisible();
   await expect(panel.getByText("$42.00", { exact: true }).first()).toBeVisible();
-  await expect(panel.getByText("Typical check")).toBeVisible();
+  await expect(panel.getByText("Average check", { exact: true })).toBeVisible();
+  await expect(panel.getByText("Typical check", { exact: true })).toHaveCount(0);
   await expect(panel.getByText(/left unclassified rather than guessed/)).toBeVisible();
   await expect(panel.getByRole("button", { name: /confirm|buy|order|save/i })).toHaveCount(0);
   expect((await agentStreamCalls(page))[0].body?.text).toBe("How much have I spent on coffee lately?");
@@ -130,6 +131,16 @@ for (const width of [320, 375, 390]) {
     await page.getByRole("navigation", { name: "Primary mobile navigation" }).getByRole("button", { name: "Agent", exact: true }).click();
     const agent = await send(page, "agent-page");
     await expect(agent.getByText("Coffee summary")).toBeVisible();
+    await expect(agent.getByText("Average check", { exact: true })).toBeVisible();
+    const average = agent.getByText("$7.00", { exact: true });
+    await expect(average).toBeVisible();
+    const averageMetrics = await average.evaluate((element) => ({
+      clientWidth: element.clientWidth,
+      scrollWidth: element.scrollWidth,
+      textOverflow: getComputedStyle(element).textOverflow,
+    }));
+    expect(averageMetrics.scrollWidth).toBeLessThanOrEqual(averageMetrics.clientWidth);
+    expect(averageMetrics.textOverflow).not.toBe("ellipsis");
     const sizes = await page.evaluate(() => ({ width: document.documentElement.clientWidth, scrollWidth: document.documentElement.scrollWidth }));
     expect(sizes.scrollWidth).toBeLessThanOrEqual(sizes.width);
   });

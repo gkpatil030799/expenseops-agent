@@ -11,6 +11,10 @@ from sqlalchemy.orm import Session, sessionmaker
 from app.agent.read_tools import (
     MAX_SPENDING_BREAKDOWN_ITEMS,
     MAX_TRANSACTION_RESULTS,
+    LifestyleDiningInput,
+    LifestyleMerchantChange,
+    SpendingInsightsInput,
+    TransactionSearchInput,
     build_read_tool_registry,
 )
 from app.agent.tooling import (
@@ -31,6 +35,7 @@ from app.models import (
     Workspace,
     WorkspaceMembership,
 )
+from app.services.lifestyle_dining_service import LifestyleDiningService
 from app.services.spending_insights_service import SpendingInsightsService
 from app.tenancy import TenantContext, set_session_tenant
 
@@ -306,10 +311,7 @@ def test_spending_tool_reconciles_exactly_with_canonical_insights(read_tool_data
     assert output["summary"] == canonical["summary"]
     assert output["comparison"] == canonical["comparison"]
     assert output["categories"] == canonical["category_breakdown"][:10]
-    assert [
-        {key: item[key] for key in ("name", "amount_cents", "transaction_count", "percentage")}
-        for item in output["merchants"]
-    ] == canonical["merchant_breakdown"][:10]
+    assert output["merchants"] == canonical["merchant_breakdown"][:10]
     assert output["notable_changes"] == canonical["notable_changes"][:4]
     assert output["summary"]["total_cents"] == 13_250
     assert output["summary"]["credits_cents"] == 500
@@ -325,9 +327,115 @@ def test_spending_tool_reconciles_exactly_with_canonical_insights(read_tool_data
     assert output["excluded_other_currency_transactions"] == 1
     assert output["pending_transactions_excluded"] is True
     assert output["comparison_mode"] == "immediately_preceding"
-    assert build_read_tool_registry(_settings()).get("get_spending_insights").version == "1.2"
+    assert build_read_tool_registry(_settings()).get("get_spending_insights").version == "1.3"
     assert raw_groceries["summary"]["total_cents"] == 10_000
     assert mapped_food["summary"]["total_cents"] == 13_250
+
+
+def test_spending_and_lifestyle_tools_preserve_exact_comparison_pair(read_tool_database):
+    factory, contexts, item_ids = read_tool_database
+    context = contexts["owner"]
+    with _scoped(factory, context) as db:
+        db.add_all(
+            [
+                _transaction(
+                    workspace_id=context.workspace_id,
+                    item_id=item_ids["shared"],
+                    provider_id="pair-current",
+                    merchant="Bistro",
+                    amount_cents=5_000,
+                    occurred_on=date(2026, 8, 10),
+                    category="FOOD_AND_DRINK / RESTAURANT",
+                ),
+                _transaction(
+                    workspace_id=context.workspace_id,
+                    item_id=item_ids["shared"],
+                    provider_id="pair-selected-previous",
+                    merchant="Bistro",
+                    amount_cents=2_000,
+                    occurred_on=date(2026, 7, 10),
+                    category="FOOD_AND_DRINK / RESTAURANT",
+                ),
+                _transaction(
+                    workspace_id=context.workspace_id,
+                    item_id=item_ids["shared"],
+                    provider_id="pair-unselected-previous",
+                    merchant="Bistro",
+                    amount_cents=9_000,
+                    occurred_on=date(2026, 7, 20),
+                    category="FOOD_AND_DRINK / RESTAURANT",
+                ),
+            ]
+        )
+        db.commit()
+        registry = build_read_tool_registry(_settings())
+        arguments = {
+            "start_date": "2026-08-01",
+            "end_date": "2026-08-17",
+            "comparison_start_date": "2026-07-01",
+            "comparison_end_date": "2026-07-14",
+        }
+        spending = _execute(registry, db, "get_spending_insights", arguments)
+        lifestyle = _execute(
+            registry,
+            db,
+            "get_lifestyle_dining_insights",
+            {**arguments, "activity_type": "restaurants"},
+        )
+
+    assert spending["previous_start_date"] == "2026-07-01"
+    assert spending["previous_end_date"] == "2026-07-14"
+    assert spending["comparison"]["total_cents"] == 2_000
+    assert lifestyle["previous_start_date"] == "2026-07-01"
+    assert lifestyle["previous_end_date"] == "2026-07-14"
+    assert lifestyle["comparison"]["total_cents"] == 2_000
+
+
+@pytest.mark.parametrize(
+    ("input_model", "arguments"),
+    [
+        (
+            SpendingInsightsInput,
+            {
+                "start_date": "2026-08-01",
+                "end_date": "2026-08-17",
+                "comparison_start_date": "2026-07-01",
+            },
+        ),
+        (
+            SpendingInsightsInput,
+            {
+                "start_date": "2026-08-01",
+                "end_date": "2026-08-17",
+                "comparison_start_date": "2026-07-01",
+                "comparison_end_date": "2026-07-31",
+                "comparison_mode": "same_weekdays_last_week",
+            },
+        ),
+        (
+            LifestyleDiningInput,
+            {
+                "start_date": "2026-08-01",
+                "end_date": "2026-08-17",
+                "comparison_start_date": "2026-07-31",
+                "comparison_end_date": "2026-07-01",
+            },
+        ),
+        (
+            LifestyleDiningInput,
+            {
+                "start_date": "2026-08-01",
+                "end_date": "2026-08-17",
+                "comparison_start_date": "2024-01-01",
+                "comparison_end_date": "2026-01-02",
+            },
+        ),
+    ],
+    ids=["partial", "mode-conflict", "reversed", "over-bound"],
+)
+def test_explicit_comparison_tool_inputs_reject_invalid_pairs(input_model, arguments):
+    with pytest.raises(ValidationError):
+        input_model.model_validate(arguments)
 
 
 def test_spending_tool_preserves_personal_card_and_shared_actual_share_semantics(
@@ -514,6 +622,7 @@ def test_lifestyle_tool_is_tenant_scoped_and_keeps_credits_separate(read_tool_da
                 "end_date": "2026-08-16",
                 "activity_type": "coffee",
                 "spend_basis": "card",
+                "merchant_limit": 1,
             },
         )
 
@@ -521,7 +630,95 @@ def test_lifestyle_tool_is_tenant_scoped_and_keeps_credits_separate(read_tool_da
     assert output["summary"]["credits_cents"] == 300
     assert output["summary"]["transaction_count"] == 1
     assert [row["name"] for row in output["top_merchants"]] == ["Local Coffee"]
-    assert registry.get("get_lifestyle_dining_insights").version == "1.0"
+    assert output["merchant_changes"] == [
+        {
+            "name": "Local Coffee",
+            "current_amount_cents": 1_200,
+            "previous_amount_cents": 0,
+            "delta_cents": 1_200,
+            "current_transaction_count": 1,
+            "previous_transaction_count": 0,
+        }
+    ]
+    assert registry.get("get_lifestyle_dining_insights").version == "1.3"
+
+    with pytest.raises(ValidationError):
+        LifestyleDiningInput.model_validate(
+            {
+                "start_date": "2026-08-01",
+                "end_date": "2026-08-16",
+                "merchant_limit": 9,
+            },
+            strict=True,
+        )
+
+
+def test_lifestyle_merchant_change_contract_requires_signed_reconciliation() -> None:
+    with pytest.raises(ValidationError):
+        LifestyleMerchantChange.model_validate(
+            {
+                "name": "Bistro",
+                "current_amount_cents": 5_000,
+                "previous_amount_cents": 2_000,
+                "delta_cents": -3_000,
+                "current_transaction_count": 2,
+                "previous_transaction_count": 1,
+            }
+        )
+
+
+def test_classification_tool_emits_versioned_local_date_range(read_tool_database) -> None:
+    factory, contexts, _item_ids = read_tool_database
+    with _scoped(factory, contexts["owner"]) as db:
+        registry = build_read_tool_registry(_settings())
+        output = _execute(
+            registry,
+            db,
+            "get_classification_activity",
+            {
+                "start_date": "2026-07-19",
+                "end_date": "2026-08-17",
+                "timezone": "America/Phoenix",
+                "view": "staple_candidates",
+                "limit": 5,
+            },
+        )
+
+    assert output["schema_version"] == "1.1"
+    assert output["start_date"] == "2026-07-19"
+    assert output["end_date"] == "2026-08-17"
+    assert output["timezone"] == "America/Phoenix"
+    assert output["counts"]["staple_candidates"] == 0
+    assert output["counts"]["aliases"] == 0
+    assert output["staple_candidates"] == []
+    assert output["aliases"] == []
+    assert "activity_date" not in output
+    assert registry.get("get_classification_activity").version == "1.1"
+
+
+def test_classification_tool_interprets_activity_date_in_user_timezone(
+    read_tool_database,
+) -> None:
+    factory, contexts, _item_ids = read_tool_database
+    with _scoped(factory, contexts["owner"]) as db:
+        registry = build_read_tool_registry(_settings())
+        output = _execute(
+            registry,
+            db,
+            "get_classification_activity",
+            {
+                "activity_date": "2026-08-17",
+                "timezone": "America/Phoenix",
+                "view": "summary",
+                "limit": 5,
+            },
+        )
+
+    assert output["schema_version"] == "1.1"
+    assert output["start_date"] == "2026-08-17"
+    assert output["end_date"] == "2026-08-17"
+    assert output["timezone"] == "America/Phoenix"
+    assert "activity_date" not in output
 
 
 def test_read_tool_outputs_and_transaction_search_are_hard_bounded(read_tool_database):
@@ -716,6 +913,305 @@ def test_transaction_search_applies_supported_filters_and_excludes_removed_rows(
         }
     ]
     assert [item["merchant"] for item in personal["transactions"]] == ["Starbucks Personal"]
+
+
+def test_transaction_search_food_dining_uses_canonical_parent_with_raw_fallback(
+    read_tool_database,
+) -> None:
+    factory, contexts, item_ids = read_tool_database
+    context = contexts["owner"]
+    with _scoped(factory, context) as db:
+        raw_restaurant = _transaction(
+            workspace_id=context.workspace_id,
+            item_id=item_ids["shared"],
+            provider_id="food-search-raw",
+            merchant="Raw Bistro",
+            amount_cents=2_500,
+            occurred_on=date(2026, 8, 10),
+            category="FOOD_AND_DRINK / RESTAURANT",
+        )
+        canonical_restaurant = _transaction(
+            workspace_id=context.workspace_id,
+            item_id=item_ids["shared"],
+            provider_id="food-search-canonical",
+            merchant="Canonical Bistro",
+            amount_cents=3_500,
+            occurred_on=date(2026, 8, 11),
+            category="MISCELLANEOUS",
+        )
+        canonical_restaurant.spending_parent_category = "food_dining"
+        canonical_restaurant.classification_applied_at = datetime(2026, 8, 11, tzinfo=UTC)
+        unrelated = _transaction(
+            workspace_id=context.workspace_id,
+            item_id=item_ids["shared"],
+            provider_id="food-search-unrelated",
+            merchant="Hardware Store",
+            amount_cents=4_500,
+            occurred_on=date(2026, 8, 12),
+            category="GENERAL_MERCHANDISE",
+        )
+        db.add_all([raw_restaurant, canonical_restaurant, unrelated])
+        db.commit()
+
+        output = _execute(
+            build_read_tool_registry(_settings()),
+            db,
+            "search_transactions",
+            {
+                "start_date": "2026-08-01",
+                "end_date": "2026-08-31",
+                "category": "Food & Dining",
+                "include_pending": False,
+                "limit": 20,
+            },
+        )
+
+    assert output["total_count"] == 2
+    assert [row["merchant"] for row in output["transactions"]] == [
+        "Canonical Bistro",
+        "Raw Bistro",
+    ]
+
+
+def test_lifestyle_transaction_search_reconciles_exact_period_pair_and_eligibility(
+    read_tool_database,
+) -> None:
+    factory, contexts, item_ids = read_tool_database
+    context = contexts["owner"]
+    rows = (
+        (
+            "current-restaurant",
+            "Current Bistro",
+            3_500,
+            date(2026, 8, 15),
+            "FOOD_AND_DRINK / RESTAURANT",
+            "USD",
+            False,
+            TransactionStatus.PERSONAL.value,
+        ),
+        (
+            "previous-restaurant",
+            "Previous Bistro",
+            2_000,
+            date(2026, 7, 4),
+            "FOOD_AND_DRINK / RESTAURANT",
+            "USD",
+            False,
+            TransactionStatus.POSTED.value,
+        ),
+        (
+            "gap-restaurant",
+            "Gap Bistro",
+            7_000,
+            date(2026, 7, 20),
+            "FOOD_AND_DRINK / RESTAURANT",
+            "USD",
+            False,
+            TransactionStatus.PERSONAL.value,
+        ),
+        (
+            "grocery",
+            "Grocery Market",
+            9_000,
+            date(2026, 8, 14),
+            "FOOD_AND_DRINK / GROCERIES",
+            "USD",
+            False,
+            TransactionStatus.PERSONAL.value,
+        ),
+        (
+            "credit",
+            "Restaurant Credit",
+            -500,
+            date(2026, 8, 13),
+            "FOOD_AND_DRINK / RESTAURANT",
+            "USD",
+            False,
+            TransactionStatus.PERSONAL.value,
+        ),
+        (
+            "transfer",
+            "Bank Transfer",
+            50_000,
+            date(2026, 8, 12),
+            "TRANSFER / FOOD_AND_DRINK / RESTAURANT",
+            "USD",
+            False,
+            TransactionStatus.PERSONAL.value,
+        ),
+        (
+            "pending",
+            "Pending Bistro",
+            4_000,
+            date(2026, 8, 11),
+            "FOOD_AND_DRINK / RESTAURANT",
+            "USD",
+            True,
+            TransactionStatus.PERSONAL.value,
+        ),
+        (
+            "removed",
+            "Removed Bistro",
+            6_000,
+            date(2026, 8, 10),
+            "FOOD_AND_DRINK / RESTAURANT",
+            "USD",
+            False,
+            TransactionStatus.REMOVED.value,
+        ),
+        (
+            "uncertain",
+            "Generic Food",
+            1_100,
+            date(2026, 8, 16),
+            "FOOD_AND_DRINK",
+            "USD",
+            False,
+            TransactionStatus.PERSONAL.value,
+        ),
+        (
+            "coffee",
+            "Coffee Roasters",
+            800,
+            date(2026, 8, 17),
+            "FOOD_AND_DRINK / COFFEE",
+            "USD",
+            False,
+            TransactionStatus.PERSONAL.value,
+        ),
+        (
+            "eur-restaurant",
+            "Paris Bistro",
+            4_000,
+            date(2026, 8, 16),
+            "FOOD_AND_DRINK / RESTAURANT",
+            "EUR",
+            False,
+            TransactionStatus.PERSONAL.value,
+        ),
+    )
+    with _scoped(factory, context) as db:
+        db.add_all(
+            [
+                _transaction(
+                    workspace_id=context.workspace_id,
+                    item_id=item_ids["shared"],
+                    provider_id=provider_id,
+                    merchant=merchant,
+                    amount_cents=amount_cents,
+                    occurred_on=occurred_on,
+                    category=category,
+                    currency=currency,
+                    pending=pending,
+                    status=status,
+                )
+                for (
+                    provider_id,
+                    merchant,
+                    amount_cents,
+                    occurred_on,
+                    category,
+                    currency,
+                    pending,
+                    status,
+                ) in rows
+            ]
+        )
+        db.commit()
+        lifestyle = LifestyleDiningService(db).build(
+            start_date=date(2026, 8, 10),
+            end_date=date(2026, 8, 17),
+            comparison_start_date=date(2026, 7, 1),
+            comparison_end_date=date(2026, 7, 7),
+            activity_type="restaurants",
+        )
+        registry = build_read_tool_registry(_settings())
+        arguments = {
+            "start_date": "2026-08-10",
+            "end_date": "2026-08-17",
+            "comparison_start_date": "2026-07-01",
+            "comparison_end_date": "2026-07-07",
+            "lifestyle_activity_type": "restaurants",
+            "include_pending": False,
+            "limit": 20,
+        }
+        output = _execute(registry, db, "search_transactions", arguments)
+        eur_output = _execute(
+            registry,
+            db,
+            "search_transactions",
+            {**arguments, "currency_code": "eur"},
+        )
+
+    assert registry.get("search_transactions").version == "1.2"
+    assert [row["merchant"] for row in output["transactions"]] == [
+        "Current Bistro",
+        "Previous Bistro",
+    ]
+    assert output["total_count"] == (
+        lifestyle["summary"]["transaction_count"] + lifestyle["comparison"]["transaction_count"]
+    )
+    assert sum(row["amount_cents"] for row in output["transactions"]) == (
+        lifestyle["summary"]["total_cents"] + lifestyle["comparison"]["total_cents"]
+    )
+    excluded = {
+        "Gap Bistro",
+        "Grocery Market",
+        "Restaurant Credit",
+        "Bank Transfer",
+        "Pending Bistro",
+        "Removed Bistro",
+        "Generic Food",
+        "Coffee Roasters",
+        "Paris Bistro",
+    }
+    assert excluded.isdisjoint(row["merchant"] for row in output["transactions"])
+    assert [row["merchant"] for row in eur_output["transactions"]] == ["Paris Bistro"]
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        {
+            "start_date": "2026-08-01",
+            "end_date": "2026-08-17",
+            "comparison_start_date": "2026-07-01",
+            "comparison_end_date": "2026-07-31",
+            "include_pending": False,
+        },
+        {
+            "start_date": "2026-08-01",
+            "end_date": "2026-08-17",
+            "comparison_start_date": "2026-07-01",
+            "lifestyle_activity_type": "all",
+            "include_pending": False,
+        },
+        {
+            "start_date": "2026-08-01",
+            "end_date": "2026-08-17",
+            "lifestyle_activity_type": "all",
+        },
+        {
+            "start_date": "2026-08-01",
+            "end_date": "2026-08-17",
+            "lifestyle_activity_type": "all",
+            "category": "Food & Dining",
+            "include_pending": False,
+        },
+        {
+            "start_date": "2026-08-01",
+            "end_date": "2026-08-17",
+            "lifestyle_activity_type": "all",
+            "review_type": "attention",
+            "include_pending": False,
+        },
+    ],
+)
+def test_lifestyle_transaction_search_rejects_incomplete_or_colliding_scope(
+    arguments: dict,
+) -> None:
+    with pytest.raises(ValidationError):
+        TransactionSearchInput.model_validate(arguments)
 
 
 def test_exact_transaction_id_is_bounded_and_remains_tenant_scoped(read_tool_database):

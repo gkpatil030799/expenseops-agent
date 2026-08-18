@@ -67,6 +67,7 @@ def _output() -> dict:
                     "percentage": 66.7,
                 }
             ],
+            "merchant_changes": [],
             "uncertain_transaction_count": 1,
             "previous_uncertain_transaction_count": 0,
             "observations": [

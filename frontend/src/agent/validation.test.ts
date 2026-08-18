@@ -323,6 +323,72 @@ function classificationActivity(overrides: Record<string, unknown> = {}) {
   };
 }
 
+function classificationRangeActivity(overrides: Record<string, unknown> = {}) {
+  return {
+    type: "classification_activity_summary",
+    block_version: "1.1",
+    title: "What ExpenseOps learned",
+    view: "summary",
+    start_date: "2026-08-12",
+    end_date: "2026-08-18",
+    timezone: "America/Phoenix",
+    counts: {
+      transactions: 0,
+      receipt_items: 0,
+      categories: 0,
+      new_categories: 0,
+      receipt_matches: 0,
+      new_household_items: 0,
+      staple_candidates: 1,
+      aliases: 1,
+      cadence_updates: 0,
+      uncertain: 0,
+    },
+    transactions: [],
+    receipt_items: [],
+    categories: [],
+    new_categories: [],
+    receipt_matches: [],
+    new_household_items: [],
+    staple_candidates: [{
+      decision_public_id: "decision-candidate-1",
+      receipt_item_public_id: "receipt-item-1",
+      receipt_public_id: "receipt-1",
+      source_available: true,
+      merchant: "Costco",
+      name: "Organic grass-fed vanilla whey protein",
+      parent_category: "household_home",
+      subcategory: "Pantry",
+      concept: "Protein powder",
+      activity_type: "routine_consumption",
+      replenishment_eligibility: "potentially_replenishable",
+      confidence: 0.78,
+      confidence_band: "medium",
+      decision_state: "provisional",
+      created_household_item: false,
+      household_item_public_id: null,
+      household_item_name: null,
+      learning_state: "candidate",
+      applied_at: "2026-08-18T15:00:00Z",
+    }],
+    aliases: [{
+      public_id: "alias-1",
+      concept: "Protein powder",
+      parent_category: "household_home",
+      raw_pattern: "ORG VAN WHEY 2LB",
+      merchant: "Costco",
+      confidence: 0.92,
+      authority: "receipt_evidence",
+      active: true,
+      created_at: "2026-08-18T15:00:00Z",
+    }],
+    cadence_updates: [],
+    uncertain: [],
+    truncated_sections: [],
+    ...overrides,
+  };
+}
+
 describe("Agent structured-response validation", () => {
   it("accepts the bounded read-only renderer block types", () => {
     const response = supportedResponse();
@@ -399,6 +465,63 @@ describe("Agent structured-response validation", () => {
     response.blocks[1].change_percent = null;
 
     expect(parseAgentStructuredResponse(response)).toBe(response);
+  });
+
+  it("accepts bounded spending focus metadata while preserving historical omission", () => {
+    const response = structuredClone(supportedResponse()) as {
+      blocks: Record<string, unknown>[];
+    };
+    response.blocks[1].focus = "top_categories";
+    response.blocks[1].requested_limit = 1;
+
+    expect(parseAgentStructuredResponse(response)).toBe(response);
+    delete response.blocks[1].focus;
+    delete response.blocks[1].requested_limit;
+    expect(parseAgentStructuredResponse(response)).toBe(response);
+  });
+
+  it.each([
+    { focus: "raw_sql", requested_limit: 1 },
+    { focus: "top_categories", requested_limit: null },
+    { focus: "top_categories", requested_limit: 0 },
+    { focus: "top_categories", requested_limit: 11 },
+    { focus: "summary", requested_limit: 1 },
+  ])("rejects unsafe spending focus metadata: %o", (metadata) => {
+    const response = structuredClone(supportedResponse()) as {
+      blocks: Record<string, unknown>[];
+    };
+    Object.assign(response.blocks[1], metadata);
+
+    expect(() => parseAgentStructuredResponse(response)).toThrow(AgentProtocolError);
+  });
+
+  it("rejects a ranked list that exceeds its explicit requested limit", () => {
+    const response = structuredClone(supportedResponse()) as {
+      blocks: Record<string, unknown>[];
+    };
+    response.blocks[1].focus = "top_categories";
+    response.blocks[1].requested_limit = 1;
+    const categories = response.blocks[1].top_categories as Record<string, unknown>[];
+    categories.push({ ...categories[0], name: "Travel" });
+
+    expect(() => parseAgentStructuredResponse(response)).toThrow(AgentProtocolError);
+  });
+
+  it("rejects unrelated rankings in a focused spending response", () => {
+    const response = structuredClone(supportedResponse()) as {
+      blocks: Record<string, unknown>[];
+    };
+    response.blocks[1].focus = "top_categories";
+    response.blocks[1].requested_limit = 1;
+    response.blocks[1].top_merchants = [{
+      name: "Unrelated merchant",
+      amount_cents: 100,
+      transaction_count: 1,
+      percentage: 1,
+      previous_amount_cents: null,
+    }];
+
+    expect(() => parseAgentStructuredResponse(response)).toThrow(AgentProtocolError);
   });
 
   it.each([undefined, "net"])("rejects spending summaries with spend_basis %s", (spendBasis) => {
@@ -561,6 +684,52 @@ describe("Agent structured-response validation", () => {
     expect(() => parseAgentStructuredResponse(response)).toThrow(AgentProtocolError);
   });
 
+  it("rejects negative acquisition and receipt quantities", () => {
+    const acquisition = structuredClone(supportedResponse()) as {
+      blocks: Record<string, unknown>[];
+    };
+    const replenishment = acquisition.blocks.find((block) => block.type === "replenishment_summary");
+    if (!replenishment || !Array.isArray(replenishment.acquisition_history)) {
+      throw new Error("replenishment fixture is missing");
+    }
+    replenishment.acquisition_history.push({
+      acquired_on: "2026-08-01",
+      merchant: "Costco",
+      quantity: -1,
+      unit: "pack",
+      evidence_type: "receipt",
+    });
+    expect(() => parseAgentStructuredResponse(acquisition)).toThrow(AgentProtocolError);
+
+    const receiptResponse = structuredClone(supportedResponse()) as {
+      blocks: Record<string, unknown>[];
+    };
+    const receipt = receiptResponse.blocks.find((block) => block.type === "receipt_summary");
+    if (!receipt || !Array.isArray(receipt.items)) throw new Error("receipt fixture is missing");
+    (receipt.items[0] as Record<string, unknown>).quantity = -1;
+    expect(() => parseAgentStructuredResponse(receiptResponse)).toThrow(AgentProtocolError);
+  });
+
+  it("rejects unknown response, legacy-block, and nested-row fields", () => {
+    expect(() => parseAgentStructuredResponse({
+      ...supportedResponse(),
+      provider_trace: "must stay server-side",
+    })).toThrow(AgentProtocolError);
+
+    const blockResponse = structuredClone(supportedResponse()) as {
+      blocks: Record<string, unknown>[];
+    };
+    blockResponse.blocks[1].raw_query = "private";
+    expect(() => parseAgentStructuredResponse(blockResponse)).toThrow(AgentProtocolError);
+
+    const rowResponse = structuredClone(supportedResponse()) as {
+      blocks: Record<string, unknown>[];
+    };
+    const categories = rowResponse.blocks[1].top_categories as Record<string, unknown>[];
+    categories[0].account_id = 42;
+    expect(() => parseAgentStructuredResponse(rowResponse)).toThrow(AgentProtocolError);
+  });
+
   it("accepts allowlisted navigation with omitted or compatible entity fields", () => {
     const response = {
       schema_version: "1.0",
@@ -601,6 +770,31 @@ describe("Agent structured-response validation", () => {
     expect(parseAgentStructuredResponse(response)).toBe(response);
   });
 
+  it("accepts the versioned local-date learning retrospective and nested stream event", () => {
+    const block = classificationRangeActivity();
+    const response = { schema_version: "1.0", blocks: [block] };
+
+    expect(parseAgentStructuredResponse(response)).toBe(response);
+    const event = {
+      ...streamBase,
+      type: "structured_response",
+      response,
+    };
+    expect(parseAgentStreamEvent(event)).toBe(event);
+  });
+
+  it("accepts serialized v1.0 defaults without weakening the public daily shape", () => {
+    const block = classificationActivity({
+      start_date: null,
+      end_date: null,
+      staple_candidates: [],
+      aliases: [],
+    });
+
+    expect(parseAgentStructuredResponse({ schema_version: "1.0", blocks: [block] }))
+      .toEqual({ schema_version: "1.0", blocks: [block] });
+  });
+
   it("strictly validates the direct Classification Activity API projection", () => {
     const block = classificationActivity();
     const { type: _type, block_version: _blockVersion, title: _title, ...activity } = block;
@@ -632,6 +826,32 @@ describe("Agent structured-response validation", () => {
       transactions: [{ merchant: "Must not appear in the categories view" }],
     }),
   ])("rejects malformed or inconsistent classification activity", (block) => {
+    expect(() => parseAgentStructuredResponse({ schema_version: "1.0", blocks: [block] }))
+      .toThrow(AgentProtocolError);
+  });
+
+  it.each([
+    classificationRangeActivity({ timezone: "Not/A_Timezone" }),
+    classificationRangeActivity({ activity_date: "2026-08-18" }),
+    classificationRangeActivity({ start_date: "2026-08-19" }),
+    classificationRangeActivity({ start_date: "2026-05-20" }),
+    (() => {
+      const block = classificationRangeActivity();
+      delete (block as Record<string, unknown>).aliases;
+      return block;
+    })(),
+    classificationRangeActivity({ secret_model_payload: { account_id: 7 } }),
+    (() => {
+      const block = classificationRangeActivity();
+      block.staple_candidates[0].learning_state = "tracked";
+      return block;
+    })(),
+    (() => {
+      const block = classificationRangeActivity();
+      block.counts.aliases = 2;
+      return block;
+    })(),
+  ])("rejects malformed or inconsistent range classification activity", (block) => {
     expect(() => parseAgentStructuredResponse({ schema_version: "1.0", blocks: [block] }))
       .toThrow(AgentProtocolError);
   });
@@ -911,6 +1131,20 @@ describe("Agent feedback validation", () => {
 });
 
 describe("Agent semantic-event validation", () => {
+  const terminalRun = {
+    public_id: "run-public-1",
+    status: "completed",
+    model_name: "gpt-5-mini",
+    prompt_version: "expenseops-readonly-v1.0",
+    input_tokens: 20,
+    output_tokens: 8,
+    total_tokens: 28,
+    error_code: null,
+    created_at: "2026-08-15T07:00:00Z",
+    started_at: "2026-08-15T07:00:01Z",
+    completed_at: "2026-08-15T07:00:02Z",
+  };
+
   it("accepts a structured event only after validating its nested renderer payload", () => {
     const event = {
       ...streamBase,
@@ -962,9 +1196,81 @@ describe("Agent semantic-event validation", () => {
         delta: "x".repeat(1_001),
       }),
     ).toThrow(AgentProtocolError);
+
+    expect(() =>
+      parseAgentStreamEvent({
+        ...streamBase,
+        type: "assistant_delta",
+        delta: " \n ",
+      }),
+    ).toThrow(AgentProtocolError);
+
+    expect(() =>
+      parseAgentStreamEvent({
+        ...streamBase,
+        type: "assistant_delta",
+        delta: "Grounded text",
+        provider_payload: { hidden: true },
+      }),
+    ).toThrow(AgentProtocolError);
   });
 
-  it.each(["replenishment", "receipts", "deals", "errands", "integrations", "classification"])(
+  it("enforces completed-message role and terminal run coherence", () => {
+    expect(() =>
+      parseAgentStreamEvent({
+        ...streamBase,
+        type: "assistant_completed",
+        message: {
+          public_id: "message-user-1",
+          conversation_public_id: "conversation-public-1",
+          role: "user",
+          text: "This cannot complete the assistant turn.",
+          structured_response: null,
+          client_message_id: "browser-message-1",
+          feedback_eligible: false,
+          feedback: null,
+          created_at: "2026-08-15T07:00:02Z",
+        },
+      }),
+    ).toThrow(AgentProtocolError);
+
+    expect(() =>
+      parseAgentStreamEvent({
+        ...streamBase,
+        type: "run_completed",
+        run: { ...terminalRun, public_id: "different-run" },
+      }),
+    ).toThrow(AgentProtocolError);
+
+    expect(() =>
+      parseAgentStreamEvent({
+        ...streamBase,
+        type: "run_completed",
+        run: { ...terminalRun, status: "failed", error_code: "agent_provider_failed" },
+      }),
+    ).toThrow(AgentProtocolError);
+
+    expect(() =>
+      parseAgentStreamEvent({
+        ...streamBase,
+        type: "run_failed",
+        run: null,
+        code: "Provider-Failed",
+        message: "Unavailable.",
+        retryable: true,
+      }),
+    ).toThrow(AgentProtocolError);
+  });
+
+  it.each([
+    "lifestyle",
+    "replenishment",
+    "receipts",
+    "deals",
+    "errands",
+    "integrations",
+    "classification",
+  ])(
     "accepts the safe %s progress activity",
     (activity) => {
       const event = {

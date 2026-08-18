@@ -3,15 +3,21 @@ from __future__ import annotations
 from collections import defaultdict
 from datetime import UTC, date, datetime, time, timedelta
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from sqlalchemy import and_, exists, func, or_, select
 from sqlalchemy.orm import Session, aliased
 
 from app.classification_activity_schemas import (
+    MAX_CLASSIFICATION_ACTIVITY_RANGE_DAYS,
     ClassificationActivityOut,
+    ClassificationActivityRangeOut,
+    ClassificationActivityRangeView,
     ClassificationActivityView,
 )
 from app.models import (
+    ClassificationConcept,
+    ClassificationConceptAlias,
     ClassificationConfidenceBand,
     ClassificationDecisionRecord,
     ClassificationDecisionState,
@@ -27,7 +33,7 @@ from app.models import (
 )
 
 MAX_CLASSIFICATION_ACTIVITY_RESULTS = 20
-_VALID_VIEWS = frozenset(
+_LEGACY_VALID_VIEWS = frozenset(
     {
         "summary",
         "categories",
@@ -38,6 +44,7 @@ _VALID_VIEWS = frozenset(
         "uncertain",
     }
 )
+_VALID_VIEWS = _LEGACY_VALID_VIEWS | {"staple_candidates", "aliases"}
 _CLASSIFICATION_UNCERTAIN_REASONS = (
     ("low_confidence", "confidence_band", "low"),
     ("provisional", "decision_state", "provisional"),
@@ -69,12 +76,72 @@ class ClassificationActivityService:
         view: ClassificationActivityView = "summary",
         limit: int = 10,
     ) -> ClassificationActivityOut:
-        if view not in _VALID_VIEWS:
+        if view not in _LEGACY_VALID_VIEWS:
             raise ClassificationActivityError("unsupported classification activity view")
-        if not 1 <= limit <= MAX_CLASSIFICATION_ACTIVITY_RESULTS:
-            raise ClassificationActivityError("classification activity limit is out of range")
+        self._validate_limit(limit)
         start = datetime.combine(activity_date, time.min, UTC)
         end = start + timedelta(days=1)
+        result = self._read_window(
+            start=start,
+            end=end,
+            view=view,
+            limit=limit,
+            include_day17=False,
+        )
+        return ClassificationActivityOut.model_validate(
+            {
+                "view": view,
+                "activity_date": activity_date,
+                "as_of": utc_now(),
+                **result,
+            }
+        )
+
+    def read_range(
+        self,
+        *,
+        start_date: date,
+        end_date: date,
+        timezone: str,
+        view: ClassificationActivityRangeView = "summary",
+        limit: int = 10,
+    ) -> ClassificationActivityRangeOut:
+        if view not in _VALID_VIEWS:
+            raise ClassificationActivityError("unsupported classification activity view")
+        self._validate_limit(limit)
+        start, end = _utc_range(start_date, end_date, timezone)
+        result = self._read_window(
+            start=start,
+            end=end,
+            view=view,
+            limit=limit,
+            include_day17=True,
+        )
+        return ClassificationActivityRangeOut.model_validate(
+            {
+                "view": view,
+                "start_date": start_date,
+                "end_date": end_date,
+                "timezone": timezone,
+                "as_of": utc_now(),
+                **result,
+            }
+        )
+
+    @staticmethod
+    def _validate_limit(limit: int) -> None:
+        if not 1 <= limit <= MAX_CLASSIFICATION_ACTIVITY_RESULTS:
+            raise ClassificationActivityError("classification activity limit is out of range")
+
+    def _read_window(
+        self,
+        *,
+        start: datetime,
+        end: datetime,
+        view: str,
+        limit: int,
+        include_day17: bool,
+    ) -> dict[str, Any]:
 
         decision_event_criteria = (
             ClassificationDecisionRecord.workspace_id == self.workspace_id,
@@ -92,6 +159,31 @@ class ClassificationActivityService:
         receipt_item_criteria = (
             *decision_criteria,
             ClassificationDecisionRecord.source_type == "receipt_line",
+        )
+        staple_candidate_criteria = (
+            *receipt_item_criteria,
+            ClassificationDecisionRecord.replenishment_eligibility.in_(
+                (
+                    ReplenishmentEligibility.REPLENISHABLE.value,
+                    ReplenishmentEligibility.POTENTIALLY_REPLENISHABLE.value,
+                )
+            ),
+            exists(
+                select(PurchaseReceiptItem.id)
+                .join(PurchaseReceipt, PurchaseReceipt.id == PurchaseReceiptItem.receipt_id)
+                .where(
+                    PurchaseReceiptItem.id == ClassificationDecisionRecord.source_entity_id,
+                    PurchaseReceipt.workspace_id == self.workspace_id,
+                    PurchaseReceipt.parse_status.not_in(
+                        (ReceiptParseStatus.IGNORED.value, ReceiptParseStatus.FAILED.value)
+                    ),
+                )
+            ),
+        )
+        alias_criteria = (
+            ClassificationConceptAlias.workspace_id == self.workspace_id,
+            ClassificationConceptAlias.created_at >= start,
+            ClassificationConceptAlias.created_at < end,
         )
         match_criteria = (
             PurchaseReceipt.workspace_id == self.workspace_id,
@@ -132,6 +224,14 @@ class ClassificationActivityService:
         uncertain_count = self._count(
             ClassificationDecisionRecord.id, *decision_uncertain_criteria
         ) + self._count(PurchaseReceipt.id, *match_uncertain_criteria)
+        staple_candidate_count = (
+            self._count(ClassificationDecisionRecord.id, *staple_candidate_criteria)
+            if include_day17
+            else 0
+        )
+        alias_count = (
+            self._count(ClassificationConceptAlias.id, *alias_criteria) if include_day17 else 0
+        )
         category_rows = self._category_rows(decision_criteria)
 
         include_summary = view == "summary"
@@ -159,6 +259,16 @@ class ClassificationActivityService:
         new_household_items = (
             self._new_household_item_rows(new_item_criteria, limit=limit)
             if include_summary or view == "staples"
+            else []
+        )
+        staple_candidates = (
+            self._staple_candidate_rows(staple_candidate_criteria, limit=limit)
+            if include_day17 and (include_summary or view == "staple_candidates")
+            else []
+        )
+        aliases = (
+            self._alias_rows(alias_criteria, limit=limit)
+            if include_day17 and (include_summary or view == "aliases")
             else []
         )
         cadence_updates = (
@@ -196,6 +306,19 @@ class ClassificationActivityService:
             "cadence_updates": cadence_updates,
             "uncertain": uncertain,
         }
+        if include_day17:
+            section_counts.update(
+                {
+                    "staple_candidates": staple_candidate_count,
+                    "aliases": alias_count,
+                }
+            )
+            section_rows.update(
+                {
+                    "staple_candidates": staple_candidates,
+                    "aliases": aliases,
+                }
+            )
         visible_sections = (
             set(section_rows)
             if include_summary
@@ -204,6 +327,8 @@ class ClassificationActivityService:
                 "new_categories": {"new_categories"},
                 "matches": {"receipt_matches"},
                 "staples": {"new_household_items"},
+                "staple_candidates": {"staple_candidates"},
+                "aliases": {"aliases"},
                 "cadence": {"cadence_updates"},
                 "uncertain": {"uncertain"},
             }[view]
@@ -213,23 +338,11 @@ class ClassificationActivityService:
             for name, rows in section_rows.items()
             if name in visible_sections and section_counts[name] > len(rows)
         ]
-        return ClassificationActivityOut.model_validate(
-            {
-                "view": view,
-                "activity_date": activity_date,
-                "as_of": utc_now(),
-                "counts": section_counts,
-                "transactions": transactions,
-                "receipt_items": receipt_items,
-                "categories": categories,
-                "new_categories": new_categories,
-                "receipt_matches": receipt_matches,
-                "new_household_items": new_household_items,
-                "cadence_updates": cadence_updates,
-                "uncertain": uncertain,
-                "truncated_sections": truncated_sections,
-            }
-        )
+        return {
+            "counts": section_counts,
+            **section_rows,
+            "truncated_sections": truncated_sections,
+        }
 
     def _count(self, identifier: Any, *criteria: Any) -> int:
         return int(self.db.scalar(select(func.count(identifier)).where(*criteria)) or 0)
@@ -466,6 +579,61 @@ class ClassificationActivityService:
             )
         return result
 
+    def _staple_candidate_rows(
+        self,
+        criteria: tuple[Any, ...],
+        *,
+        limit: int,
+    ) -> list[dict]:
+        records = list(
+            self.db.scalars(
+                select(ClassificationDecisionRecord)
+                .where(*criteria)
+                .order_by(
+                    ClassificationDecisionRecord.created_at.desc(),
+                    ClassificationDecisionRecord.id.desc(),
+                )
+                .limit(limit)
+            )
+        )
+        _transactions, receipt_lines, receipt_by_line, household_items = self._decision_sources(
+            records
+        )
+        return [
+            _staple_candidate_dict(
+                record,
+                receipt_lines.get(record.source_entity_id),
+                receipt_by_line.get(record.source_entity_id),
+                household_items.get(record.household_item_id),
+            )
+            for record in records
+        ]
+
+    def _alias_rows(self, criteria: tuple[Any, ...], *, limit: int) -> list[dict]:
+        rows = list(
+            self.db.execute(
+                select(ClassificationConceptAlias, ClassificationConcept)
+                .join(
+                    ClassificationConcept,
+                    and_(
+                        ClassificationConcept.id == ClassificationConceptAlias.concept_id,
+                        ClassificationConcept.workspace_id
+                        == ClassificationConceptAlias.workspace_id,
+                    ),
+                )
+                .where(
+                    *criteria,
+                    ClassificationConcept.workspace_id == self.workspace_id,
+                )
+                .order_by(
+                    ClassificationConceptAlias.created_at.desc(),
+                    ClassificationConceptAlias.id.desc(),
+                )
+                .limit(limit)
+            )
+        )
+        return [_alias_dict(alias, concept) for alias, concept in rows]
+
     def _cadence_rows(self, criteria: tuple[Any, ...], *, limit: int) -> list[dict]:
         items = list(
             self.db.scalars(
@@ -670,6 +838,64 @@ def _receipt_item_decision_dict(
     }
 
 
+def _staple_candidate_dict(
+    record: ClassificationDecisionRecord,
+    line: PurchaseReceiptItem | None,
+    receipt: PurchaseReceipt | None,
+    household_item: HouseholdItem | None,
+) -> dict:
+    decision = _receipt_item_decision_dict(record, line, receipt, household_item)
+    learning_state = (
+        "candidate"
+        if household_item is None
+        else "learning"
+        if household_item.cadence_source == "learning"
+        else "tracked"
+    )
+    return {
+        "decision_public_id": decision["decision_public_id"],
+        "receipt_item_public_id": decision["public_id"],
+        "receipt_public_id": decision["receipt_public_id"],
+        "source_available": decision["source_available"],
+        "merchant": decision["merchant"],
+        "name": decision["name"],
+        "parent_category": decision["parent_category"],
+        "subcategory": decision["subcategory"],
+        "concept": decision["concept"],
+        "activity_type": decision["activity_type"],
+        "replenishment_eligibility": decision["replenishment_eligibility"],
+        "confidence": decision["confidence"],
+        "confidence_band": decision["confidence_band"],
+        "decision_state": decision["decision_state"],
+        "created_household_item": decision["created_household_item"],
+        "household_item_public_id": decision["household_item_public_id"],
+        "household_item_name": decision["household_item_name"],
+        "learning_state": learning_state,
+        "applied_at": decision["applied_at"],
+    }
+
+
+def _alias_dict(
+    alias: ClassificationConceptAlias,
+    concept: ClassificationConcept,
+) -> dict:
+    concept_name = _optional_label(concept.name, maximum=255)
+    raw_pattern = _optional_label(alias.raw_pattern, maximum=500)
+    if concept_name is None or raw_pattern is None:
+        raise ClassificationActivityError("classification alias is missing durable label data")
+    return {
+        "public_id": str(alias.id),
+        "concept": concept_name,
+        "parent_category": concept.parent_category,
+        "raw_pattern": raw_pattern,
+        "merchant": _optional_label(alias.merchant_normalized, maximum=255),
+        "confidence": float(alias.confidence),
+        "authority": alias.source,
+        "active": alias.voided_at is None,
+        "created_at": alias.created_at,
+    }
+
+
 def _receipt_match_dict(
     receipt: PurchaseReceipt,
     transaction: ExpenseTransaction | None,
@@ -738,3 +964,31 @@ def _optional_label(value: str | None, *, maximum: int) -> str | None:
 
 def _aware(value: datetime) -> datetime:
     return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
+
+
+def _utc_range(
+    start_date: date,
+    end_date: date,
+    timezone: str,
+) -> tuple[datetime, datetime]:
+    if start_date > end_date:
+        raise ClassificationActivityError("start_date must not be after end_date")
+    if (end_date - start_date).days >= MAX_CLASSIFICATION_ACTIVITY_RANGE_DAYS:
+        raise ClassificationActivityError(
+            "classification activity range cannot exceed "
+            f"{MAX_CLASSIFICATION_ACTIVITY_RANGE_DAYS} days"
+        )
+    try:
+        zone = ZoneInfo(timezone)
+    except (ValueError, ZoneInfoNotFoundError) as exc:
+        raise ClassificationActivityError("timezone must be a valid IANA timezone") from exc
+    try:
+        end_exclusive = end_date + timedelta(days=1)
+    except OverflowError as exc:
+        raise ClassificationActivityError(
+            "classification activity end date is out of range"
+        ) from exc
+    return (
+        datetime.combine(start_date, time.min, zone).astimezone(UTC),
+        datetime.combine(end_exclusive, time.min, zone).astimezone(UTC),
+    )

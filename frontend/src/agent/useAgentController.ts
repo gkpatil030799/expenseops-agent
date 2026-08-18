@@ -1,6 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
-import { AgentProtocolError } from "./validation";
+import {
+  AGENT_RESPONSE_UNAVAILABLE_MESSAGE,
+  AgentProtocolError,
+} from "./validation";
 import {
   AgentStreamError,
   archiveAgentConversation,
@@ -569,7 +572,11 @@ function uiError(cause: unknown, fallback: string): AgentUiError {
     };
   }
   if (cause instanceof AgentProtocolError) {
-    return { code: "invalid_agent_response", message: cause.message, retryable: true };
+    return {
+      code: "invalid_agent_response",
+      message: AGENT_RESPONSE_UNAVAILABLE_MESSAGE,
+      retryable: true,
+    };
   }
   return { code: "agent_request_failed", message: fallback, retryable: true };
 }

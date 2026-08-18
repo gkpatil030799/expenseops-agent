@@ -93,3 +93,82 @@ The following are intentional boundaries, not hidden setup requirements:
 - Concept merge does not combine HouseholdItems, cadence, acquisitions, or purchase history.
 - The global rollout flag defaults off and each workspace must opt in, so production behavior does
   not change merely because the code exists.
+
+## Natural-language Agent answers did not match the requested objective
+
+Status: resolved in Day 17 code and the final frozen-tree live matrix; not deployed.
+
+Observed behavior:
+
+- top category and top-five-merchant questions could return a generic spending total;
+- “this month” could depend on model-supplied dates rather than calendar-month semantics;
+- a typical restaurant check could be unsupported or label an average ambiguously;
+- restaurant increases repeated current/prior totals without explaining count, average, or
+  merchant changes;
+- recent staple candidates could route to the unrelated list of items predicted due;
+- normal grammar mistakes could turn a supported week comparison into an unsupported response;
+- coffee, uncertainty, typo-heavy, and contextual follow-up questions were provider-dependent;
+- valid replenishment and learning rows became unreadable inside the narrow desktop companion.
+
+Root cause:
+
+- the model could retrieve valid canonical evidence, but the exact analytical objective did not
+  survive through deterministic composition;
+- most temporal language and user-local today were not owned by one bounded resolver, while
+  Insights presets still used the browser clock;
+- tool exposure was narrow for only five of the thirteen exact prompt variants;
+- classification activity had no recent local-date staple-candidate/alias projection;
+- lifestyle output did not expose canonical merchant deltas;
+- the renderer silently sliced ranked rows and forced content, badge, and action into one narrow
+  flex row with character-level wrapping.
+
+Permanent acceptance evidence on 2026-08-18:
+
+- `scripts/benchmark_agent_day17.py` keeps all 13 exact variants separately: the 12 requested
+  scenarios plus both required week-comparison phrasings;
+- all 13/13 exact rows pass objective, dates, one-tool exposure/selection, arguments, direct answer,
+  structured block, one canonical call, unsupported-response, and read-only assertions;
+- nine close paraphrases and the exact four-turn dining chain bring routing to 26/26 with zero
+  wrong-domain routes, zero unnecessary clarifications, and zero unsupported deterministic
+  responses;
+- this month (Aug 1–17), last month (Jul 1–31), and last 30 days (Jul 19–Aug 17) are distinct for
+  the pinned Phoenix instant;
+- the Agent and every non-custom Insights preset now share the backend temporal service and exact
+  authenticated workspace/user timezone preference, with tested UTC fallback and no preference
+  write; preset resolution fails visibly instead of reverting to browser-local dates;
+- top category names Food & Dining with amount/share; top merchants returns exactly five ordered
+  rows; restaurant average says “average”; restaurant change includes total, count, average, and
+  measured merchant contributors;
+- staple candidates use classification activity, explicitly say they are not predicted due, and
+  render “Household item created” or “No household item created” with learning state/confidence;
+  learning and uncertainty answers use durable classification-ledger facts;
+- inert hostile merchant/category strings cannot change the objective, date range, allowlist, or
+  canonical total;
+- current registered read metadata is 15,022 bytes across the unchanged nine read tools; total
+  metadata is 20,199 bytes across the unchanged 13 read/action tools. Both grew 2,972 bytes from
+  the Day 16 checkpoint, while a supported exact turn exposes one read tool averaging 2,292.5
+  bytes, an 84.7% reduction versus exposing the complete current read surface;
+- local route-plus-canonical-composition latency measured 0.0593 ms median / 0.0720 ms p95 over
+  250 repetitions after 25 warmups, excluding provider, database, and browser work;
+- the focused Day 17 Playwright gate passed the 1024px/approximately-22-rem companion and
+  320/375/390px mobile widths (4 applicable passes, 12 intentional project skips), including long
+  labels, six ranked merchants, visible actions, no horizontal overflow, and no serious/critical
+  WCAG A/AA axe violations;
+- the deterministic benchmark makes no model call, uses no production data, and reports provider
+  tokens/cost as zero rather than inventing a live measurement;
+- the final frozen-tree opt-in synthetic, read-only paid matrix passed all 13 exact variants, a
+  separate rolling-30-day calendar control, and the exact four-turn follow-up: 18 read calls, zero
+  failures, 36 provider requests, 74,399 input / 1,654 output tokens, and $0.032409 estimated cost
+  using the dated official `gpt-4.1-mini` price snapshot. Median end-to-end latency was 2,908.5 ms;
+  p95/max was 17,077 ms and aggregate turn latency was 78,031 ms. The settled Lifestyle v1.3 /
+  transaction-search v1.2 registry used only synthetic data and created no write proposal or
+  financial operation.
+
+Detailed architecture, per-case before/after results, measurement boundaries, platform decisions,
+and validation commands are in `AGENT_INTELLIGENCE_UX_CLEANUP.md`.
+
+The answer and narrow-card regressions are marked resolved because their exact permanent tests pass.
+Reopen them if `frontend/e2e/agent-day17-frontend.spec.ts` fails at the 22-rem companion or
+320/375/390px mobile widths, if a ranked result is silently truncated, or if a protocol error
+exposes internal details. This is a code-local status only; it says nothing about the currently
+deployed production version.

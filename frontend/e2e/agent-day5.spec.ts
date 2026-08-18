@@ -1,7 +1,6 @@
 import { expect, test, type Page, type TestInfo } from "@playwright/test";
 
 import type { AgentStructuredResponse } from "../src/agent/contracts";
-import { dateRangeForPreset } from "../src/insightsLogic";
 import {
   agentStreamCallCount,
   agentStreamCalls,
@@ -16,6 +15,7 @@ import {
   type RecordedAgentStreamCall,
 } from "./fixtures/agent";
 import { emptyClassificationActivity } from "./fixtures/classification";
+import { insightsDateRangeForPreset } from "./fixtures/insights";
 
 const CONTEXTUAL_ANSWER = textResponse("This answer uses canonical ExpenseOps read evidence.");
 const READ_ONLY_ANSWER = textResponse(
@@ -440,8 +440,8 @@ test("desktop companion keeps one controller while current page context changes"
     schema_version: "1.0",
     surface: "expense_insights",
     filters: {
-      start_date: dateRangeForPreset("30d").start,
-      end_date: dateRangeForPreset("30d").end,
+      start_date: insightsDateRangeForPreset("30d").start_date,
+      end_date: insightsDateRangeForPreset("30d").end_date,
       date_preset: "30d",
       spend_basis: "card",
     },
@@ -477,8 +477,8 @@ test("Insights filters post the exact small semantic context for a grounded turn
         schema_version: "1.0",
         surface: "expense_insights",
         filters: {
-          start_date: dateRangeForPreset("90d").start,
-          end_date: dateRangeForPreset("90d").end,
+          start_date: insightsDateRangeForPreset("90d").start_date,
+          end_date: insightsDateRangeForPreset("90d").end_date,
           date_preset: "90d",
           category: "Food & Dining",
           spend_basis: "card",

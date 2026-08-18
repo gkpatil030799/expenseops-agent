@@ -141,7 +141,7 @@ def test_live_lifestyle_query_selects_one_canonical_read_tool() -> None:
             assert block.total_cents == 1_600
             assert block.credits_cents == 200
             assert block.transaction_count == 2
-            assert calls[0].tool_version == "1.0"
+            assert calls[0].tool_version == "1.3"
             assert calls[0].arguments_json["start_date"] == "2026-08-01"
             assert calls[0].arguments_json["end_date"] == "2026-08-16"
             assert calls[0].arguments_json["activity_type"] == "coffee"

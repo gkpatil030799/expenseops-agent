@@ -23,6 +23,7 @@ SpendBasis = Literal["card", "actual_share"]
 ReviewType = Literal["all", "personal", "shared"]
 Granularity = Literal["day", "week", "month"]
 ComparisonMode = Literal["immediately_preceding", "same_weekdays_last_week"]
+MAX_COMPARISON_RANGE_DAYS = 730
 
 
 CATEGORY_MAP: dict[str, tuple[str, ...]] = {
@@ -133,18 +134,20 @@ class SpendingInsightsService:
         granularity: Granularity = "day",
         currency_code: str | None = None,
         comparison_mode: ComparisonMode = "immediately_preceding",
+        comparison_start_date: date | None = None,
+        comparison_end_date: date | None = None,
     ) -> dict:
-        period_days = (end_date - start_date).days + 1
-        if comparison_mode == "same_weekdays_last_week":
-            previous_start = start_date - timedelta(days=7)
-            previous_end = end_date - timedelta(days=7)
-        else:
-            previous_end = start_date - timedelta(days=1)
-            previous_start = previous_end - timedelta(days=period_days - 1)
+        previous_start, previous_end = _comparison_range(
+            start_date=start_date,
+            end_date=end_date,
+            comparison_mode=comparison_mode,
+            comparison_start_date=comparison_start_date,
+            comparison_end_date=comparison_end_date,
+        )
         viewer_splitwise_user_id = self._viewer_splitwise_user_id()
         rows = self.canonical_rows(
-            start_date=previous_start,
-            end_date=end_date,
+            start_date=min(start_date, previous_start),
+            end_date=max(end_date, previous_end),
             spend_basis=spend_basis,
         )
         scoped_current = self._filter(
@@ -169,6 +172,12 @@ class SpendingInsightsService:
         for item in categories:
             item["previous_amount_cents"] = previous_categories.get(item["name"], 0)
         merchants = _breakdown(current, lambda row: row.merchant)
+        previous_merchants = {
+            item["name"]: item["amount_cents"]
+            for item in _breakdown(previous, lambda row: row.merchant)
+        }
+        for item in merchants:
+            item["previous_amount_cents"] = previous_merchants.get(item["name"], 0)
         personal_shared = {
             name: _sum(row for row in current if row.review_type == name)
             for name in ("personal", "shared")
@@ -321,6 +330,40 @@ class SpendingInsightsService:
             and (not merchant_query or merchant_query in row.merchant.casefold())
             and (review_type == "all" or row.review_type == review_type)
         ]
+
+
+def _comparison_range(
+    *,
+    start_date: date,
+    end_date: date,
+    comparison_mode: ComparisonMode,
+    comparison_start_date: date | None,
+    comparison_end_date: date | None,
+) -> tuple[date, date]:
+    """Resolve one bounded comparison period without changing legacy defaults."""
+
+    if (comparison_start_date is None) != (comparison_end_date is None):
+        raise ValueError("comparison_start_date and comparison_end_date must be provided together")
+    if comparison_start_date is not None and comparison_end_date is not None:
+        if comparison_mode == "same_weekdays_last_week":
+            raise ValueError(
+                "explicit comparison dates cannot be combined with same_weekdays_last_week"
+            )
+        _validate_comparison_range(comparison_start_date, comparison_end_date)
+        return comparison_start_date, comparison_end_date
+
+    period_days = (end_date - start_date).days + 1
+    if comparison_mode == "same_weekdays_last_week":
+        return start_date - timedelta(days=7), end_date - timedelta(days=7)
+    previous_end = start_date - timedelta(days=1)
+    return previous_end - timedelta(days=period_days - 1), previous_end
+
+
+def _validate_comparison_range(start_date: date, end_date: date) -> None:
+    if start_date > end_date:
+        raise ValueError("comparison_start_date must not be after comparison_end_date")
+    if (end_date - start_date).days > MAX_COMPARISON_RANGE_DAYS:
+        raise ValueError("comparison date range must be two years or less")
 
 
 def _to_spend_row(

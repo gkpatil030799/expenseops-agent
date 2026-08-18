@@ -4,18 +4,25 @@ from collections.abc import Mapping
 from datetime import date, datetime
 from enum import StrEnum
 from typing import Annotated, Any, Literal
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.classification_activity_schemas import (
+    MAX_CLASSIFICATION_ACTIVITY_RANGE_DAYS,
     ClassificationActivityCounts,
+    ClassificationActivityRangeCounts,
+    ClassificationActivityRangeSection,
+    ClassificationActivityRangeView,
     ClassificationActivitySection,
     ClassificationActivityView,
+    ClassificationAliasActivity,
     ClassificationCategoryActivity,
     ClassificationHouseholdItemActivity,
     ClassificationNewCategoryActivity,
     ClassificationReceiptItemActivity,
     ClassificationReceiptMatchActivity,
+    ClassificationStapleCandidateActivity,
     ClassificationTransactionActivity,
     ClassificationUncertainActivity,
 )
@@ -216,6 +223,14 @@ class AgentSpendingBreakdownItem(StrictAgentModel):
 
 class AgentSpendingSummaryBlock(AgentResponseBlockBase):
     type: Literal["spending_summary"] = "spending_summary"
+    focus: Literal[
+        "summary",
+        "comparison",
+        "top_categories",
+        "top_merchants",
+        "change_explanation",
+    ] = "summary"
+    requested_limit: int | None = Field(default=None, ge=1, le=10)
     title: str = Field(min_length=1, max_length=160)
     start_date: date
     end_date: date
@@ -249,6 +264,18 @@ class AgentSpendingSummaryBlock(AgentResponseBlockBase):
             self.unknown_share_transactions or self.previous_unknown_share_transactions
         ) and self.change_percent is not None:
             raise ValueError("incomplete actual-share comparisons cannot include a percentage")
+        if self.focus == "top_categories":
+            if self.requested_limit is None or len(self.top_categories) > self.requested_limit:
+                raise ValueError("top-category focus must honor the requested limit")
+            if self.top_merchants:
+                raise ValueError("top-category focus cannot include merchant rankings")
+        elif self.focus == "top_merchants":
+            if self.requested_limit is None or len(self.top_merchants) > self.requested_limit:
+                raise ValueError("top-merchant focus must honor the requested limit")
+            if self.top_categories:
+                raise ValueError("top-merchant focus cannot include category rankings")
+        elif self.requested_limit is not None:
+            raise ValueError("requested limit is only valid for a ranked focus")
         return self
 
 
@@ -460,12 +487,14 @@ class AgentReceiptSummaryBlock(AgentResponseBlockBase):
 
 class AgentClassificationActivityBlock(AgentResponseBlockBase):
     type: Literal["classification_activity_summary"] = "classification_activity_summary"
-    block_version: Literal["1.0"] = "1.0"
+    block_version: Literal["1.0", "1.1"] = "1.0"
     title: str = Field(min_length=1, max_length=160)
-    view: ClassificationActivityView
-    activity_date: date
-    timezone: Literal["UTC"] = "UTC"
-    counts: ClassificationActivityCounts
+    view: ClassificationActivityView | ClassificationActivityRangeView
+    activity_date: date | None = None
+    start_date: date | None = None
+    end_date: date | None = None
+    timezone: str = Field(default="UTC", min_length=1, max_length=64)
+    counts: ClassificationActivityCounts | ClassificationActivityRangeCounts
     transactions: list[ClassificationTransactionActivity] = Field(
         default_factory=list, max_length=20
     )
@@ -482,12 +511,16 @@ class AgentClassificationActivityBlock(AgentResponseBlockBase):
     new_household_items: list[ClassificationHouseholdItemActivity] = Field(
         default_factory=list, max_length=20
     )
+    staple_candidates: list[ClassificationStapleCandidateActivity] = Field(
+        default_factory=list, max_length=20
+    )
+    aliases: list[ClassificationAliasActivity] = Field(default_factory=list, max_length=20)
     cadence_updates: list[ClassificationHouseholdItemActivity] = Field(
         default_factory=list, max_length=20
     )
     uncertain: list[ClassificationUncertainActivity] = Field(default_factory=list, max_length=20)
-    truncated_sections: list[ClassificationActivitySection] = Field(
-        default_factory=list, max_length=8
+    truncated_sections: list[ClassificationActivitySection | ClassificationActivityRangeSection] = (
+        Field(default_factory=list, max_length=10)
     )
 
     @model_validator(mode="after")
@@ -499,9 +532,49 @@ class AgentClassificationActivityBlock(AgentResponseBlockBase):
             "new_categories": self.new_categories,
             "receipt_matches": self.receipt_matches,
             "new_household_items": self.new_household_items,
+            "staple_candidates": self.staple_candidates,
+            "aliases": self.aliases,
             "cadence_updates": self.cadence_updates,
             "uncertain": self.uncertain,
         }
+        if self.block_version == "1.0":
+            if (
+                self.activity_date is None
+                or self.start_date is not None
+                or self.end_date is not None
+            ):
+                raise ValueError("v1.0 classification activity requires one activity date")
+            if self.timezone != "UTC":
+                raise ValueError("v1.0 classification activity uses UTC")
+            if not isinstance(self.counts, ClassificationActivityCounts):
+                raise ValueError("v1.0 classification activity requires v1.0 counts")
+            if self.view not in {
+                "summary",
+                "categories",
+                "new_categories",
+                "matches",
+                "staples",
+                "cadence",
+                "uncertain",
+            }:
+                raise ValueError("v1.0 classification activity view is unsupported")
+            if self.staple_candidates or self.aliases:
+                raise ValueError("v1.0 classification activity cannot include v1.1 rows")
+            rows.pop("staple_candidates")
+            rows.pop("aliases")
+        else:
+            if self.activity_date is not None or self.start_date is None or self.end_date is None:
+                raise ValueError("v1.1 classification activity requires one bounded date range")
+            if self.start_date > self.end_date:
+                raise ValueError("classification activity start date must not exceed end date")
+            if (self.end_date - self.start_date).days >= MAX_CLASSIFICATION_ACTIVITY_RANGE_DAYS:
+                raise ValueError("classification activity date range exceeds the supported bound")
+            try:
+                ZoneInfo(self.timezone)
+            except (ValueError, ZoneInfoNotFoundError) as exc:
+                raise ValueError("classification activity timezone must be valid") from exc
+            if not isinstance(self.counts, ClassificationActivityRangeCounts):
+                raise ValueError("v1.1 classification activity requires v1.1 counts")
         counts = self.counts.model_dump()
         allowed = (
             set(rows)
@@ -511,6 +584,8 @@ class AgentClassificationActivityBlock(AgentResponseBlockBase):
                 "new_categories": {"new_categories"},
                 "matches": {"receipt_matches"},
                 "staples": {"new_household_items"},
+                "staple_candidates": {"staple_candidates"},
+                "aliases": {"aliases"},
                 "cadence": {"cadence_updates"},
                 "uncertain": {"uncertain"},
             }[self.view]
@@ -956,6 +1031,7 @@ class AgentToolStartedEvent(AgentStreamEventBase):
     type: Literal["tool_started"] = "tool_started"
     activity: Literal[
         "spending",
+        "lifestyle",
         "transactions",
         "replenishment",
         "receipts",
@@ -971,6 +1047,7 @@ class AgentToolCompletedEvent(AgentStreamEventBase):
     type: Literal["tool_completed"] = "tool_completed"
     activity: Literal[
         "spending",
+        "lifestyle",
         "transactions",
         "replenishment",
         "receipts",

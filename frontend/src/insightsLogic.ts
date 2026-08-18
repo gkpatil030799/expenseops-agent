@@ -1,40 +1,147 @@
+import type { AgentContextDescriptor } from "@/agent/pageContext";
+
 export type DatePreset = "7d" | "30d" | "this_month" | "last_month" | "90d" | "this_quarter" | "last_quarter" | "ytd" | "custom";
+export type ServerDatePreset = Exclude<DatePreset, "custom">;
 export type Granularity = "day" | "week" | "month";
 
 export type DateRange = { start: string; end: string; granularity: Granularity };
 
-const iso = (value: Date) => {
-  const year = value.getFullYear();
-  const month = String(value.getMonth() + 1).padStart(2, "0");
-  const day = String(value.getDate()).padStart(2, "0");
-  return `${year}-${month}-${day}`;
+export type PresetDateRangeResponse = {
+  preset: ServerDatePreset;
+  start_date: string;
+  end_date: string;
+  granularity: Granularity;
+  timezone: string;
 };
 
-const addDays = (value: Date, days: number) => {
-  const output = new Date(value.getFullYear(), value.getMonth(), value.getDate());
-  output.setDate(output.getDate() + days);
-  return output;
+export type LatestPresetRequest = {
+  signal: AbortSignal;
+  isCurrent: () => boolean;
 };
 
-export function dateRangeForPreset(preset: DatePreset, now = new Date()): DateRange {
-  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-  const monthStart = new Date(today.getFullYear(), today.getMonth(), 1);
-  const quarterStartMonth = Math.floor(today.getMonth() / 3) * 3;
-  const quarterStart = new Date(today.getFullYear(), quarterStartMonth, 1);
-  if (preset === "7d") return { start: iso(addDays(today, -6)), end: iso(today), granularity: "day" };
-  if (preset === "30d") return { start: iso(addDays(today, -29)), end: iso(today), granularity: "day" };
-  if (preset === "90d") return { start: iso(addDays(today, -89)), end: iso(today), granularity: "week" };
-  if (preset === "this_month") return { start: iso(monthStart), end: iso(today), granularity: "day" };
-  if (preset === "last_month") {
-    const start = new Date(today.getFullYear(), today.getMonth() - 1, 1);
-    return { start: iso(start), end: iso(addDays(monthStart, -1)), granularity: "day" };
+export type LatestPresetRequestGate = {
+  begin: () => LatestPresetRequest;
+  cancel: () => void;
+};
+
+const serverPresets = new Set<ServerDatePreset>([
+  "7d",
+  "30d",
+  "this_month",
+  "last_month",
+  "90d",
+  "this_quarter",
+  "last_quarter",
+  "ytd",
+]);
+
+const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
+const PRESET_DATE_RANGE_KEYS = new Set([
+  "preset",
+  "start_date",
+  "end_date",
+  "granularity",
+  "timezone",
+]);
+
+function isRealIsoDate(value: unknown): value is string {
+  if (typeof value !== "string" || !ISO_DATE.test(value)) return false;
+  const [year, month, day] = value.split("-").map(Number);
+  if (year < 1 || year > 9999 || month < 1 || month > 12 || day < 1) return false;
+  const leapYear = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+  const daysInMonth = [31, leapYear ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+  return day <= daysInMonth[month - 1];
+}
+
+function isSupportedTimezone(value: unknown): value is string {
+  if (
+    typeof value !== "string" ||
+    !value.trim() ||
+    value !== value.trim() ||
+    value.length > 64 ||
+    value.startsWith("/") ||
+    value.startsWith(".") ||
+    value.includes("\0")
+  ) return false;
+  try {
+    new Intl.DateTimeFormat("en-US", { timeZone: value }).format(0);
+    return true;
+  } catch {
+    return false;
   }
-  if (preset === "this_quarter") return { start: iso(quarterStart), end: iso(today), granularity: "week" };
-  if (preset === "last_quarter") {
-    const start = new Date(today.getFullYear(), quarterStartMonth - 3, 1);
-    return { start: iso(start), end: iso(addDays(quarterStart, -1)), granularity: "week" };
+}
+
+export const UNRESOLVED_INSIGHTS_CONTEXT: AgentContextDescriptor = {
+  pageContext: null,
+  label: "Insights",
+};
+
+export function insightsContextForPresetResolution(
+  ready: boolean,
+  resolved: () => AgentContextDescriptor,
+): AgentContextDescriptor {
+  return ready ? resolved() : UNRESOLVED_INSIGHTS_CONTEXT;
+}
+
+export function isServerDatePreset(preset: DatePreset): preset is ServerDatePreset {
+  return preset !== "custom";
+}
+
+export function presetDateRangePath(preset: ServerDatePreset): string {
+  return `/api/insights/date-range?preset=${encodeURIComponent(preset)}`;
+}
+
+export function dateRangeForPreset(
+  response: unknown,
+  expectedPreset?: ServerDatePreset,
+): DateRange {
+  const candidate = response as Partial<PresetDateRangeResponse> | null;
+  if (
+    !candidate ||
+    typeof candidate !== "object" ||
+    Array.isArray(candidate) ||
+    Object.keys(candidate).length !== PRESET_DATE_RANGE_KEYS.size ||
+    Object.keys(candidate).some((key) => !PRESET_DATE_RANGE_KEYS.has(key)) ||
+    typeof candidate.preset !== "string" ||
+    !serverPresets.has(candidate.preset as ServerDatePreset) ||
+    (expectedPreset !== undefined && candidate.preset !== expectedPreset) ||
+    !isRealIsoDate(candidate.start_date) ||
+    !isRealIsoDate(candidate.end_date) ||
+    candidate.start_date > candidate.end_date ||
+    typeof candidate.granularity !== "string" ||
+    !["day", "week", "month"].includes(candidate.granularity) ||
+    !isSupportedTimezone(candidate.timezone)
+  ) {
+    throw new Error("Invalid Insights preset date range response");
   }
-  return { start: iso(new Date(today.getFullYear(), 0, 1)), end: iso(today), granularity: "month" };
+  return {
+    start: candidate.start_date,
+    end: candidate.end_date,
+    granularity: candidate.granularity as Granularity,
+  };
+}
+
+export function createLatestPresetRequestGate(): LatestPresetRequestGate {
+  let version = 0;
+  let active: AbortController | null = null;
+  return {
+    begin() {
+      version += 1;
+      active?.abort();
+      const requestVersion = version;
+      const controller = new AbortController();
+      active = controller;
+      return {
+        signal: controller.signal,
+        isCurrent: () => requestVersion === version && !controller.signal.aborted,
+      };
+    },
+    cancel() {
+      version += 1;
+      active?.abort();
+      active = null;
+    },
+  };
 }
 
 export function customGranularity(start: string, end: string): Granularity {
