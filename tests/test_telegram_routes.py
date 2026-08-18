@@ -924,6 +924,56 @@ def test_button_mode_unaffected_by_ai_guardrails():
     assert keyboard["inline_keyboard"][1][0]["text"] == "Split"
 
 
+def test_day18_stale_review_callback_is_inert_after_web_resolution(monkeypatch):
+    edits = []
+
+    class ResolvedTransactionService:
+        def __init__(self, _db):
+            pass
+
+        def get_transaction(self, transaction_id):
+            assert transaction_id == 123
+            return type(
+                "Tx",
+                (),
+                {"status": "personal", "splitwise_expense_id": None},
+            )()
+
+    class FakeTelegramService:
+        def edit_message(self, message, *, chat_id, message_id, reply_markup=None):
+            edits.append((message, chat_id, message_id, reply_markup))
+
+    monkeypatch.setattr(telegram_routes, "TransactionService", ResolvedTransactionService)
+    monkeypatch.setattr(
+        telegram_routes,
+        "_mark_personal",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("a stale callback must not mutate the transaction")
+        ),
+    )
+
+    answer = telegram_routes._route_review_callback(
+        "personal",
+        123,
+        "chat-1",
+        "user-1",
+        77,
+        type("Db", (), {"get": lambda _self, *_args: None})(),
+        FakeTelegramService(),
+    )
+
+    assert answer == "This purchase was already resolved."
+    assert edits == [
+        (
+            "This purchase was already resolved. Open Review for its current status; "
+            "nothing else was changed.",
+            "chat-1",
+            77,
+            None,
+        )
+    ]
+
+
 def test_telegram_callback_ai_chat_starts_pending_state(monkeypatch):
     messages = []
     answers = []

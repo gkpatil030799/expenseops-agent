@@ -138,6 +138,7 @@ def test_read_only_runtime_migration_repairs_and_prevents_duplicate_trigger_runs
         "20260817_0031",
         "20260817_0032",
         "20260817_0033",
+        "20260818_0034",
     }
     index = next(
         value

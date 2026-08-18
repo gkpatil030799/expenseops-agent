@@ -438,6 +438,7 @@ class ReceiptIngestionService:
         receipt.parse_status = ReceiptParseStatus.CONFIRMED.value
         receipt.confirmed_at = utc_now()
         receipt.updated_at = utc_now()
+        self._sync_review_items(receipt)
         if commit:
             self.db.commit()
             return self.get(receipt.id)
@@ -565,6 +566,7 @@ class ReceiptIngestionService:
                 linked_transaction_id,
                 commit=False,
             )
+        self._sync_review_items(receipt)
         self.db.commit()
         return self.get(receipt.id)
 
@@ -578,6 +580,7 @@ class ReceiptIngestionService:
         ReceiptTransactionReconciliationService(self.db).reconcile_receipt(receipt)
         if self.settings.autonomous_classification_enabled:
             self._classify_receipt_nonblocking(receipt)
+        self._sync_review_items(receipt)
         self.db.commit()
         return self.get(receipt.id)
 
@@ -852,6 +855,7 @@ class ReceiptIngestionService:
             receipt.failure_code = "receipt_transaction_match_ambiguous"
         if self.settings.autonomous_classification_enabled:
             self._classify_receipt_nonblocking(receipt)
+        self._sync_review_items(receipt)
         record_audit_once(
             self.db,
             event_type="first_receipt_processed",
@@ -900,6 +904,11 @@ class ReceiptIngestionService:
         ):
             return self.confirm(receipt.id, user_confirmed=False)
         return receipt
+
+    def _sync_review_items(self, receipt: PurchaseReceipt) -> None:
+        from app.services.review_inbox_service import ReviewInboxService
+
+        ReviewInboxService(self.db).sync_receipt(receipt, commit=False)
 
     def _classify_receipt_nonblocking(self, receipt: PurchaseReceipt) -> None:
         """Apply all internal receipt effects atomically or schedule repair."""

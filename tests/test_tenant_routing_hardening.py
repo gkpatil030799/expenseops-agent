@@ -70,6 +70,7 @@ DAY16_TENANT_TABLES = {
     "classification_settings",
     "classification_decisions",
 }
+DAY18_TENANT_TABLES = {"review_items"}
 
 EXPECTED_ROUTING_SIGNATURES = {
     "public.expenseops_route_plaid_item(text)",
@@ -110,7 +111,15 @@ def test_tenant_routing_and_policy_hardening_are_linear_head():
         memory_revision = scripts.get_revision("20260817_0031")
         attention_revision = scripts.get_revision("20260817_0032")
         classification_revision = scripts.get_revision("20260817_0033")
-        if classification_revision is not None:
+        review_revision = scripts.get_revision("20260818_0034")
+        if review_revision is not None:
+            assert receipt_revision.down_revision == "20260815_0029"
+            assert memory_revision.down_revision == "20260817_0030"
+            assert attention_revision.down_revision == "20260817_0031"
+            assert classification_revision.down_revision == "20260817_0032"
+            assert review_revision.down_revision == "20260817_0033"
+            assert scripts.get_current_head() == "20260818_0034"
+        elif classification_revision is not None:
             assert receipt_revision.down_revision == "20260815_0029"
             assert memory_revision.down_revision == "20260817_0030"
             assert attention_revision.down_revision == "20260817_0031"
@@ -224,7 +233,12 @@ def test_policy_hardening_covers_exact_tenant_model_set_without_escape(monkeypat
         if issubclass(mapper.class_, TenantScoped)
     }
     assert set(migration.TENANT_TABLES) == EXPECTED_TENANT_TABLES
-    assert model_tables == EXPECTED_TENANT_TABLES | DAY13_TENANT_TABLES | DAY16_TENANT_TABLES
+    assert model_tables == (
+        EXPECTED_TENANT_TABLES
+        | DAY13_TENANT_TABLES
+        | DAY16_TENANT_TABLES
+        | DAY18_TENANT_TABLES
+    )
     assert len(migration.TENANT_TABLES) == len(set(migration.TENANT_TABLES)) == 34
     protected_tables = {*migration.TENANT_TABLES, *migration.TENANT_CHILD_POLICIES}
     assert len(migration.TENANT_CHILD_POLICIES) == 7
@@ -320,6 +334,23 @@ def test_classification_migration_force_enables_exact_workspace_rls_and_child_gu
     assert "cross-workspace classification concept link" in joined
     assert "cross-workspace receipt transaction link" in joined
     assert joined.count("ERRCODE = '23514'") >= 4
+
+
+def test_review_inbox_migration_force_enables_exact_workspace_rls(monkeypatch):
+    migration = _migration("20260818_0034")
+    recorder = _RecordingOp()
+    monkeypatch.setattr(migration, "op", recorder)
+
+    migration._enable_rls()
+
+    assert recorder.statements == [
+        'ALTER TABLE public."review_items" ENABLE ROW LEVEL SECURITY',
+        'ALTER TABLE public."review_items" FORCE ROW LEVEL SECURITY',
+        'CREATE POLICY expenseops_workspace_isolation ON public."review_items" '
+        "USING (workspace_id = NULLIF(current_setting('expenseops.workspace_id', "
+        "true), '')::integer) WITH CHECK (workspace_id = "
+        "NULLIF(current_setting('expenseops.workspace_id', true), '')::integer)",
+    ]
 
 
 @pytest.mark.skipif(

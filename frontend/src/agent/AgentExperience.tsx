@@ -19,6 +19,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { ResponsiveSheet } from "@/components/ui/responsive-sheet";
 import { Surface } from "@/components/ui/surface";
+import type { ReviewItem } from "@/types";
 
 import { AgentResponseRenderer, type AgentNavigationRequest } from "./AgentResponseRenderer";
 import type {
@@ -39,6 +40,7 @@ export default function AgentExperience({
   onClose,
   onNavigate,
   readOnly,
+  reviewItems = [],
 }: {
   mode: "panel" | "page";
   pageContext: AgentPageContext | null;
@@ -48,6 +50,7 @@ export default function AgentExperience({
   onClose?: () => void;
   onNavigate?: (request: AgentNavigationRequest) => void;
   readOnly: boolean;
+  reviewItems?: ReviewItem[];
 }) {
   const controller = useAgentController(pageContext);
   const [draft, setDraft] = useState("");
@@ -197,6 +200,9 @@ export default function AgentExperience({
           setShowJumpToLatest(!nearBottom);
         }}
       >
+        {reviewItems.length ? (
+          <AgentReviewItems items={reviewItems} onNavigate={onNavigate} />
+        ) : null}
         {controller.initializing || controller.loadingConversation ? (
           <ConversationSkeleton />
         ) : controller.messages.length || controller.streamingText || controller.streamingResponse ? (
@@ -314,6 +320,64 @@ export default function AgentExperience({
       </form>
       <p className="sr-only" aria-live="polite" aria-atomic="true">{controller.announcement}</p>
     </Surface>
+  );
+}
+
+function AgentReviewItems({
+  items,
+  onNavigate,
+}: {
+  items: ReviewItem[];
+  onNavigate?: (request: AgentNavigationRequest) => void;
+}) {
+  return (
+    <section className="mb-4 rounded-card border border-indigo-200 bg-indigo-50 p-3" aria-labelledby="agent-review-heading">
+      <div className="flex items-center justify-between gap-2">
+        <div>
+          <p className="text-xs font-semibold uppercase tracking-wide text-indigo-700">Needs decision</p>
+          <h2 id="agent-review-heading" className="text-sm font-semibold text-slate-950">
+            {items.length} review item{items.length === 1 ? "" : "s"}
+          </h2>
+        </div>
+        <Badge variant="secondary">Live inbox</Badge>
+      </div>
+      <div className="mt-2 grid gap-2">
+        {items.slice(0, 3).map((item) => {
+          const transaction = item.transaction;
+          const receipt = item.receipt;
+          const label = transaction
+            ? transaction.merchant_name || transaction.name
+            : receipt?.merchant_name || "Receipt";
+          const detail = transaction
+            ? `${transaction.currency} ${(Math.abs(transaction.amount_cents) / 100).toFixed(2)}${transaction.pending ? " · Pending" : ""}`
+            : item.kind === "receipt_match_needed"
+              ? "Receipt match needed"
+              : "Itemized split ready";
+          return (
+            <button
+              key={item.public_id}
+              type="button"
+              className="flex min-h-11 min-w-0 items-center justify-between gap-3 rounded-control border border-indigo-100 bg-white px-3 py-2 text-left hover:border-indigo-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-600"
+              onClick={() => onNavigate?.({
+                target_surface: transaction ? "expense_review" : "household_receipts",
+                entity: transaction
+                  ? { kind: "transaction", public_id: String(transaction.id) }
+                  : receipt
+                    ? { kind: "receipt", public_id: String(receipt.id) }
+                    : null,
+              })}
+            >
+              <span className="min-w-0">
+                <span className="block truncate text-sm font-semibold text-slate-900">{label}</span>
+                <span className="block truncate text-xs text-slate-600">{detail}</span>
+              </span>
+              <ChevronRight className="size-4 shrink-0 text-indigo-600" aria-hidden="true" />
+            </button>
+          );
+        })}
+      </div>
+      {items.length > 3 ? <p className="mt-2 text-xs text-indigo-700">And {items.length - 3} more in Review.</p> : null}
+    </section>
   );
 }
 

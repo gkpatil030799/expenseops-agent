@@ -1317,7 +1317,7 @@ class ReadOnlyAgentOrchestrator:
             consequential = _is_consequential_request(text, page_context)
             mixed_read_action = consequential and _has_supported_read_intent(text)
             if consequential and not mixed_read_action and not action_mode:
-                response = _read_only_action_response()
+                response = _read_only_action_response(action_tool_name=action_tool_name)
                 return self._complete_turn(
                     run_public_id,
                     user_message_public_id,
@@ -1338,6 +1338,46 @@ class ReadOnlyAgentOrchestrator:
                 page_context=page_context,
                 history=history,
             )
+            if (
+                action_mode
+                and page_context is None
+                and _action_uses_implicit_review_target(text)
+            ):
+                from app.services.review_inbox_service import ReviewInboxService
+
+                inbox = ReviewInboxService(self.db)
+                implicit_tx = inbox.unique_active_transaction()
+                if implicit_tx is None:
+                    count = inbox.open_transaction_count()
+                    clarification = (
+                        "Which purchase do you mean? Open or name one of the purchases "
+                        "in Review."
+                        if count > 1
+                        else "There is no active purchase waiting for review. Name the purchase "
+                        "you want to change."
+                    )
+                    response = AgentStructuredResponse(
+                        blocks=[AgentTextBlock(text=clarification)]
+                    )
+                    return self._complete_turn(
+                        run_public_id,
+                        user_message_public_id,
+                        conversation_public_id=conversation_public_id,
+                        owner_user_id=owner_user_id,
+                        response=response,
+                        started=started,
+                        runtime_result=None,
+                    )
+                action_defaults = dict(contextual_policy.current_defaults)
+                action_values = dict(action_defaults.get(action_tool_name, {}))
+                action_values["transaction_id"] = implicit_tx.id
+                action_defaults[action_tool_name] = action_values
+                contextual_policy = ContextualToolPolicy(
+                    current_defaults=action_defaults,
+                    carry_defaults=contextual_policy.carry_defaults,
+                    clarification_kind=None,
+                    referential=True,
+                )
             if contextual_policy.clarification_kind is not None:
                 response = AgentStructuredResponse(
                     blocks=[
@@ -5027,15 +5067,25 @@ def _integration_response(output: dict[str, Any]) -> AgentStructuredResponse:
     )
 
 
-def _read_only_action_response() -> AgentStructuredResponse:
+def _read_only_action_response(*, action_tool_name: str | None = None) -> AgentStructuredResponse:
+    if action_tool_name in {POST_SPLITWISE_TOOL_NAME, ITEMIZED_RECEIPT_SPLIT_TOOL_NAME}:
+        message = (
+            "Splitting is currently disabled for this workspace. Nothing was changed or sent. "
+            "You can still review the purchase directly."
+        )
+    elif action_tool_name is not None:
+        message = (
+            "Agent actions are disabled for this workspace. Nothing was changed or sent. "
+            "This read-only mode still lets you use the Review controls directly."
+        )
+    else:
+        message = (
+            "That action is not available in the read-only ExpenseOps assistant yet. "
+            "Nothing was changed, posted, purchased, or sent."
+        )
     return AgentStructuredResponse(
         blocks=[
-            AgentTextBlock(
-                text=(
-                    "That action is not available in the read-only ExpenseOps assistant yet. "
-                    "Nothing was changed, posted, purchased, or sent."
-                )
-            )
+            AgentTextBlock(text=message)
         ]
     )
 
@@ -5090,7 +5140,10 @@ def _supported_action_tool(
     if re.search(
         rf"(?:^\s*{polite_prefix}|\b{compound_prefix})split\b.{{0,120}}\b{split_target}\b|"
         rf"(?:^\s*{polite_prefix}|\b{compound_prefix})share\b.{{0,120}}"
-        rf"\b{explicit_financial_target}\b",
+        rf"\b{explicit_financial_target}\b|"
+        r"^\s*(?:please\s+)?split(?:\s+this)?\s+(?:between|with)\b|"
+        r"^\s*50\s*/\s*50\s+with\b|"
+        r"^\s*this\s+was\s+shared\s+with\b",
         text,
         re.IGNORECASE,
     ):
@@ -5100,12 +5153,27 @@ def _supported_action_tool(
         r"\b(?:mark|classify|make)\b.{0,100}\b(?:transaction|charge|expense|this|that|it)\b"
         r".{0,80}\bpersonal\b|"
         r"\b(?:mark|classify|make)\b.{0,100}\bpersonal\b.{0,80}"
-        r"\b(?:transaction|charge|expense|this|that|it)\b",
+        r"\b(?:transaction|charge|expense|this|that|it)\b|"
+        r"^\s*(?:mark\s+)?this\s+(?:is\s+)?personal\s*[.!?]*\s*$",
         text,
         re.IGNORECASE,
     ):
         return MARK_PERSONAL_TOOL_NAME
     return None
+
+
+def _action_uses_implicit_review_target(text: str) -> bool:
+    """Recognize only terse referents that may use one canonical active inbox item."""
+
+    return bool(
+        re.search(
+            r"^\s*(?:please\s+)?(?:split(?:\s+this)?\s+(?:between|with)|"
+            r"50\s*/\s*50\s+with|this\s+was\s+shared\s+with|"
+            r"mark\s+this\s+personal|this\s+is\s+personal)\b",
+            text,
+            re.IGNORECASE,
+        )
+    )
 
 
 def _is_consequential_request(
