@@ -63,6 +63,7 @@ import {
 } from "@/dashboardLogic";
 import { ApiError, api, apiErrorMessage } from "@/lib/api";
 import { authenticationView } from "@/onboardingLogic";
+import { parseReviewInbox } from "@/reviewInbox";
 import { SandboxLabPage } from "$sandbox/SandboxLabPage";
 import type {
   DashboardFilters,
@@ -73,6 +74,9 @@ import type {
   FinancialActivityPage,
   Group,
   MemoryEntry,
+  ReviewInboxPage,
+  ReviewItem,
+  ReviewRecommendation,
   SplitwiseUser,
   StructuredMemoryMetrics,
   StructuredMemorySettings,
@@ -147,6 +151,7 @@ function DashboardApp() {
   const [recoveryTransactions, setRecoveryTransactions] = useState<Transaction[]>([]);
   const [recentTransactions, setRecentTransactions] = useState<Transaction[]>([]);
   const [allTransactions, setAllTransactions] = useState<Transaction[]>([]);
+  const [reviewInbox, setReviewInbox] = useState<ReviewInboxPage | null>(null);
   const [financialActivity, setFinancialActivity] = useState<FinancialActivityPage | null>(null);
   const [financialActivityLoading, setFinancialActivityLoading] = useState(false);
   const [financialActivityError, setFinancialActivityError] = useState("");
@@ -194,7 +199,9 @@ function DashboardApp() {
   const [transactionActionById, setTransactionActionById] = useState<Record<number, string>>({});
   const [transactionNoticeById, setTransactionNoticeById] = useState<Record<number, ActionNotice>>({});
   const [reviewNotice, setReviewNotice] = useState<ActionNotice | null>(null);
+  const [reviewInboxStale, setReviewInboxStale] = useState(false);
   const pendingTransactionActions = useRef(new Set<number>());
+  const reviewSeenRequests = useRef(new Map<string, string>());
   const [log, setLog] = useState<unknown>({ status: "Ready" });
   const [onboardingNotice, setOnboardingNotice] = useState<{ tone: "success" | "error"; text: string; action?: "switch-account" } | null>(null);
   const [accountContext, setAccountContext] = useState<AccountContext | null>(null);
@@ -225,6 +232,18 @@ function DashboardApp() {
   const pendingReviewTransactions = useMemo(
     () => filterTransactions(transactions, { ...filters, group: "", status: "" }),
     [transactions, filters],
+  );
+  const reviewRecommendations = useMemo(
+    () => new Map(
+      (reviewInbox?.items || [])
+        .filter((item) => item.transaction && item.recommendation)
+        .map((item) => [item.transaction!.id, item.recommendation!]),
+    ),
+    [reviewInbox],
+  );
+  const receiptReviewItems = useMemo(
+    () => (reviewInbox?.items || []).filter((item) => item.receipt !== null),
+    [reviewInbox],
   );
   const analytics = useMemo(
     () => analyticsForTransactions(allTransactions, analyticsDays),
@@ -344,6 +363,7 @@ function DashboardApp() {
         void loadRecentActivity();
         void loadCurrentSplitwiseUser();
         void loadAIMemories();
+        void loadReviewInbox();
       })
       .finally(() => setAuthResolved(true));
   }, []);
@@ -355,6 +375,69 @@ function DashboardApp() {
     }, 15000);
     return () => window.clearInterval(timer);
   }, [accountContext]);
+
+  useEffect(() => {
+    if (!accountContext) return;
+    let cancelled = false;
+    let failures = 0;
+    let timer = 0;
+    const poll = async () => {
+      if (document.visibilityState === "visible") {
+        try {
+          const page = parseReviewInbox(await api<unknown>("/api/review-inbox?limit=100"));
+          if (!cancelled) {
+            setReviewInbox(page);
+            setReviewInboxStale(false);
+          }
+          failures = 0;
+        } catch {
+          if (!cancelled) setReviewInboxStale(true);
+          failures = Math.min(failures + 1, 4);
+        }
+      }
+      if (!cancelled) {
+        const base = Math.min(60_000, 10_000 * 2 ** failures);
+        timer = window.setTimeout(poll, base + Math.floor(Math.random() * 2_000));
+      }
+    };
+    timer = window.setTimeout(poll, 10_000);
+    return () => { cancelled = true; window.clearTimeout(timer); };
+  }, [accountContext]);
+
+  useEffect(() => {
+    const inboxVisible =
+      (activeWorkspace === "expenses" && expenseTab === "review") ||
+      activeWorkspace === "agent" ||
+      agentPanelOpen;
+    if (!inboxVisible || !reviewInbox) return;
+    const unread = reviewInbox.items
+      .filter(
+        (item) =>
+          item.unread && reviewSeenRequests.current.get(item.public_id) !== item.updated_at,
+      )
+      .slice(0, 100);
+    if (!unread.length) return;
+    unread.forEach((item) => reviewSeenRequests.current.set(item.public_id, item.updated_at));
+    setReviewInbox((current) => current ? {
+      ...current,
+      unread_count: Math.max(0, current.unread_count - unread.length),
+      items: current.items.map((item) => unread.some((row) => row.public_id === item.public_id)
+        ? { ...item, unread: false }
+        : item),
+    } : current);
+    void Promise.allSettled(
+      unread.map((item) => api(`/api/review-inbox/${item.public_id}/seen`, { method: "POST" })),
+    ).then((results) => {
+      results.forEach((result, index) => {
+        if (result.status === "rejected") {
+          const item = unread[index];
+          if (reviewSeenRequests.current.get(item.public_id) === item.updated_at) {
+            reviewSeenRequests.current.delete(item.public_id);
+          }
+        }
+      });
+    });
+  }, [activeWorkspace, agentPanelOpen, expenseTab, reviewInbox]);
 
   useEffect(() => {
     if (!accountContext || activeWorkspace !== "expenses" || expenseTab !== "activity") return;
@@ -506,7 +589,7 @@ function DashboardApp() {
     await run(
       "transactions",
       async () => {
-        const data = await api<Transaction[]>("/transactions?status=ask_user");
+        const data = await loadReviewTransactionsData();
         setTransactions(data);
         setAllTransactions((current) => mergeTransactions(current, data));
         return { loaded_transactions: data.length };
@@ -515,8 +598,29 @@ function DashboardApp() {
     );
   }
 
+  async function loadReviewTransactionsData() {
+    const groups = await Promise.all(
+      ["ask_user", "shared_draft"].map((status) =>
+        api<Transaction[]>(`/transactions?status=${status}`),
+      ),
+    );
+    return Array.from(
+      new Map(groups.flat().map((transaction) => [transaction.id, transaction])).values(),
+    ).sort((left, right) => right.updated_at.localeCompare(left.updated_at));
+  }
+
+  async function loadReviewInbox() {
+    try {
+      const page = parseReviewInbox(await api<unknown>("/api/review-inbox?limit=100"));
+      setReviewInbox(page);
+      setReviewInboxStale(false);
+    } catch {
+      setReviewInboxStale(true);
+    }
+  }
+
   async function refreshReviewData() {
-    await Promise.all([loadTransactions(), loadRecoveryTransactions()]);
+    await Promise.all([loadTransactions(), loadRecoveryTransactions(), loadReviewInbox()]);
     await loadRecentActivity();
   }
 
@@ -533,7 +637,7 @@ function DashboardApp() {
   async function refreshDashboardQuietly() {
     try {
       const [pending, recent] = await Promise.all([
-        api<Transaction[]>("/transactions?status=ask_user"),
+        loadReviewTransactionsData(),
         loadRecentActivityData(),
       ]);
       setTransactions(pending);
@@ -1030,6 +1134,7 @@ function DashboardApp() {
           agentOpen={agentPanelOpen}
           agentLauncherRef={agentLauncherRef}
           onOpenAgent={openAgentPanel}
+          reviewUnreadCount={reviewInbox?.unread_count || 0}
         />
       }
       mobileNavigation={
@@ -1037,6 +1142,7 @@ function DashboardApp() {
           active={activeWorkspace}
           onChange={changeWorkspace}
           agentEnabled={agentEnabled}
+          reviewUnreadCount={reviewInbox?.unread_count || 0}
         />
       }
     >
@@ -1050,6 +1156,7 @@ function DashboardApp() {
             onClearContext={clearAgentContext}
             onRestoreContext={restoreAgentContext}
             onNavigate={navigateFromAgent}
+            reviewItems={reviewInbox?.items || []}
           />
         </Suspense>
       ) : (
@@ -1089,7 +1196,7 @@ function DashboardApp() {
           />
         ) : (
           <>
-        <Header active={expenseTab} onSync={syncTransactions} busy={busy} pendingCount={transactions.length} pendingTotal={pendingTotal} lastSyncLabel={lastSyncedAt ? relativeTime(lastSyncedAt) : lastSyncLabel} syncError={syncError} />
+        <Header active={expenseTab} onSync={syncTransactions} busy={busy} pendingCount={reviewInbox?.total_open ?? transactions.length} pendingTotal={pendingTotal} lastSyncLabel={lastSyncedAt ? relativeTime(lastSyncedAt) : lastSyncLabel} syncError={syncError} />
         <ExpenseTabs
           active={expenseTab}
           onChange={changeExpenseTab}
@@ -1098,6 +1205,11 @@ function DashboardApp() {
 
         {expenseTab === "review" ? <div className="space-y-6">
         <ReviewFilters filters={filters} onChange={updateFilter} />
+        {reviewInboxStale ? (
+          <p role="status" className="rounded-control border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">
+            Review updates are temporarily unavailable. Showing the most recent results and retrying automatically.
+          </p>
+        ) : null}
         {reviewNotice ? (
           <div
             role={reviewNotice.tone === "error" ? "alert" : "status"}
@@ -1119,12 +1231,14 @@ function DashboardApp() {
               </div>
             </div>
 
+            <ReviewReceiptTasks items={receiptReviewItems} onNavigate={navigateFromAgent} />
             {pendingReviewTransactions.length ? (
               <div className="grid gap-4">
                 {pendingReviewTransactions.map((transaction) => (
                   <TransactionCard
                     key={transaction.id}
                     transaction={transaction}
+                    recommendation={reviewRecommendations.get(transaction.id) || null}
                     busy={transactionActionById[transaction.id] || null}
                     actionNotice={transactionNoticeById[transaction.id] || null}
                     query={friendQueriesByTx[transaction.id] || ""}
@@ -1173,6 +1287,22 @@ function DashboardApp() {
                     onExpandedChange={(expanded) =>
                       setTransactionExpanded(transaction.id, expanded)
                     }
+                    onUseRecommended={() => {
+                      const recommendation = reviewRecommendations.get(transaction.id);
+                      setTransactionExpanded(transaction.id, true);
+                      if (recommendation?.participant_names.length) {
+                        setFriendQueriesByTx((current) => ({
+                          ...current,
+                          [transaction.id]: recommendation.participant_names.join(", "),
+                        }));
+                      }
+                      if (recommendation?.group_name) {
+                        setGroupQueriesByTx((current) => ({
+                          ...current,
+                          [transaction.id]: recommendation.group_name || "",
+                        }));
+                      }
+                    }}
                     onAgentFocus={() =>
                       setFocusedTransactionId((current) =>
                         current === transaction.id ? null : transaction.id,
@@ -1193,7 +1323,7 @@ function DashboardApp() {
                   />
                 ))}
               </div>
-            ) : (
+            ) : receiptReviewItems.length || reviewInboxStale ? null : (
               <EmptyState
                 icon={CheckCircle2}
                 title="You're all caught up"
@@ -1231,6 +1361,7 @@ function DashboardApp() {
                   onRestoreContext={restoreAgentContext}
                   onClose={closeAgentPanel}
                   onNavigate={navigateFromAgent}
+                  reviewItems={reviewInbox?.items || []}
                 />
               </Suspense>
             </aside>
@@ -1247,6 +1378,7 @@ function DashboardApp() {
                   onRestoreContext={restoreAgentContext}
                   onClose={closeAgentPanel}
                   onNavigate={navigateFromAgent}
+                  reviewItems={reviewInbox?.items || []}
                 />
               </Suspense>
             </AgentFullscreenDialog>
@@ -1266,6 +1398,7 @@ function WorkspaceNavigation({
   agentOpen,
   agentLauncherRef,
   onOpenAgent,
+  reviewUnreadCount,
 }: {
   active: WorkspaceView;
   onChange: (value: WorkspaceView) => void;
@@ -1275,6 +1408,7 @@ function WorkspaceNavigation({
   agentOpen: boolean;
   agentLauncherRef: RefObject<HTMLButtonElement>;
   onOpenAgent: () => void;
+  reviewUnreadCount: number;
 }) {
   return (
     <>
@@ -1292,7 +1426,7 @@ function WorkspaceNavigation({
             ExpenseOps
           </button>
           <nav className="flex items-center gap-1" aria-label="Primary navigation">
-            <DesktopNavItem active={active === "expenses"} label="Expenses" icon={WalletCards} onClick={() => onChange("expenses")} />
+            <DesktopNavItem active={active === "expenses"} label="Expenses" icon={WalletCards} badge={reviewUnreadCount} onClick={() => onChange("expenses")} />
             <DesktopNavItem active={active === "household"} label="Household" icon={House} onClick={() => onChange("household")} />
             <DesktopNavItem active={active === "promotions"} label="Deals" icon={Tags} onClick={() => onChange("promotions")} />
             {agentEnabled ? (
@@ -1348,18 +1482,20 @@ function WorkspaceNavigation({
   );
 }
 
-function DesktopNavItem({ active, label, icon: Icon, onClick }: { active: boolean; label: string; icon: ComponentType<{ className?: string }>; onClick: () => void }) {
-  return <button type="button" onClick={onClick} aria-current={active ? "page" : undefined} className={`touch-target inline-flex items-center gap-2 rounded-control px-3 text-sm font-medium transition-colors duration-hover ${active ? "bg-ui-primary-tint text-ui-primary" : "text-ui-text hover:bg-slate-50 hover:text-ink"}`}><Icon className="h-4 w-4" aria-hidden="true" />{label}</button>;
+function DesktopNavItem({ active, label, icon: Icon, badge = 0, onClick }: { active: boolean; label: string; icon: ComponentType<{ className?: string }>; badge?: number; onClick: () => void }) {
+  return <button type="button" onClick={onClick} aria-current={active ? "page" : undefined} aria-label={badge ? `${label}, ${badge} unread review items` : label} className={`touch-target inline-flex items-center gap-2 rounded-control px-3 text-sm font-medium transition-colors duration-hover ${active ? "bg-ui-primary-tint text-ui-primary" : "text-ui-text hover:bg-slate-50 hover:text-ink"}`}><Icon className="h-4 w-4" aria-hidden="true" />{label}{badge ? <Badge className="min-w-5 justify-center bg-rose-600 px-1.5 text-white">{badge > 99 ? "99+" : badge}</Badge> : null}</button>;
 }
 
 function MobileNavigation({
   active,
   onChange,
   agentEnabled,
+  reviewUnreadCount,
 }: {
   active: WorkspaceView;
   onChange: (value: WorkspaceView) => void;
   agentEnabled: boolean;
+  reviewUnreadCount: number;
 }) {
   const items = [
     { value: "expenses" as const, label: "Expenses", icon: WalletCards },
@@ -1367,7 +1503,7 @@ function MobileNavigation({
     { value: "promotions" as const, label: "Deals", icon: Tags },
     ...(agentEnabled ? [{ value: "agent" as const, label: "Agent", icon: Bot }] : []),
   ];
-  return <nav className={`fixed inset-x-3 bottom-3 z-40 grid ${agentEnabled ? "grid-cols-4" : "grid-cols-3"} rounded-card border border-ui-border bg-white/95 p-1.5 shadow-primary backdrop-blur md:hidden`} aria-label="Primary mobile navigation">{items.map(({ value, label, icon: Icon }) => <button key={value} type="button" onClick={() => onChange(value)} aria-current={active === value ? "page" : undefined} className={`flex min-h-14 flex-col items-center justify-center gap-1 rounded-control text-xs font-semibold transition-colors duration-hover ${active === value ? "bg-ui-primary text-white" : "text-ui-text hover:bg-slate-50 hover:text-ink"}`}><Icon className="h-5 w-5" aria-hidden="true" />{label}</button>)}</nav>;
+  return <nav className={`fixed inset-x-3 bottom-3 z-40 grid ${agentEnabled ? "grid-cols-4" : "grid-cols-3"} rounded-card border border-ui-border bg-white/95 p-1.5 shadow-primary backdrop-blur md:hidden`} aria-label="Primary mobile navigation">{items.map(({ value, label, icon: Icon }) => { const badge = value === "expenses" ? reviewUnreadCount : 0; return <button key={value} type="button" onClick={() => onChange(value)} aria-current={active === value ? "page" : undefined} aria-label={badge ? `${label}, ${badge} unread review items` : label} className={`relative flex min-h-14 flex-col items-center justify-center gap-1 rounded-control text-xs font-semibold transition-colors duration-hover ${active === value ? "bg-ui-primary text-white" : "text-ui-text hover:bg-slate-50 hover:text-ink"}`}><Icon className="h-5 w-5" aria-hidden="true" />{label}{badge ? <span className="absolute right-2 top-1.5 min-w-5 rounded-full bg-rose-600 px-1 text-[10px] leading-5 text-white">{badge > 99 ? "99+" : badge}</span> : null}</button>; })}</nav>;
 }
 
 function AgentLoadingState() {
@@ -1522,6 +1658,61 @@ function ReviewFilters({
         {fields}
       </ResponsiveSheet>
     </FilterToolbar>
+  );
+}
+
+function ReviewReceiptTasks({
+  items,
+  onNavigate,
+}: {
+  items: ReviewItem[];
+  onNavigate: (request: AgentNavigationRequest) => void;
+}) {
+  if (!items.length) return null;
+  return (
+    <div className="grid gap-3" aria-label="Receipt decisions">
+      {items.map((item) => {
+        const receipt = item.receipt;
+        if (!receipt) return null;
+        const needsMatch = item.kind === "receipt_match_needed";
+        return (
+          <Card key={item.public_id} className="border-amber-200 bg-amber-50/50">
+            <CardContent className="flex flex-col gap-3 p-4 sm:flex-row sm:items-center sm:justify-between">
+              <div className="min-w-0">
+                <div className="flex flex-wrap items-center gap-2">
+                  <Badge variant={needsMatch ? "warning" : "secondary"}>
+                    {needsMatch ? "Receipt match needed" : "Itemized split ready"}
+                  </Badge>
+                  {item.unread ? <span className="text-xs font-semibold text-rose-700">New</span> : null}
+                </div>
+                <p className="mt-2 truncate font-semibold text-ink">
+                  {receipt.merchant_name || "Receipt"}
+                </p>
+                <p className="mt-1 text-sm text-slate-600">
+                  {receipt.total_cents == null ? "Total unavailable" : formatCurrency(receipt.total_cents / 100, receipt.currency)}
+                  {` · ${receipt.line_count} item${receipt.line_count === 1 ? "" : "s"}`}
+                </p>
+                <p className="mt-1 text-xs text-slate-500">
+                  {needsMatch
+                    ? "Choose the matching purchase before any itemized split can be prepared."
+                    : "Review item assignments; nothing is posted until you explicitly confirm."}
+                </p>
+              </div>
+              <Button
+                type="button"
+                className="min-h-11 shrink-0"
+                onClick={() => onNavigate({
+                  target_surface: "household_receipts",
+                  entity: { kind: "receipt", public_id: String(receipt.id) },
+                })}
+              >
+                {needsMatch ? "Match receipt" : "Review itemized split"}
+              </Button>
+            </CardContent>
+          </Card>
+        );
+      })}
+    </div>
   );
 }
 
@@ -2170,7 +2361,7 @@ function Header({
   const copy = {
     review: {
       title: "Expense Review",
-      description: `${pendingCount} transaction${pendingCount === 1 ? "" : "s"} need review · ${formatCurrency(pendingTotal)} pending`,
+      description: `${pendingCount} actionable item${pendingCount === 1 ? "" : "s"} need review · ${formatCurrency(pendingTotal)} in transaction decisions`,
     },
     insights: {
       title: "Spending Insights",
@@ -2368,6 +2559,7 @@ function StatusPill({
 
 function TransactionCard({
   transaction,
+  recommendation,
   busy,
   actionNotice,
   query,
@@ -2399,6 +2591,7 @@ function TransactionCard({
   onPayerIncludedChange,
   onCustomValueChange,
   onExpandedChange,
+  onUseRecommended,
   onAgentFocus,
   allGroupsOpen,
   onPersonal,
@@ -2407,6 +2600,7 @@ function TransactionCard({
   onPreviewCustom,
 }: {
   transaction: Transaction;
+  recommendation: ReviewRecommendation | null;
   busy: string | null;
   actionNotice: ActionNotice | null;
   query: string;
@@ -2438,6 +2632,7 @@ function TransactionCard({
   onPayerIncludedChange: (included: boolean) => void;
   onCustomValueChange: (userId: number, value: string) => void;
   onExpandedChange: (expanded: boolean) => void;
+  onUseRecommended: () => void;
   onAgentFocus: () => void;
   allGroupsOpen: boolean;
   onPersonal: () => void;
@@ -2508,9 +2703,21 @@ function TransactionCard({
         </div>
 
         <div className="flex flex-col gap-3 border-t border-slate-100 pt-3 lg:flex-row lg:items-center lg:justify-between">
-          <p className="min-w-0 text-sm leading-6 text-slate-600">
-            {transaction.agent_question || "Review this transaction."}
-          </p>
+          <div className="min-w-0 text-sm leading-6 text-slate-600">
+            <p>{transaction.agent_question || "Review this transaction."}</p>
+            {recommendation?.suggestion === "likely_shared" ? (
+              <p className="mt-1 text-xs font-medium text-indigo-700">
+                Recommended from your preference: split
+                {recommendation.participant_names.length ? ` with ${recommendation.participant_names.join(", ")}` : " as shared"}
+                {recommendation.group_name ? ` in ${recommendation.group_name}` : ""}. You can edit before posting.
+              </p>
+            ) : null}
+            {transaction.pending ? (
+              <p className="mt-1 text-xs font-medium text-amber-800">
+                You can prepare this decision now. ExpenseOps will not post to Splitwise until the final charge is available.
+              </p>
+            ) : null}
+          </div>
           <div className="flex shrink-0 flex-wrap items-center gap-2">
             <Button
               type="button"
@@ -2534,16 +2741,27 @@ function TransactionCard({
               Personal
             </Button>
             <Button
-              onClick={() => onExpandedChange(true)}
+              onClick={recommendation?.suggestion === "likely_shared" ? onUseRecommended : () => onExpandedChange(true)}
               disabled={disabled}
               className="bg-indigo-600 shadow-sm shadow-indigo-950/10 hover:bg-indigo-700"
             >
               <Split className="h-4 w-4" />
-              Split
+              {transaction.pending
+                ? recommendation?.suggestion === "likely_shared"
+                  ? "Prepare recommended split"
+                  : "Prepare split"
+                : recommendation?.suggestion === "likely_shared"
+                  ? "Use recommended split"
+                  : "Split"}
             </Button>
+            {recommendation?.suggestion === "likely_shared" ? (
+              <Button type="button" variant="ghost" onClick={() => onExpandedChange(true)} disabled={disabled}>
+                Customize
+              </Button>
+            ) : null}
             <OverflowMenu label={`More actions for ${title}`} items={[
               { label: "Save as draft", icon: Clock3, disabled, onSelect: onDraft },
-              { label: isExpanded ? "Collapse split details" : "Open split details", icon: ChevronDown, onSelect: () => onExpandedChange(!isExpanded) },
+              { label: isExpanded ? "Collapse split details" : "Customize split", icon: ChevronDown, onSelect: () => onExpandedChange(!isExpanded) },
             ]} />
           </div>
         </div>
@@ -2635,6 +2853,7 @@ function TransactionCard({
           values={customValues}
           validation={customValidation}
           disabled={disabled}
+          postingBlocked={transaction.pending}
           onModeChange={onCustomModeChange}
           onPayerIncludedChange={onPayerIncludedChange}
           onValueChange={onCustomValueChange}
@@ -2683,6 +2902,7 @@ function CustomSplitPanel({
   values,
   validation,
   disabled,
+  postingBlocked,
   onModeChange,
   onPayerIncludedChange,
   onValueChange,
@@ -2696,6 +2916,7 @@ function CustomSplitPanel({
   values: Record<number, string>;
   validation: CustomSplitPreview;
   disabled: boolean;
+  postingBlocked: boolean;
   onModeChange: (mode: CustomSplitMode) => void;
   onPayerIncludedChange: (included: boolean) => void;
   onValueChange: (userId: number, value: string) => void;
@@ -2703,7 +2924,7 @@ function CustomSplitPanel({
   onPost: () => void;
 }) {
   const isEqualMode = mode === "equal";
-  const canPost = !disabled && selectedParticipantCount > 0 && validation.valid;
+  const canPost = !disabled && !postingBlocked && selectedParticipantCount > 0 && validation.valid;
   const postLabel = isEqualMode ? "Post equal split" : "Post custom split";
   const emptyMessage = "Select at least one friend or group member before posting.";
 
@@ -2785,7 +3006,11 @@ function CustomSplitPanel({
                 : "text-amber-700"
             }
           >
-            {selectedParticipantCount > 0 ? validation.message : emptyMessage}
+            {postingBlocked
+              ? "The final charge must post before ExpenseOps can send this split."
+              : selectedParticipantCount > 0
+                ? validation.message
+                : emptyMessage}
           </span>
         </div>
         <div className="flex gap-2">

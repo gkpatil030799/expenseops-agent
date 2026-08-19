@@ -91,6 +91,7 @@ from app.models import (
     Workspace,
     WorkspaceMembership,
 )
+from app.services.review_inbox_service import ReviewInboxService
 from app.services.splitwise_service import SplitwiseAPIError, SplitwiseService
 from app.services.transaction_service import TransactionService
 from app.tenancy import TenantContext, set_session_tenant
@@ -5881,6 +5882,170 @@ def _install_splitwise_provider(
         lambda _self, _key: state["recover"],
     )
     return state
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "split with me and Janhavi",
+        "split with Janhavi",
+        "split this with Janhavi",
+        "split this between me and Janhavi",
+        "50/50 with Janhavi",
+        "this was shared with Janhavi",
+    ],
+)
+def test_day18_unique_review_item_resolves_terse_split_to_confirmation_only(
+    agent_runtime_db,
+    monkeypatch,
+    text,
+):
+    _install_splitwise_provider(
+        monkeypatch,
+        friends=[
+            {
+                "id": 201,
+                "first_name": "Janhavi",
+                "last_name": "Patil",
+                "email": "janhavi@example.test",
+            }
+        ],
+    )
+    settings = _settings(writes=True)
+    with _scoped(agent_runtime_db) as db:
+        tenant = agent_runtime_db.contexts["owner"]
+        transaction_id = agent_runtime_db.transaction_ids["unreviewed"]
+        tx = db.get(ExpenseTransaction, transaction_id)
+        assert tx is not None
+        ReviewInboxService(db).sync_transaction(tx, owner_user_id=tenant.user_id)
+        db.commit()
+
+        async def propose(
+            request: RuntimeRequest,
+            executor: ReadToolExecutor,
+        ) -> RuntimeResult:
+            assert request.action_tool_name == POST_SPLITWISE_TOOL_NAME
+            assert request.exposed_tool_names == frozenset({POST_SPLITWISE_TOOL_NAME})
+            result = await executor.invoke(
+                POST_SPLITWISE_TOOL_NAME,
+                {
+                    "transaction_id": None,
+                    "merchant": None,
+                    "occurred_on": None,
+                    "participant_names": (
+                        ["me", "Janhavi"] if "me" in text.casefold() else ["Janhavi"]
+                    ),
+                    "group_name": None,
+                },
+            )
+            assert result["status"] == "awaiting_confirmation"
+            return _draft()
+
+        turn = _run_turn(
+            db,
+            tenant,
+            _conversation(db, tenant, settings),
+            FakeRuntime(propose),
+            text=text,
+            client_message_id=f"day18-split-{abs(hash(text))}",
+            settings=settings,
+        )
+        block = _blocks(turn, AgentActionConfirmationBlock)[0]
+        assert block.action == "post_splitwise_expense"
+        assert sum(row.label.startswith("Share ") for row in block.details) == 2
+        assert db.get(ExpenseTransaction, transaction_id).status == TransactionStatus.ASK_USER.value
+
+
+@pytest.mark.parametrize("text", ["mark this personal", "this is personal"])
+def test_day18_unique_review_item_resolves_terse_personal_to_confirmation_only(
+    agent_runtime_db,
+    text,
+):
+    settings = _settings(writes=True)
+    with _scoped(agent_runtime_db) as db:
+        tenant = agent_runtime_db.contexts["owner"]
+        transaction_id = agent_runtime_db.transaction_ids["unreviewed"]
+        tx = db.get(ExpenseTransaction, transaction_id)
+        assert tx is not None
+        ReviewInboxService(db).sync_transaction(tx, owner_user_id=tenant.user_id)
+        db.commit()
+
+        async def propose(
+            request: RuntimeRequest,
+            executor: ReadToolExecutor,
+        ) -> RuntimeResult:
+            assert request.action_tool_name == MARK_PERSONAL_TOOL_NAME
+            result = await executor.invoke(
+                MARK_PERSONAL_TOOL_NAME,
+                {"transaction_id": None, "merchant": None, "occurred_on": None},
+            )
+            assert result["status"] == "awaiting_confirmation"
+            return _draft()
+
+        turn = _run_turn(
+            db,
+            tenant,
+            _conversation(db, tenant, settings),
+            FakeRuntime(propose),
+            text=text,
+            client_message_id=f"day18-personal-{abs(hash(text))}",
+            settings=settings,
+        )
+        assert _blocks(turn, AgentActionConfirmationBlock)[0].action == "mark_transaction_personal"
+        assert db.get(ExpenseTransaction, transaction_id).status == TransactionStatus.ASK_USER.value
+
+
+def test_day18_multiple_review_items_ask_which_purchase_without_model_or_proposal(
+    agent_runtime_db,
+):
+    settings = _settings(writes=True)
+
+    async def must_not_run(_request: RuntimeRequest, _executor: ReadToolExecutor) -> RuntimeResult:
+        raise AssertionError("model must not run for an ambiguous implicit review target")
+
+    with _scoped(agent_runtime_db) as db:
+        tenant = agent_runtime_db.contexts["owner"]
+        first = db.get(ExpenseTransaction, agent_runtime_db.transaction_ids["unreviewed"])
+        second = db.get(ExpenseTransaction, agent_runtime_db.transaction_ids["pending"])
+        assert first is not None and second is not None
+        second.status = TransactionStatus.ASK_USER.value
+        ReviewInboxService(db).sync_transaction(first, owner_user_id=tenant.user_id)
+        ReviewInboxService(db).sync_transaction(second, owner_user_id=tenant.user_id)
+        db.commit()
+        turn = _run_turn(
+            db,
+            tenant,
+            _conversation(db, tenant, settings),
+            FakeRuntime(must_not_run),
+            text="split with Janhavi",
+            client_message_id="day18-ambiguous-review-target",
+            settings=settings,
+        )
+        assert "Which purchase" in _blocks(turn, AgentTextBlock)[0].text
+        assert db.scalar(select(func.count(AgentActionProposal.id))) == 0
+
+
+def test_day18_disabled_split_capability_has_specific_safe_message(agent_runtime_db):
+    settings = _settings(writes=False)
+
+    async def must_not_run(_request: RuntimeRequest, _executor: ReadToolExecutor) -> RuntimeResult:
+        raise AssertionError("disabled action must not invoke the model")
+
+    with _scoped(agent_runtime_db) as db:
+        tenant = agent_runtime_db.contexts["owner"]
+        turn = _run_turn(
+            db,
+            tenant,
+            _conversation(db, tenant, settings),
+            FakeRuntime(must_not_run),
+            text="split with Janhavi",
+            client_message_id="day18-disabled-split",
+            settings=settings,
+        )
+        text = _blocks(turn, AgentTextBlock)[0].text
+        assert text.startswith("Splitting is currently disabled")
+        assert "read-only assistant" not in text
+        assert db.scalar(select(func.count(AgentActionProposal.id))) == 0
 
 
 def _splitwise_proposal_turn(

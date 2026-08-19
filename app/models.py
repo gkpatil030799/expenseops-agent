@@ -328,6 +328,25 @@ class TransactionStatus(StrEnum):
     REMOVED = "removed"
 
 
+class ReviewItemKind(StrEnum):
+    TRANSACTION_REVIEW = "transaction_review"
+    ITEMIZED_SPLIT_READY = "itemized_split_ready"
+    RECEIPT_MATCH_NEEDED = "receipt_match_needed"
+    FINANCIAL_RECONCILIATION = "financial_reconciliation"
+
+
+class ReviewItemState(StrEnum):
+    OPEN = "open"
+    RESOLVED = "resolved"
+    STALE = "stale"
+
+
+class ReviewItemSourceType(StrEnum):
+    TRANSACTION = "transaction"
+    RECEIPT = "receipt"
+    FINANCIAL_OPERATION = "financial_operation"
+
+
 class ErrandType(StrEnum):
     PURCHASE = "purchase"
     RETURN = "return"
@@ -735,6 +754,69 @@ class ExpenseTransaction(TenantScoped, Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
     plaid_item: Mapped[PlaidItem] = relationship(back_populates="transactions")
+
+
+class ReviewItem(TenantScoped, Base):
+    """Durable presentation state for one canonical user decision.
+
+    The referenced transaction, receipt, or financial operation remains the domain
+    authority. This projection owns only inbox identity and presentation state.
+    """
+
+    __tablename__ = "review_items"
+    __table_args__ = (
+        UniqueConstraint("public_id", name="uq_review_items_public_id"),
+        UniqueConstraint(
+            "workspace_id",
+            "owner_user_id",
+            "kind",
+            "source_type",
+            "source_entity_id",
+            name="uq_review_item_owner_kind_source",
+        ),
+        Index(
+            "ix_review_items_owner_state_created",
+            "workspace_id",
+            "owner_user_id",
+            "state",
+            "created_at",
+        ),
+        CheckConstraint(
+            "kind IN ('transaction_review', 'itemized_split_ready', "
+            "'receipt_match_needed', 'financial_reconciliation')",
+            name="ck_review_items_kind",
+        ),
+        CheckConstraint(
+            "source_type IN ('transaction', 'receipt', 'financial_operation')",
+            name="ck_review_items_source_type",
+        ),
+        CheckConstraint(
+            "state IN ('open', 'resolved', 'stale')",
+            name="ck_review_items_state",
+        ),
+        CheckConstraint("source_entity_id > 0", name="ck_review_items_source_entity_positive"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    public_id: Mapped[str] = mapped_column(
+        String(36), default=new_agent_public_id, nullable=False, index=True
+    )
+    owner_user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    kind: Mapped[str] = mapped_column(String(40), nullable=False, index=True)
+    source_type: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    source_entity_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    state: Mapped[str] = mapped_column(
+        String(16), default=ReviewItemState.OPEN.value, nullable=False, index=True
+    )
+    seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    stale_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    action_codes_json: Mapped[list] = mapped_column(JSON, default=list)
+    source_fingerprint: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
 
 class FinancialOperation(TenantScoped, Base):

@@ -22,6 +22,13 @@ async function mockExpenseDashboard(page: Page, transactions: unknown[] = []) {
   await page.route("**/api/**", (route) => {
     const pathname = new URL(route.request().url()).pathname;
     if (pathname === "/api/context") return route.fulfill({ json: context });
+    if (pathname === "/api/review-inbox") return route.fulfill({ json: {
+      items: [],
+      total_open: 0,
+      unread_count: 0,
+      limit: 100,
+      offset: 0,
+    } });
     if (pathname === "/api/insights/activity") return route.fulfill({ json: [] });
     if (pathname === "/api/insights/financial-activity") return route.fulfill({ json: {
       events: [{

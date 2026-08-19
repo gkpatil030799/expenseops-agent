@@ -26,6 +26,7 @@ from app.models import (
     PromotionMessage,
     PurchaseReceipt,
     RateLimitEvent,
+    ReviewItem,
     SplitwiseIntegration,
     TelegramIdentity,
     TelegramLinkCode,
@@ -262,6 +263,7 @@ class DataLifecycleService:
         original_workspace_id = self.db.info.get("workspace_id")
         models = (
             AIInterpretationMemory,
+            ReviewItem,
             AgentActionProposal,
             AgentToolCall,
             AgentRun,

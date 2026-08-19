@@ -40,6 +40,72 @@ export type Transaction = {
   updated_at: string;
 };
 
+export type ReviewTransactionSummary = {
+  id: number;
+  merchant_name: string | null;
+  name: string;
+  amount_cents: number;
+  currency: string;
+  date: string | null;
+  pending: boolean;
+  status: string;
+  institution_name: string | null;
+};
+
+export type ReviewReceiptSummary = {
+  id: number;
+  merchant_name: string | null;
+  total_cents: number | null;
+  currency: string;
+  purchased_at: string | null;
+  parse_status: string;
+  transaction_match_status: string;
+  transaction_id: number | null;
+  line_count: number;
+};
+
+export type ReviewRecommendation = {
+  suggestion: "likely_personal" | "likely_shared";
+  reason: string;
+  memory_id: number;
+  participant_names: string[];
+  group_name: string | null;
+  split_mode: string | null;
+};
+
+export type ReviewItem = {
+  public_id: string;
+  kind:
+    | "transaction_review"
+    | "itemized_split_ready"
+    | "receipt_match_needed"
+    | "financial_reconciliation";
+  state: "open" | "resolved" | "stale";
+  unread: boolean;
+  seen_at: string | null;
+  created_at: string;
+  updated_at: string;
+  available_actions: Array<
+    | "personal"
+    | "recommended_split"
+    | "customize"
+    | "itemized_split"
+    | "open_receipt"
+    | "open_receipt_match"
+  >;
+  transaction: ReviewTransactionSummary | null;
+  receipt: ReviewReceiptSummary | null;
+  recommendation: ReviewRecommendation | null;
+};
+
+export type ReviewInboxPage = {
+  items: ReviewItem[];
+  total_open: number;
+  unread_count: number;
+  limit: number;
+  offset: number;
+};
+
 export type Friend = {
   id: number;
   first_name: string | null;

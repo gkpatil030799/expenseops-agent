@@ -318,6 +318,9 @@ class AIInterpretationMemoryService:
             "suggestion": suggestion,
             "reason": _memory_rationale(memory),
             "memory_id": memory.id,
+            "participant_names": _participant_names(memory.final_participants)[:8],
+            "group_name": memory.final_group_name,
+            "split_mode": memory.final_split_mode,
         }
 
     def delete_memory(self, memory_id: int) -> bool:

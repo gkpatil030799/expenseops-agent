@@ -348,6 +348,7 @@ class TransactionService:
             created=created,
             previous_pending=previous_pending,
         )
+        self._sync_review_item(tx, replacement_for_transaction_id=tx.replaces_transaction_id)
         self.db.commit()
         self.db.refresh(tx)
 
@@ -415,6 +416,7 @@ class TransactionService:
             created=False,
             previous_pending=previous_pending,
         )
+        self._sync_review_item(tx, replacement_for_transaction_id=tx.replaces_transaction_id)
         self.db.commit()
         self.db.refresh(tx)
         notification_sent = False
@@ -992,6 +994,7 @@ class TransactionService:
             event_type="transaction_removed",
             action="remove",
         )
+        self._sync_review_item(tx)
         self.db.commit()
 
     def mark_personal(self, tx_id: int) -> ExpenseTransaction:
@@ -1005,6 +1008,7 @@ class TransactionService:
             event_type="transaction_marked_personal",
             action="mark_personal",
         )
+        self._sync_review_item(tx)
         self.db.commit()
         self.db.refresh(tx)
         return tx
@@ -1044,6 +1048,7 @@ class TransactionService:
             event_type="splitwise_draft_saved",
             action="save_draft",
         )
+        self._sync_review_item(tx)
         self.db.commit()
         self.db.refresh(tx)
         return tx
@@ -1064,6 +1069,7 @@ class TransactionService:
             event_type="transaction_returned_to_review",
             action="return_to_review",
         )
+        self._sync_review_item(tx)
         self.db.commit()
         self.db.refresh(tx)
         return tx
@@ -1374,6 +1380,7 @@ class TransactionService:
                 event_type="splitwise_draft_saved",
                 action="save_draft",
             )
+            self._sync_review_item(tx)
             self.db.commit()
             self.db.refresh(tx)
             return tx, {"draft": True, "payload": payload}
@@ -1405,6 +1412,7 @@ class TransactionService:
             tx.status = TransactionStatus.POSTED.value
             tx.splitwise_expense_id = operation.provider_object_id
             tx.last_error = None
+            self._sync_review_item(tx)
             self.db.commit()
             return tx, {"replayed": True, "expenses": [{"id": operation.provider_object_id}]}
         if operation.attempt_count > 0 or operation.state == "needs_reconciliation":
@@ -1430,6 +1438,7 @@ class TransactionService:
         tx.status = TransactionStatus.POSTING.value
         tx.last_error = None
         tx.updated_at = utc_now()
+        self._sync_review_item(tx)
         self.db.commit()
         try:
             response = self.splitwise_service.create_expense(payload)
@@ -1469,6 +1478,7 @@ class TransactionService:
         tx.splitwise_amount_cents = abs(tx.amount_cents)
         tx.last_error = None
         tx.updated_at = utc_now()
+        self._sync_review_item(tx)
         record_audit(
             self.db,
             workspace_id=tx.workspace_id,
@@ -1586,6 +1596,7 @@ class TransactionService:
         tx.splitwise_amount_cents = abs(tx.amount_cents)
         tx.last_error = None
         tx.updated_at = utc_now()
+        self._sync_review_item(tx)
         record_audit(
             self.db,
             workspace_id=tx.workspace_id,
@@ -1655,6 +1666,7 @@ class TransactionService:
         tx.status = TransactionStatus.UNDOING.value
         tx.last_error = None
         tx.updated_at = utc_now()
+        self._sync_review_item(tx)
         self.db.commit()
         try:
             self.splitwise_service.delete_expense(provider_id)
@@ -1694,6 +1706,8 @@ class TransactionService:
                 replacement.status = TransactionStatus.ASK_USER.value
                 replacement.last_error = None
                 replacement.updated_at = utc_now()
+                self._sync_review_item(replacement)
+        self._sync_review_item(tx)
         record_audit(
             self.db,
             workspace_id=tx.workspace_id,
@@ -1786,6 +1800,7 @@ class TransactionService:
         tx.status = status
         tx.last_error = message
         tx.updated_at = utc_now()
+        self._sync_review_item(tx)
         event = enqueue_outbox_event(
             self.db,
             workspace_id=tx.workspace_id,
@@ -1886,6 +1901,7 @@ class TransactionService:
             )
         tx.last_error = str(error)
         tx.updated_at = utc_now()
+        self._sync_review_item(tx)
         record_audit(
             self.db,
             workspace_id=tx.workspace_id,
@@ -1924,6 +1940,24 @@ class TransactionService:
     def _actor_user_id(self) -> int | None:
         value = getattr(self.db, "info", {}).get("user_id")
         return int(value) if value is not None else None
+
+    def _sync_review_item(
+        self,
+        tx: ExpenseTransaction,
+        *,
+        replacement_for_transaction_id: int | None = None,
+    ) -> None:
+        """Synchronize presentation state inside the surrounding domain transaction."""
+
+        if not all(hasattr(self.db, name) for name in ("scalar", "add", "flush")):
+            return
+        from app.services.review_inbox_service import ReviewInboxService
+
+        ReviewInboxService(self.db).sync_transaction(
+            tx,
+            replacement_for_transaction_id=replacement_for_transaction_id,
+            commit=False,
+        )
 
     def _interaction_channel(self) -> str:
         value = str(getattr(self.db, "info", {}).get("interaction_channel") or "").strip()
@@ -2114,6 +2148,7 @@ class TransactionService:
             tx.splitwise_amount_cents = abs(tx.amount_cents)
             tx.last_error = None
             tx.updated_at = utc_now()
+            self._sync_review_item(tx)
             self.db.commit()
             self.db.refresh(tx)
             self.notification_service.notify_splitwise_posted(tx, expense_id)
@@ -2122,6 +2157,7 @@ class TransactionService:
             tx.status = TransactionStatus.ERROR.value
             tx.last_error = str(exc)
             tx.updated_at = utc_now()
+            self._sync_review_item(tx)
             self.db.commit()
             raise
 
@@ -2137,6 +2173,7 @@ class TransactionService:
         tx.status = TransactionStatus.ASK_USER.value
         tx.last_error = None
         tx.updated_at = utc_now()
+        self._sync_review_item(tx)
         self.db.commit()
         self.db.refresh(tx)
         return tx

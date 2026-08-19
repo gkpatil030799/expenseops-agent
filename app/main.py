@@ -31,6 +31,7 @@ from app.api import (
     privacy_routes,
     promotion_routes,
     replenishment_routes,
+    review_inbox_routes,
     splitwise_routes,
     telegram_routes,
     transaction_routes,
@@ -267,6 +268,7 @@ app.include_router(attention_routes.router)
 app.include_router(household_routes.router)
 app.include_router(insights_routes.router)
 app.include_router(replenishment_routes.router)
+app.include_router(review_inbox_routes.router)
 app.include_router(promotion_routes.router)
 app.include_router(privacy_routes.router)
 app.include_router(sandbox_router)

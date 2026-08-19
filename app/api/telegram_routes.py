@@ -956,6 +956,42 @@ def _route_review_callback(
     db: DbSession,
     telegram: TelegramService,
 ) -> str:
+    if action in {"done", "confirm", "confirm_custom"}:
+        pending_submission = telegram_split_state_store.get_pending(chat_id, user_id)
+        if (
+            pending_submission is not None
+            and pending_submission.transaction_id == transaction_id
+            and pending_submission.is_submitting
+        ):
+            return "Split already being processed."
+    if action != "undo" and hasattr(db, "get"):
+        transaction_service = TransactionService(db)
+        get_transaction = getattr(transaction_service, "get_transaction", None)
+        if callable(get_transaction):
+            try:
+                current = get_transaction(transaction_id)
+            except TransactionError:
+                return "This review action expired or is no longer available."
+            current_status = getattr(current, "status", TransactionStatus.ASK_USER.value)
+            if (
+                current_status
+                not in {
+                    TransactionStatus.ASK_USER.value,
+                    TransactionStatus.SHARED_DRAFT.value,
+                }
+                or getattr(current, "splitwise_expense_id", None)
+            ):
+                resolved = (
+                    "This purchase was already resolved. Open Review for its current status; "
+                    "nothing else was changed."
+                )
+                _edit_or_send(
+                    telegram,
+                    resolved,
+                    chat_id=chat_id,
+                    message_id=message_id,
+                )
+                return "This purchase was already resolved."
     if action == "button_mode":
         log_event(logger, "telegram_button_mode_opened", tx_id=transaction_id)
         pending = telegram_split_state_store.get_pending(chat_id, user_id)
@@ -5053,6 +5089,8 @@ def _mark_personal(
             reason="validation_failed",
             error_type=type(exc).__name__,
         )
+        if "already" in str(exc).casefold() or "cannot" in str(exc).casefold():
+            return "This purchase was already resolved. Nothing else was changed."
         return "Could not mark personal. Open the dashboard to review."
     log_event(logger, "telegram_split_confirmed", tx_id=transaction_id, action="personal")
     pending = telegram_split_state_store.get_pending(chat_id, user_id)

@@ -172,3 +172,65 @@ Reopen them if `frontend/e2e/agent-day17-frontend.spec.ts` fails at the 22-rem c
 320/375/390px mobile widths, if a ranked result is silently truncated, or if a protocol error
 exposes internal details. This is a code-local status only; it says nothing about the currently
 deployed production version.
+
+## Review decisions were hidden and disconnected across channels
+
+Status: resolved in Day 18 code; not deployed.
+
+Observed behavior:
+
+- the web Agent did not proactively surface Plaid transactions requiring review;
+- a supported terse split prompt could falsely return a generic read-only refusal;
+- the user had to hunt for the right transaction and establish context manually;
+- Telegram and web displayed the same decision without durable shared seen/resolved identity;
+- Gmail itemized-split functionality was available only after manually finding receipt history;
+- Split versus Customize and pending-posting behavior were difficult to understand.
+
+Root cause:
+
+- transaction status was the correct domain authority, but no user-owned presentation projection
+  could hold one public identity plus unread/seen/stale state;
+- web data loaded from independent transaction queries and Agent conversation context;
+- the action recognizer did not include the normal terse phrases, so the generic safety fallback
+  ran before the proposal path;
+- receipt parsing/classification/reconciliation did not publish itemized readiness into an
+  actionable discovery surface.
+
+Day 18 code behavior:
+
+- Plaid upsert synchronously ensures one tenant/user/source review projection in the same commit;
+- web Review, its badge, and the proactive Agent region read one strict API;
+- Telegram callbacks revalidate the same authoritative transaction and become inert after web or
+  Agent resolution;
+- pending replacements retain the same public review identity and final amount;
+- transaction cards show Personal, recommended/neutral Split, and explicit Customize controls;
+- pending cards allow preparation but disable provider posting until the final charge;
+- all six required split phrases and both Personal phrases route to only the existing proposal tool;
+- `me` is the authenticated payer, not a friend lookup;
+- multiple active purchases produce a clarification without a model call;
+- Gmail dining receipts become itemized-ready only after exact parse, arithmetic, classification,
+  and Plaid-match checks; ambiguity remains an explicit match-needed task;
+- every consequential split remains an immutable proposal with a separate model-free confirmation.
+
+Permanent acceptance evidence on 2026-08-18:
+
+- the five-transaction benchmark creates exactly two actionable tasks from two review-required
+  transactions, requires zero searches/prompts, resolves one through the web service and one through
+  the Telegram service boundary, ends at zero, and makes zero provider calls;
+- the benchmark's explicitly local in-process SQLite boundary measured 11.948 ms from projection to
+  page read and 6.293 ms for the two resolutions; browser freshness is separately bounded by the
+  visible-page 10-second poll plus at most two seconds jitter and API latency;
+- the synthetic Gmail regression uses a hostile email subject/line as inert data, auto-matches the
+  exact dining receipt, creates one itemized-ready task, and posts nothing;
+- strict backend ownership tests cover foreign workspace and a different user in the same workspace;
+- strict frontend parsing rejects extra keys, invalid UUID/count/state combinations, and missing or
+  conflicting source summaries;
+- the Day 18 browser spec covers recommendation prefill, itemized readiness, idempotent seen state,
+  proactive Agent rendering, pending-post blocking, Axe, and no overflow at 320/375/390/1024px;
+- migration/drift/bootstrap/readiness tests cover the new table, linear head, grants, indexes, and
+  exact FORCE RLS policy.
+
+The detailed architecture, failure traceability, metrics boundary, and limitations are in
+`UNIFIED_REVIEW_INBOX.md`. Reopen this regression if a source event can create duplicate active
+tasks, the Agent needs a prompt to reveal current tasks, a stale Telegram callback mutates state,
+pending charges can post by default, or Gmail readiness again requires receipt-history discovery.

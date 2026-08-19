@@ -854,6 +854,7 @@ class ReceiptTransactionReconciliationService:
                     receipt,
                     transaction_id=transaction.id,
                 )
+            self._sync_review_items(receipt)
             return self._decision_from_receipt(receipt)
 
         now = utc_now()
@@ -882,6 +883,7 @@ class ReceiptTransactionReconciliationService:
                 receipt.transaction_id = None
                 self._sync_receipt_acquisitions(receipt, transaction_id=None)
         self.db.flush()
+        self._sync_review_items(receipt)
         log_event(
             logger,
             "receipt_transaction_reconciled",
@@ -892,6 +894,11 @@ class ReceiptTransactionReconciliationService:
             reason=evidence.get("reason"),
         )
         return self._decision_from_receipt(receipt)
+
+    def _sync_review_items(self, receipt: PurchaseReceipt) -> None:
+        from app.services.review_inbox_service import ReviewInboxService
+
+        ReviewInboxService(self.db).sync_receipt(receipt, commit=False)
 
     def _decision_from_receipt(
         self,

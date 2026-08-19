@@ -87,6 +87,7 @@ APPLICATION_TABLES = (
     "purchase_receipt_items",
     "purchase_receipts",
     "rate_limit_events",
+    "review_items",
     "replenishment_feedback",
     "replenishment_job_runs",
     "replenishment_model_versions",
