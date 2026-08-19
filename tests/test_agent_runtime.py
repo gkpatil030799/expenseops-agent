@@ -5881,6 +5881,13 @@ def _install_splitwise_provider(
         "find_expense_by_idempotency_key",
         lambda _self, _key: state["recover"],
     )
+    state["delete_calls"] = []
+
+    def delete_expense(_self, expense_id):
+        state["delete_calls"].append(expense_id)
+        return {"success": True}
+
+    monkeypatch.setattr(SplitwiseService, "delete_expense", delete_expense)
     return state
 
 
@@ -6176,6 +6183,141 @@ def test_day8b_equal_split_proposal_freezes_code_owned_shares_and_executes_once(
         )
         assert activity.metadata_json["channel"] == "agent"
         assert activity.metadata_json["agent_action_proposal_id"] == block.proposal_id
+
+
+def test_day19_split_then_undo_then_split_again_creates_new_generation(
+    agent_runtime_db,
+    monkeypatch,
+):
+    """A completed undo must not block a fresh split on the same transaction.
+
+    Regression for the Day 19 bug where AgentActionExecutor._splitwise_operation
+    ignored FinancialOperation.generation and matched the stale, already-undone
+    generation-0 splitwise_create row against the new proposal's correlation id.
+    """
+    provider = _install_splitwise_provider(monkeypatch)
+    with _scoped(agent_runtime_db) as db:
+        tenant = agent_runtime_db.contexts["owner"]
+        settings, _runtime, _conversation_value, transaction_id, block = _splitwise_proposal_turn(
+            db,
+            agent_runtime_db,
+            client_message_id="day19-generation-1",
+            participant_names=["Gunjan"],
+        )
+        registry = build_read_tool_registry(settings)
+        register_action_tools(registry)
+        executor = AgentActionExecutor(db, registry=registry, settings=settings)
+        first = executor.confirm_and_execute(
+            block.proposal_id,
+            owner_user_id=tenant.user_id,
+            expected_version=block.proposal_version,
+        )
+        assert first.status == "completed"
+        transaction = db.get(ExpenseTransaction, transaction_id)
+        assert transaction.status == TransactionStatus.POSTED.value
+        assert transaction.splitwise_generation == 0
+
+        TransactionService(db, settings).undo_transaction(transaction_id)
+        db.commit()
+        transaction = db.get(ExpenseTransaction, transaction_id)
+        assert transaction.status == TransactionStatus.ASK_USER.value
+        assert transaction.splitwise_expense_id is None
+        assert transaction.splitwise_generation == 1
+        assert provider["delete_calls"] == ["splitwise-expense-day8"]
+
+        _settings2, _runtime2, _conversation2, _tx2, block2 = _splitwise_proposal_turn(
+            db,
+            agent_runtime_db,
+            client_message_id="day19-generation-2",
+            participant_names=["Gunjan"],
+        )
+        assert block2.status == "awaiting_confirmation"
+        second = executor.confirm_and_execute(
+            block2.proposal_id,
+            owner_user_id=tenant.user_id,
+            expected_version=block2.proposal_version,
+        )
+        assert second.status == "completed"
+        assert len(provider["create_calls"]) == 2
+        transaction = db.get(ExpenseTransaction, transaction_id)
+        assert transaction.status == TransactionStatus.POSTED.value
+        assert transaction.splitwise_generation == 1
+
+        generation_0 = db.scalar(
+            select(FinancialOperation).where(
+                FinancialOperation.transaction_id == transaction_id,
+                FinancialOperation.action == "splitwise_create",
+                FinancialOperation.generation == 0,
+            )
+        )
+        generation_1 = db.scalar(
+            select(FinancialOperation).where(
+                FinancialOperation.transaction_id == transaction_id,
+                FinancialOperation.action == "splitwise_create",
+                FinancialOperation.generation == 1,
+            )
+        )
+        assert generation_0.state == "succeeded"
+        assert generation_1.state == "succeeded"
+        assert generation_0.correlation_id != generation_1.correlation_id
+
+
+def test_day19_post_splitwise_rejects_participant_not_in_current_message(
+    agent_runtime_db,
+    monkeypatch,
+):
+    """The model must not name a Splitwise participant the user did not state.
+
+    Regression for the Day 19 gap where _normalize_post_splitwise had no
+    equivalent of the itemized tool's _validate_itemized_user_provenance
+    check, so a model-invented name matching a real friend was not blocked.
+    """
+    _install_splitwise_provider(
+        monkeypatch,
+        friends=[
+            {"id": 200, "first_name": "Gunjan", "last_name": "Patil"},
+            {"id": 201, "first_name": "Jordan", "last_name": "Lee"},
+        ],
+    )
+
+    async def propose_ungrounded_split(
+        _request: RuntimeRequest,
+        executor: ReadToolExecutor,
+    ) -> RuntimeResult:
+        result = await executor.invoke(
+            POST_SPLITWISE_TOOL_NAME,
+            {
+                "transaction_id": None,
+                "merchant": None,
+                "occurred_on": None,
+                "participant_names": ["Gunjan", "Jordan"],
+                "group_name": None,
+            },
+        )
+        assert result["status"] == "clarification_required"
+        return _draft()
+
+    with _scoped(agent_runtime_db) as db:
+        tenant = agent_runtime_db.contexts["owner"]
+        settings = _settings(writes=True)
+        turn = _run_turn(
+            db,
+            tenant,
+            _conversation(db, tenant, settings),
+            FakeRuntime(propose_ungrounded_split),
+            text="Split this transaction with Gunjan.",
+            client_message_id="day19-ungrounded-participant-1",
+            page_context=AgentPageContext(
+                surface=AgentSurface.EXPENSE_REVIEW,
+                entity=AgentPageEntity(
+                    kind="transaction",
+                    public_id=str(agent_runtime_db.transaction_ids["unreviewed"]),
+                ),
+            ),
+            settings=settings,
+        )
+        assert db.scalar(select(func.count(AgentActionProposal.id))) == 0
+        assert turn.run.status == "completed"
 
 
 def test_day8b_concurrent_confirmation_loser_never_starts_a_provider_operation(

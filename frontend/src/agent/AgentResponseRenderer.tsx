@@ -42,6 +42,7 @@ import type {
   AgentStructuredResponse,
   AgentTransactionListBlock,
 } from "./contracts";
+import { formatDate, formatMinor } from "./format";
 import {
   isAgentNavigationRequest,
   type AgentNavigationRequest,
@@ -156,7 +157,7 @@ export function AgentResponseRenderer({
   );
 }
 
-function ActionConfirmationCard({
+export function ActionConfirmationCard({
   block,
   pending,
   onConfirm,
@@ -1341,24 +1342,6 @@ function UnsupportedResponse({ onRetry }: { onRetry?: () => void }) {
       </CardContent>
     </Card>
   );
-}
-
-function formatMinor(amountCents: number, currencyCode: string): string {
-  try {
-    return new Intl.NumberFormat("en-US", {
-      style: "currency",
-      currency: currencyCode,
-    }).format(amountCents / 100);
-  } catch {
-    return `${currencyCode} ${(amountCents / 100).toFixed(2)}`;
-  }
-}
-
-function formatDate(value: string): string {
-  const date = new Date(`${value}T00:00:00Z`);
-  return Number.isNaN(date.getTime())
-    ? value
-    : new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric", year: "numeric", timeZone: "UTC" }).format(date);
 }
 
 function formatDateTime(value: string): string {

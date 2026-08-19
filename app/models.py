@@ -2637,3 +2637,73 @@ class AgentActionProposal(TenantScoped, Base):
         if current is not _AGENT_FIELD_UNSET and current != value:
             raise ValueError("Agent action proposal snapshot is immutable")
         return value
+
+
+class AgentReviewSessionStatus(StrEnum):
+    ACTIVE = "active"
+    COMPLETED = "completed"
+    CANCELLED = "cancelled"
+
+
+class AgentReviewSession(TenantScoped, Base):
+    """Agent-owned one-by-one review queue.
+
+    The referenced ReviewItem/transaction/receipt rows remain the domain
+    authority; this row owns only the Agent's own queue position, so a
+    review session can resume across refresh/reopen and revalidate each
+    candidate against current state before acting on it.
+    """
+
+    __tablename__ = "agent_review_sessions"
+    __table_args__ = (
+        UniqueConstraint("public_id", name="uq_agent_review_sessions_public_id"),
+        CheckConstraint(
+            "status IN ('active', 'completed', 'cancelled')",
+            name="ck_agent_review_sessions_status",
+        ),
+        Index(
+            "uq_agent_review_sessions_active_owner_conversation",
+            "workspace_id",
+            "owner_user_id",
+            "conversation_id",
+            unique=True,
+            postgresql_where=text("status = 'active'"),
+            sqlite_where=text("status = 'active'"),
+        ),
+        Index(
+            "ix_agent_review_sessions_workspace_owner_status",
+            "workspace_id",
+            "owner_user_id",
+            "status",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    workspace_id: Mapped[int] = mapped_column(
+        ForeignKey("workspaces.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    public_id: Mapped[str] = mapped_column(String(36), default=new_agent_public_id, nullable=False)
+    owner_user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    conversation_id: Mapped[int] = mapped_column(
+        ForeignKey("agent_conversations.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    status: Mapped[str] = mapped_column(
+        String(32),
+        default=AgentReviewSessionStatus.ACTIVE.value,
+        nullable=False,
+        index=True,
+    )
+    # Ordered queue frozen at session start: [{review_item_public_id, kind,
+    # source_type, source_entity_id, source_fingerprint}, ...]
+    candidates_json: Mapped[list] = mapped_column(JSON, nullable=False)
+    current_index: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    # Outcomes recorded so far: [{source_entity_id, kind, outcome,
+    # proposal_public_id}, ...] where outcome in personal|split|skipped|stale
+    results_json: Mapped[list] = mapped_column(JSON, default=list, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    conversation: Mapped[AgentConversation] = relationship()

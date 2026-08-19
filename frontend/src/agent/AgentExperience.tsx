@@ -1,16 +1,21 @@
 import {
   Archive,
   Bot,
+  CheckCircle2,
   ChevronRight,
   History,
   LoaderCircle,
   MessageSquarePlus,
   PanelRightClose,
+  ReceiptText,
   RotateCcw,
   Send,
   Sparkles,
+  SquarePen,
   ThumbsDown,
   ThumbsUp,
+  User,
+  Users,
   X,
 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
@@ -21,13 +26,20 @@ import { ResponsiveSheet } from "@/components/ui/responsive-sheet";
 import { Surface } from "@/components/ui/surface";
 import type { ReviewItem } from "@/types";
 
-import { AgentResponseRenderer, type AgentNavigationRequest } from "./AgentResponseRenderer";
+import {
+  ActionConfirmationCard,
+  AgentResponseRenderer,
+  type AgentNavigationRequest,
+} from "./AgentResponseRenderer";
+import { formatDate, formatMinor } from "./format";
 import type {
+  AgentActionConfirmationBlock,
   AgentFeedbackCreate,
   AgentFeedbackOut,
   AgentFeedbackReason,
   AgentMessage,
   AgentPageContext,
+  AgentReviewSessionOut,
 } from "./contracts";
 import { useAgentController, type AgentController } from "./useAgentController";
 
@@ -56,10 +68,58 @@ export default function AgentExperience({
   const [draft, setDraft] = useState("");
   const [historyOpen, setHistoryOpen] = useState(false);
   const [showJumpToLatest, setShowJumpToLatest] = useState(false);
+  const [reviewProposal, setReviewProposal] = useState<AgentActionConfirmationBlock | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const composerRef = useRef<HTMLTextAreaElement>(null);
   const autoScrollRef = useRef(true);
   const initialFocusSetRef = useRef(false);
+
+  async function beginReviewSession() {
+    setReviewProposal(null);
+    await controller.startReviewSession();
+  }
+
+  async function proposeMarkPersonal() {
+    const block = await controller.proposeReviewAction("mark_personal");
+    if (block) setReviewProposal(block);
+  }
+
+  async function proposeRecommendedSplit() {
+    const current = controller.reviewSession?.current;
+    if (!current) return;
+    const block = await controller.proposeReviewAction("post_splitwise_expense", {
+      participantNames: current.recommended_participant_names,
+      groupName: current.recommended_group_name,
+    });
+    if (block) setReviewProposal(block);
+  }
+
+  async function confirmReviewProposal(block: AgentActionConfirmationBlock) {
+    const updated = await controller.confirmAction(block);
+    if (updated.status === "completed") {
+      setReviewProposal(null);
+      await controller.advanceReviewSession(updated.proposal_id);
+    } else {
+      setReviewProposal(updated);
+    }
+    return updated;
+  }
+
+  async function cancelReviewProposal(block: AgentActionConfirmationBlock) {
+    const updated = await controller.cancelAction(block);
+    setReviewProposal(null);
+    return updated;
+  }
+
+  async function skipReviewCandidate() {
+    setReviewProposal(null);
+    await controller.skipReviewCandidate();
+  }
+
+  async function stopReviewSession() {
+    setReviewProposal(null);
+    await controller.stopReviewSession();
+  }
 
   useEffect(() => {
     if (controller.conversationBusy || initialFocusSetRef.current) return;
@@ -200,8 +260,35 @@ export default function AgentExperience({
           setShowJumpToLatest(!nearBottom);
         }}
       >
-        {reviewItems.length ? (
-          <AgentReviewItems items={reviewItems} onNavigate={onNavigate} />
+        {!readOnly && controller.reviewSession ? (
+          <ReviewSessionCard
+            session={controller.reviewSession}
+            busy={controller.reviewSessionBusy}
+            errorMessage={controller.reviewSessionError?.message || null}
+            proposal={reviewProposal}
+            isActionPending={controller.isActionPending}
+            onPersonal={() => void proposeMarkPersonal()}
+            onSplitRecommended={() => void proposeRecommendedSplit()}
+            onConfirmProposal={confirmReviewProposal}
+            onCancelProposal={cancelReviewProposal}
+            onSkip={() => void skipReviewCandidate()}
+            onStop={() => void stopReviewSession()}
+            onDone={() => controller.clearReviewSession()}
+            onOpenInWebReview={
+              onNavigate
+                ? () => {
+                    const current = controller.reviewSession?.current;
+                    if (!current?.transaction) return;
+                    onNavigate({
+                      target_surface: "expense_review",
+                      entity: { kind: "transaction", public_id: String(current.transaction.id) },
+                    });
+                  }
+                : undefined
+            }
+          />
+        ) : !readOnly && reviewItems.length ? (
+          <AgentReviewItems items={reviewItems} onReviewInAgent={() => void beginReviewSession()} />
         ) : null}
         {controller.initializing || controller.loadingConversation ? (
           <ConversationSkeleton />
@@ -325,10 +412,10 @@ export default function AgentExperience({
 
 function AgentReviewItems({
   items,
-  onNavigate,
+  onReviewInAgent,
 }: {
   items: ReviewItem[];
-  onNavigate?: (request: AgentNavigationRequest) => void;
+  onReviewInAgent: () => void;
 }) {
   return (
     <section className="mb-4 rounded-card border border-indigo-200 bg-indigo-50 p-3" aria-labelledby="agent-review-heading">
@@ -358,25 +445,160 @@ function AgentReviewItems({
               key={item.public_id}
               type="button"
               className="flex min-h-11 min-w-0 items-center justify-between gap-3 rounded-control border border-indigo-100 bg-white px-3 py-2 text-left hover:border-indigo-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-600"
-              onClick={() => onNavigate?.({
-                target_surface: transaction ? "expense_review" : "household_receipts",
-                entity: transaction
-                  ? { kind: "transaction", public_id: String(transaction.id) }
-                  : receipt
-                    ? { kind: "receipt", public_id: String(receipt.id) }
-                    : null,
-              })}
+              onClick={onReviewInAgent}
             >
               <span className="min-w-0">
                 <span className="block truncate text-sm font-semibold text-slate-900">{label}</span>
                 <span className="block truncate text-xs text-slate-600">{detail}</span>
               </span>
-              <ChevronRight className="size-4 shrink-0 text-indigo-600" aria-hidden="true" />
+              <span className="shrink-0 text-xs font-semibold text-indigo-700">
+                Review in Agent
+              </span>
             </button>
           );
         })}
       </div>
       {items.length > 3 ? <p className="mt-2 text-xs text-indigo-700">And {items.length - 3} more in Review.</p> : null}
+    </section>
+  );
+}
+
+function ReviewSessionCard({
+  session,
+  busy,
+  errorMessage,
+  proposal,
+  isActionPending,
+  onPersonal,
+  onSplitRecommended,
+  onConfirmProposal,
+  onCancelProposal,
+  onSkip,
+  onStop,
+  onDone,
+  onOpenInWebReview,
+}: {
+  session: AgentReviewSessionOut;
+  busy: boolean;
+  errorMessage: string | null;
+  proposal: AgentActionConfirmationBlock | null;
+  isActionPending: AgentController["isActionPending"];
+  onPersonal: () => void;
+  onSplitRecommended: () => void;
+  onConfirmProposal: (
+    block: AgentActionConfirmationBlock,
+  ) => Promise<AgentActionConfirmationBlock>;
+  onCancelProposal: (
+    block: AgentActionConfirmationBlock,
+  ) => Promise<AgentActionConfirmationBlock>;
+  onSkip: () => void;
+  onStop: () => void;
+  onDone: () => void;
+  onOpenInWebReview?: () => void;
+}) {
+  const { progress, current } = session;
+  const position = progress.total_candidates - progress.remaining + 1;
+
+  if (proposal) {
+    return (
+      <section className="mb-4" aria-label="Confirm review action">
+        <ActionConfirmationCard
+          block={proposal}
+          pending={isActionPending(proposal.proposal_id)}
+          onConfirm={onConfirmProposal}
+          onCancel={onCancelProposal}
+        />
+      </section>
+    );
+  }
+
+  if (!current) {
+    return (
+      <section className="mb-4 rounded-card border border-emerald-200 bg-emerald-50 p-4" aria-live="polite">
+        <div className="flex items-center gap-2 text-emerald-900">
+          <CheckCircle2 className="size-5 shrink-0" aria-hidden="true" />
+          <p className="font-semibold">
+            {progress.status === "cancelled" ? "Review stopped" : "You're all caught up"}
+          </p>
+        </div>
+        <p className="mt-1 text-sm leading-5 text-emerald-900">
+          {progress.reviewed} purchase{progress.reviewed === 1 ? "" : "s"} reviewed:
+          {" "}
+          {progress.personal} personal, {progress.split} split, {progress.skipped} skipped.
+        </p>
+        <Button size="sm" variant="outline" className="mt-3" onClick={onDone}>
+          Close
+        </Button>
+      </section>
+    );
+  }
+
+  const { transaction, receipt } = current;
+  const title = transaction?.merchant || receipt?.merchant || "Purchase";
+  const canActOnTransaction = Boolean(transaction) && current.available_actions.includes("mark_personal");
+
+  return (
+    <section
+      className="mb-4 rounded-card border border-indigo-200 bg-white p-4 shadow-sm"
+      aria-label={`Review purchase ${position} of ${progress.total_candidates}`}
+    >
+      <div className="flex items-center justify-between gap-2">
+        <p className="text-xs font-semibold uppercase tracking-wide text-indigo-700" role="status">
+          Review purchase {position} of {progress.total_candidates}
+        </p>
+        {receipt && !transaction ? <ReceiptText className="size-4 text-indigo-600" aria-hidden="true" /> : null}
+      </div>
+      <p className="mt-2 truncate text-base font-semibold text-slate-950">{title}</p>
+      <p className="mt-0.5 text-sm text-slate-600">
+        {transaction
+          ? `${formatMinor(Math.abs(transaction.amount_cents), transaction.currency || "USD")}${transaction.occurred_on ? ` · ${formatDate(transaction.occurred_on)}` : ""}${transaction.pending ? " · Pending" : ""}`
+          : receipt
+            ? `${receipt.total_cents !== null ? formatMinor(receipt.total_cents, receipt.currency || "USD") : ""} · ${receipt.line_count} item${receipt.line_count === 1 ? "" : "s"}`
+            : null}
+      </p>
+      {current.recommendation_label ? (
+        <p className="mt-2 text-xs leading-5 text-indigo-700">{current.recommendation_label}</p>
+      ) : null}
+
+      {canActOnTransaction ? (
+        <div className="mt-3 flex flex-col gap-2">
+          <Button type="button" className="min-h-11 justify-start gap-2" variant="outline" disabled={busy} onClick={onPersonal}>
+            <User className="size-4" aria-hidden="true" /> Personal
+          </Button>
+          {current.recommended_participant_names.length || current.recommended_group_name ? (
+            <Button type="button" className="min-h-11 justify-start gap-2" disabled={busy} onClick={onSplitRecommended}>
+              <Users className="size-4" aria-hidden="true" />
+              {current.recommended_group_name
+                ? `Split with ${current.recommended_group_name}`
+                : `Split with ${current.recommended_participant_names.join(", ")}`}
+            </Button>
+          ) : null}
+          {onOpenInWebReview ? (
+            <Button type="button" className="min-h-11 justify-start gap-2" variant="ghost" disabled={busy} onClick={onOpenInWebReview}>
+              <SquarePen className="size-4" aria-hidden="true" /> Customize in full Expense Review
+            </Button>
+          ) : null}
+        </div>
+      ) : receipt ? (
+        <div className="mt-3">
+          {onOpenInWebReview ? (
+            <p className="text-xs leading-5 text-slate-600">
+              Itemized receipt splits aren&rsquo;t supported inside the Agent yet — use Household Ops to
+              assign items, or skip for now.
+            </p>
+          ) : null}
+        </div>
+      ) : null}
+
+      <div className="mt-3 flex flex-wrap gap-2 border-t border-slate-100 pt-3">
+        <Button type="button" size="sm" variant="ghost" disabled={busy} onClick={onSkip}>
+          Skip for now
+        </Button>
+        <Button type="button" size="sm" variant="ghost" disabled={busy} onClick={onStop}>
+          Stop review
+        </Button>
+      </div>
+      {errorMessage ? <p className="mt-2 text-sm text-rose-700" role="alert">{errorMessage}</p> : null}
     </section>
   );
 }

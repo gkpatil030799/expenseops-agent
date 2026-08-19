@@ -46,6 +46,7 @@ APPLICATION_TABLES = (
     "agent_action_proposals",
     "agent_conversations",
     "agent_messages",
+    "agent_review_sessions",
     "agent_runs",
     "agent_tool_calls",
     "ai_interpretation_memories",

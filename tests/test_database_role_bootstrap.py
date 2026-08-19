@@ -14,7 +14,7 @@ def test_application_table_allowlist_matches_metadata_plus_alembic_version():
         *Base.metadata.tables,
         "alembic_version",
     }
-    assert len(bootstrap.APPLICATION_TABLES) == len(set(bootstrap.APPLICATION_TABLES)) == 60
+    assert len(bootstrap.APPLICATION_TABLES) == len(set(bootstrap.APPLICATION_TABLES)) == 61
 
 
 def test_role_plan_has_exact_attributes_and_no_membership_inheritance():

@@ -5,6 +5,7 @@ import {
   type AgentActionConfirmationBlock,
   type AgentFeedbackOut,
   type AgentMessage,
+  type AgentReviewSessionOut,
   type AgentRunOut,
   type AgentStreamEvent,
   type AgentStructuredResponse,
@@ -603,6 +604,87 @@ export function parseAgentActionConfirmation(
   ]);
   requireString(block.expires_at, 128);
   return value as AgentActionConfirmationBlock;
+}
+
+export function parseAgentReviewSession(value: unknown): AgentReviewSessionOut {
+  const session = requireRecord(value);
+  requireAllowedKeys(session, [
+    "public_id",
+    "conversation_public_id",
+    "progress",
+    "current",
+  ]);
+  requireString(session.public_id, 64);
+  requireString(session.conversation_public_id, 64);
+
+  const progress = requireRecord(session.progress);
+  requireAllowedKeys(progress, [
+    "status",
+    "reviewed",
+    "personal",
+    "split",
+    "skipped",
+    "stale",
+    "remaining",
+    "total_candidates",
+  ]);
+  requireOneOf(progress.status, ["active", "completed", "cancelled"]);
+  for (const key of ["reviewed", "personal", "split", "skipped", "stale", "remaining", "total_candidates"]) {
+    requireNonNegativeInteger(progress[key]);
+  }
+
+  if (session.current !== null) {
+    const current = requireRecord(session.current);
+    requireAllowedKeys(current, [
+      "review_item_public_id",
+      "kind",
+      "transaction",
+      "receipt",
+      "recommended_participant_names",
+      "recommended_group_name",
+      "recommendation_label",
+      "available_actions",
+    ]);
+    requireString(current.review_item_public_id, 64);
+    requireString(current.kind, 40);
+    if (current.transaction !== null) {
+      const transaction = requireRecord(current.transaction);
+      requireAllowedKeys(transaction, [
+        "id",
+        "merchant",
+        "amount_cents",
+        "currency",
+        "occurred_on",
+        "pending",
+        "institution_name",
+      ]);
+      requirePositiveInteger(transaction.id);
+      requireString(transaction.merchant, 255);
+      requireInteger(transaction.amount_cents);
+      if (transaction.currency !== null && transaction.currency !== undefined) {
+        requireCurrencyCode(transaction.currency);
+      }
+      requireNullableDate(transaction.occurred_on);
+      requireBoolean(transaction.pending);
+      requireNullableString(transaction.institution_name, 255);
+    }
+    if (current.receipt !== null) {
+      const receipt = requireRecord(current.receipt);
+      requireAllowedKeys(receipt, ["id", "merchant", "total_cents", "currency", "line_count"]);
+      requirePositiveInteger(receipt.id);
+      requireString(receipt.merchant, 255);
+      requireNullableIntegerValue(receipt.total_cents);
+      if (receipt.currency !== null && receipt.currency !== undefined) {
+        requireCurrencyCode(receipt.currency);
+      }
+      requireNonNegativeInteger(receipt.line_count);
+    }
+    requireStringArray(current.recommended_participant_names, 8, 120);
+    requireNullableString(current.recommended_group_name, 255);
+    requireNullableString(current.recommendation_label, 255);
+    requireStringArray(current.available_actions, 8, 64);
+  }
+  return value as AgentReviewSessionOut;
 }
 
 const CLASSIFICATION_VIEWS = [

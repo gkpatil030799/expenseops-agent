@@ -536,6 +536,7 @@ jobs:
                   "agent_action_proposals",
                   "agent_conversations",
                   "agent_messages",
+                  "agent_review_sessions",
                   "agent_runs",
                   "agent_tool_calls",
                   "ai_interpretation_memories",
@@ -622,6 +623,7 @@ jobs:
               }
           )
           REVIEW_INBOX_TABLES = frozenset({"review_items"})
+          AGENT_REVIEW_SESSION_TABLES = frozenset({"agent_review_sessions"})
           PRE_AGENT_REVISIONS = frozenset(
               {
                   "20260813_0023",
@@ -641,7 +643,8 @@ jobs:
           )
           ATTENTION_REVISIONS = frozenset({"20260817_0032"})
           CLASSIFICATION_REVISIONS = frozenset({"20260817_0033"})
-          CURRENT_REVISIONS = frozenset({"20260818_0034"})
+          REVIEW_INBOX_REVISIONS = frozenset({"20260818_0034"})
+          CURRENT_REVISIONS = frozenset({"20260819_0035"})
 
 
           def sha256_file(path: Path) -> str:
@@ -686,6 +689,8 @@ jobs:
                   )
               elif revision in CLASSIFICATION_REVISIONS:
                   tables = APPLICATION_TABLES - REVIEW_INBOX_TABLES
+              elif revision in REVIEW_INBOX_REVISIONS:
+                  tables = APPLICATION_TABLES - AGENT_REVIEW_SESSION_TABLES
               elif revision in CURRENT_REVISIONS:
                   tables = APPLICATION_TABLES
               else:

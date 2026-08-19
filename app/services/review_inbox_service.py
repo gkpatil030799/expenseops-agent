@@ -257,6 +257,147 @@ class ReviewInboxService:
             offset=offset,
         )
 
+    # Kinds the Agent's review session knows how to act on today. receipt_match_needed
+    # and financial_reconciliation have no Agent tool yet, so they are left to the
+    # existing web recovery UI and excluded from Agent-native discovery.
+    _AGENT_CANDIDATE_KINDS = frozenset(
+        {ReviewItemKind.TRANSACTION_REVIEW.value, ReviewItemKind.ITEMIZED_SPLIT_READY.value}
+    )
+    _AGENT_CANDIDATE_ACTIONS = {
+        ReviewItemKind.TRANSACTION_REVIEW.value: [
+            "mark_personal",
+            "propose_split",
+            "customize",
+            "skip",
+        ],
+        ReviewItemKind.ITEMIZED_SPLIT_READY.value: ["start_itemized_split", "skip"],
+    }
+    _AGENT_CANDIDATE_FETCH_CAP = 500
+
+    def list_agent_candidates(self, *, limit: int = 25) -> list[dict[str, Any]]:
+        """Ordered, bounded candidates for the Agent's own review session.
+
+        Reuses the same neutral identity/state fields and staleness
+        reconciliation as list_open(), but never reads or writes seen_at /
+        action_codes_json (those are web-Review-page presentation state) and
+        applies its own deterministic tiered ordering instead of the web
+        inbox's newest-first order.
+        """
+        workspace_id, user_id = self._scope()
+        self._reconcile_open_items(workspace_id=workspace_id, user_id=user_id)
+        rows = list(
+            self.db.scalars(
+                select(ReviewItem)
+                .where(
+                    ReviewItem.workspace_id == workspace_id,
+                    ReviewItem.owner_user_id == user_id,
+                    ReviewItem.state == ReviewItemState.OPEN.value,
+                    ReviewItem.kind.in_(self._AGENT_CANDIDATE_KINDS),
+                )
+                .order_by(ReviewItem.created_at, ReviewItem.id)
+                .limit(self._AGENT_CANDIDATE_FETCH_CAP)
+            )
+        )
+        candidates: list[dict[str, Any]] = []
+        for item in rows:
+            candidate = self._agent_candidate(item)
+            if candidate is not None:
+                candidates.append(candidate)
+        candidates.sort(key=lambda entry: (entry["tier"], entry["_sort_key"]))
+        for candidate in candidates:
+            del candidate["_sort_key"]
+        return candidates[:limit]
+
+    def get_agent_candidate(self, review_item_public_id: str) -> dict[str, Any] | None:
+        """Revalidated, live current state for one Agent review candidate."""
+        workspace_id, user_id = self._scope()
+        self._reconcile_open_items(workspace_id=workspace_id, user_id=user_id)
+        item = self.db.scalar(
+            select(ReviewItem).where(
+                ReviewItem.workspace_id == workspace_id,
+                ReviewItem.owner_user_id == user_id,
+                ReviewItem.public_id == review_item_public_id,
+            )
+        )
+        if item is None:
+            return None
+        candidate = self._agent_candidate(item)
+        if candidate is None:
+            return None
+        candidate.pop("_sort_key", None)
+        candidate["state"] = item.state
+        return candidate
+
+    def _agent_candidate(self, item: ReviewItem) -> dict[str, Any] | None:
+        base = {
+            "review_item_public_id": item.public_id,
+            "kind": item.kind,
+            "source_type": item.source_type,
+            "source_entity_id": item.source_entity_id,
+            "source_fingerprint": item.source_fingerprint,
+            "available_actions": list(self._AGENT_CANDIDATE_ACTIONS.get(item.kind, [])),
+            "created_at": item.created_at,
+        }
+        if item.source_type == ReviewItemSourceType.TRANSACTION.value:
+            tx = self.db.scalar(
+                select(ExpenseTransaction)
+                .options(selectinload(ExpenseTransaction.plaid_item))
+                .where(
+                    ExpenseTransaction.workspace_id == item.workspace_id,
+                    ExpenseTransaction.id == item.source_entity_id,
+                )
+            )
+            if tx is None:
+                return None
+            try:
+                recommendation = AIInterpretationMemoryService(self.db).recommendation_for_transaction(
+                    tx
+                )
+            except ValueError:
+                recommendation = None
+            base["tier"] = 3 if tx.pending else 1
+            base["_sort_key"] = (item.created_at, item.id)
+            base["transaction"] = {
+                "id": tx.id,
+                "merchant_name": tx.merchant_name,
+                "name": tx.name,
+                "amount_cents": tx.amount_cents,
+                "currency": tx.iso_currency_code,
+                "date": tx.date,
+                "pending": tx.pending,
+                "status": tx.status,
+                "institution_name": tx.plaid_item.institution_name if tx.plaid_item else None,
+            }
+            base["receipt"] = None
+            base["recommendation"] = recommendation
+            return base
+        if item.source_type == ReviewItemSourceType.RECEIPT.value:
+            receipt = self.db.scalar(
+                select(PurchaseReceipt)
+                .options(selectinload(PurchaseReceipt.items))
+                .where(
+                    PurchaseReceipt.workspace_id == item.workspace_id,
+                    PurchaseReceipt.id == item.source_entity_id,
+                )
+            )
+            if receipt is None:
+                return None
+            base["tier"] = 2
+            base["_sort_key"] = (item.created_at, item.id)
+            base["transaction"] = None
+            base["receipt"] = {
+                "id": receipt.id,
+                "merchant_name": receipt.merchant_normalized or receipt.merchant_raw,
+                "total_cents": receipt.total_cents,
+                "currency": receipt.currency,
+                "purchased_at": receipt.purchased_at,
+                "transaction_id": receipt.transaction_id,
+                "line_count": len(receipt.items),
+            }
+            base["recommendation"] = None
+            return base
+        return None
+
     def _reconcile_open_items(self, *, workspace_id: int, user_id: int) -> None:
         """Fail closed when the source changed without passing through a normal hook."""
 

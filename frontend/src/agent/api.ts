@@ -8,6 +8,7 @@ import type {
   AgentFeedbackCreate,
   AgentFeedbackOut,
   AgentPageContext,
+  AgentReviewSessionOut,
   AgentStreamEvent,
   AgentTurnCreate,
 } from "./contracts";
@@ -18,6 +19,7 @@ import {
   parseAgentConversationDetail,
   parseAgentConversationList,
   parseAgentFeedback,
+  parseAgentReviewSession,
   parseAgentStreamEvent,
 } from "./validation";
 
@@ -124,6 +126,85 @@ export async function cancelAgentAction(
   );
   if (block.proposal_id !== proposalId) throw new AgentProtocolError();
   return block;
+}
+
+export async function startAgentReviewSession(
+  conversationPublicId: string,
+): Promise<AgentReviewSessionOut> {
+  return parseAgentReviewSession(
+    await api<unknown>("/api/agent/review-session/start", {
+      method: "POST",
+      body: JSON.stringify({ conversation_public_id: conversationPublicId }),
+    }),
+  );
+}
+
+export async function loadAgentReviewSession(
+  sessionPublicId: string,
+): Promise<AgentReviewSessionOut> {
+  return parseAgentReviewSession(
+    await api<unknown>(`/api/agent/review-session/${encodeURIComponent(sessionPublicId)}`),
+  );
+}
+
+export async function proposeAgentReviewAction(
+  sessionPublicId: string,
+  payload: {
+    action: "mark_personal" | "post_splitwise_expense";
+    participantNames?: string[];
+    groupName?: string | null;
+  },
+): Promise<AgentActionConfirmationBlock> {
+  return parseAgentActionConfirmation(
+    await api<unknown>(
+      `/api/agent/review-session/${encodeURIComponent(sessionPublicId)}/propose`,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          action: payload.action,
+          participant_names: payload.participantNames ?? [],
+          group_name: payload.groupName ?? null,
+        }),
+      },
+    ),
+  );
+}
+
+export async function advanceAgentReviewSession(
+  sessionPublicId: string,
+  proposalPublicId: string,
+): Promise<AgentReviewSessionOut> {
+  return parseAgentReviewSession(
+    await api<unknown>(
+      `/api/agent/review-session/${encodeURIComponent(sessionPublicId)}/advance`,
+      {
+        method: "POST",
+        body: JSON.stringify({ proposal_public_id: proposalPublicId }),
+      },
+    ),
+  );
+}
+
+export async function skipAgentReviewCandidate(
+  sessionPublicId: string,
+): Promise<AgentReviewSessionOut> {
+  return parseAgentReviewSession(
+    await api<unknown>(
+      `/api/agent/review-session/${encodeURIComponent(sessionPublicId)}/skip`,
+      { method: "POST" },
+    ),
+  );
+}
+
+export async function stopAgentReviewSession(
+  sessionPublicId: string,
+): Promise<AgentReviewSessionOut> {
+  return parseAgentReviewSession(
+    await api<unknown>(
+      `/api/agent/review-session/${encodeURIComponent(sessionPublicId)}/stop`,
+      { method: "POST" },
+    ),
+  );
 }
 
 export async function streamAgentTurn({
