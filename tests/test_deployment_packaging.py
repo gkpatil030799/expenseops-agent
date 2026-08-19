@@ -385,8 +385,10 @@ def test_production_release_preflights_topology_hobby_recovery_and_credentials()
     assert '"20260815_0029"' in recovery
     assert '"20260817_0031"' in recovery
     assert 'ATTENTION_REVISIONS = frozenset({"20260817_0032"})' in recovery
-    assert 'CURRENT_REVISIONS = frozenset({"20260817_0033"})' in recovery
-    assert "tables = APPLICATION_TABLES - PROACTIVE_ATTENTION_TABLES" in recovery
+    assert 'CLASSIFICATION_REVISIONS = frozenset({"20260817_0033"})' in recovery
+    assert 'CURRENT_REVISIONS = frozenset({"20260818_0034"})' in recovery
+    assert "- PROACTIVE_ATTENTION_TABLES" in recovery
+    assert "tables = APPLICATION_TABLES - REVIEW_INBOX_TABLES" in recovery
     assert "relations != reviewed_relations" in recovery
     assert "source table inventory differs from the reviewed" in recovery
     assert "restored_rows = row_manifest(restored, restored_relations)" in recovery
@@ -607,16 +609,18 @@ def test_hobby_recovery_inventory_matches_the_bootstrap_allowlist():
     assert embedded_tables == set(APPLICATION_TABLES)
 
 
-def test_hobby_recovery_inventory_is_revision_aware_for_attention_migration():
+def test_hobby_recovery_inventory_is_revision_aware_through_review_inbox():
     tree = ast.parse(_inline_hobby_recovery_program())
     required_assignments = {
         "APPLICATION_TABLES",
         "AGENT_TABLES",
         "PROACTIVE_ATTENTION_TABLES",
         "CLASSIFICATION_TABLES",
+        "REVIEW_INBOX_TABLES",
         "PRE_AGENT_REVISIONS",
         "AGENT_REVISIONS",
         "ATTENTION_REVISIONS",
+        "CLASSIFICATION_REVISIONS",
         "CURRENT_REVISIONS",
     }
     selected_nodes: list[ast.stmt] = []
@@ -642,6 +646,7 @@ def test_hobby_recovery_inventory_is_revision_aware_for_attention_migration():
     revision_0031 = set(expected_relations("20260817_0031"))
     revision_0032 = set(expected_relations("20260817_0032"))
     revision_0033 = set(expected_relations("20260817_0033"))
+    revision_0034 = set(expected_relations("20260818_0034"))
     classification_tables = {
         ("public", "classification_concept_aliases"),
         ("public", "classification_concepts"),
@@ -649,13 +654,19 @@ def test_hobby_recovery_inventory_is_revision_aware_for_attention_migration():
         ("public", "classification_settings"),
         ("public", "classification_subcategories"),
     }
+    review_inbox_tables = {("public", "review_items")}
 
     assert revision_0030 == revision_0031
     assert revision_0030.isdisjoint(attention_tables)
+    assert revision_0030.isdisjoint(classification_tables)
+    assert revision_0030.isdisjoint(review_inbox_tables)
     assert attention_tables <= revision_0032
     assert revision_0032 - revision_0031 == attention_tables
     assert revision_0032.isdisjoint(classification_tables)
+    assert revision_0032.isdisjoint(review_inbox_tables)
     assert revision_0033 - revision_0032 == classification_tables
+    assert revision_0033.isdisjoint(review_inbox_tables)
+    assert revision_0034 - revision_0033 == review_inbox_tables
 
 
 def test_railway_waiter_requires_success_and_fails_closed():

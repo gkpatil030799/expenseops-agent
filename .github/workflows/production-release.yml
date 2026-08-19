@@ -621,6 +621,7 @@ jobs:
                   "classification_subcategories",
               }
           )
+          REVIEW_INBOX_TABLES = frozenset({"review_items"})
           PRE_AGENT_REVISIONS = frozenset(
               {
                   "20260813_0023",
@@ -639,7 +640,8 @@ jobs:
               }
           )
           ATTENTION_REVISIONS = frozenset({"20260817_0032"})
-          CURRENT_REVISIONS = frozenset({"20260817_0033"})
+          CLASSIFICATION_REVISIONS = frozenset({"20260817_0033"})
+          CURRENT_REVISIONS = frozenset({"20260818_0034"})
 
 
           def sha256_file(path: Path) -> str:
@@ -663,11 +665,27 @@ jobs:
 
           def expected_relations(revision: str) -> list[tuple[str, str]]:
               if revision in PRE_AGENT_REVISIONS:
-                  tables = APPLICATION_TABLES - AGENT_TABLES
+                  tables = (
+                      APPLICATION_TABLES
+                      - AGENT_TABLES
+                      - CLASSIFICATION_TABLES
+                      - REVIEW_INBOX_TABLES
+                  )
               elif revision in AGENT_REVISIONS:
-                  tables = APPLICATION_TABLES - PROACTIVE_ATTENTION_TABLES
+                  tables = (
+                      APPLICATION_TABLES
+                      - PROACTIVE_ATTENTION_TABLES
+                      - CLASSIFICATION_TABLES
+                      - REVIEW_INBOX_TABLES
+                  )
               elif revision in ATTENTION_REVISIONS:
-                  tables = APPLICATION_TABLES - CLASSIFICATION_TABLES
+                  tables = (
+                      APPLICATION_TABLES
+                      - CLASSIFICATION_TABLES
+                      - REVIEW_INBOX_TABLES
+                  )
+              elif revision in CLASSIFICATION_REVISIONS:
+                  tables = APPLICATION_TABLES - REVIEW_INBOX_TABLES
               elif revision in CURRENT_REVISIONS:
                   tables = APPLICATION_TABLES
               else:
