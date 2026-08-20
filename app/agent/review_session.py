@@ -12,10 +12,11 @@ unchanged. Web CRUD and Telegram are never called from here.
 
 from __future__ import annotations
 
-from typing import Any
+from dataclasses import dataclass
+from typing import Any, Literal
 
 from sqlalchemy import select
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app.agent.action_tools import MARK_PERSONAL_TOOL_NAME, POST_SPLITWISE_TOOL_NAME
@@ -31,18 +32,29 @@ from app.models import (
     AgentActionProposal,
     AgentReviewSession,
     AgentReviewSessionStatus,
+    ExpenseTransaction,
     ReviewItemState,
     utc_now,
 )
+from app.services.ai_intent_extraction_service import AIIntentExtractionService
+from app.services.ai_memory_service import AIInterpretationMemoryService
 from app.services.review_inbox_service import ReviewInboxService
 
 REVIEW_SESSION_PROMPT_VERSION = "agent-review-session-v1"
 MAX_REVIEW_SESSION_CANDIDATES = 25
+_TYPED_REVIEW_SOURCE = "typed"
 
 _ACTIONS_BY_KIND = {
     "mark_personal": {"transaction"},
     "post_splitwise_expense": {"transaction"},
 }
+
+
+@dataclass(frozen=True)
+class TypedInterpretationResult:
+    status: Literal["proposed", "clarify"]
+    proposal: AgentActionProposal | None = None
+    message: str | None = None
 
 
 class ReviewSessionService:
@@ -186,6 +198,7 @@ class ReviewSessionService:
         action: str,
         participant_names: list[str] | None = None,
         group_name: str | None = None,
+        source: Literal["button", "typed"] = "button",
     ) -> AgentActionProposal:
         if action not in _ACTIONS_BY_KIND:
             raise AgentConflictError(
@@ -261,7 +274,58 @@ class ReviewSessionService:
             ),
         )
         agent_service.complete_run(run.public_id, owner_user_id=session.owner_user_id)
+        if source == _TYPED_REVIEW_SOURCE:
+            proposal.metadata_json = {
+                **(proposal.metadata_json or {}),
+                "review_source": _TYPED_REVIEW_SOURCE,
+            }
+            self.db.add(proposal)
+            self.db.commit()
+            self.db.refresh(proposal)
         return proposal
+
+    def interpret_typed_message(
+        self,
+        session: AgentReviewSession,
+        *,
+        registry: AgentToolRegistry,
+        text: str,
+    ) -> TypedInterpretationResult:
+        """Resolve a free-typed chat message against the current candidate.
+
+        Mirrors Telegram's AI-chat-mode pipeline: an LLM call extracts intent
+        and raw name mentions only (AIIntentExtractionService), and the
+        existing propose_post_splitwise_expense tool -- already wired for the
+        button path -- does the actual friend/group resolution, ambiguity,
+        and not-found handling. No resolution logic is duplicated here.
+        """
+        session, live = self.current_candidate(session)
+        if live is None:
+            raise AgentConflictError(
+                "review_session_exhausted", "This review session has no active candidate"
+            )
+        intent = AIIntentExtractionService(self.settings).extract(user_message=text)
+        if intent.action == "personal":
+            proposal = self.propose_action(
+                session, registry=registry, action="mark_personal", source=_TYPED_REVIEW_SOURCE
+            )
+            return TypedInterpretationResult(status="proposed", proposal=proposal)
+        if intent.action == "split":
+            group_name = intent.group_mentions[0] if intent.group_mentions else None
+            proposal = self.propose_action(
+                session,
+                registry=registry,
+                action="post_splitwise_expense",
+                participant_names=intent.person_mentions,
+                group_name=group_name,
+                source=_TYPED_REVIEW_SOURCE,
+            )
+            return TypedInterpretationResult(status="proposed", proposal=proposal)
+        message = intent.clarification_question or (
+            "I can mark this personal or split it with someone -- try again, "
+            "or use the buttons below."
+        )
+        return TypedInterpretationResult(status="clarify", message=message)
 
     def advance_after_proposal(
         self, session: AgentReviewSession, *, proposal_public_id: str
@@ -290,9 +354,44 @@ class ReviewSessionService:
         if not matches:
             return session
         outcome = "personal" if proposal.tool_name == MARK_PERSONAL_TOOL_NAME else "split"
+        if (proposal.metadata_json or {}).get("review_source") == _TYPED_REVIEW_SOURCE:
+            self._record_typed_memory(proposal, params)
         return self._record_and_advance(
             session, outcome=outcome, snapshot=snapshot, proposal_public_id=proposal.public_id
         )
+
+    def _record_typed_memory(
+        self, proposal: AgentActionProposal, params: dict[str, Any]
+    ) -> None:
+        """Best-effort: a typed split resolution improves the same merchant
+        recommendation that already drives the review-session buttons, the
+        same way a Telegram AI-chat-mode correction does.
+        """
+        transaction_id = params.get("transaction_id")
+        tx = self.db.get(ExpenseTransaction, transaction_id) if transaction_id else None
+        if tx is None:
+            return
+        if proposal.tool_name == MARK_PERSONAL_TOOL_NAME:
+            final_action, final_participants, final_group_name = "personal", [], None
+        else:
+            final_action = "split_equal"
+            payer_user_id = params.get("payer_user_id")
+            final_participants = [
+                {"display_name": person["display_name"]}
+                for person in params.get("participants", [])
+                if person.get("display_name") and person.get("user_id") != payer_user_id
+            ]
+            final_group_name = params.get("group_name")
+        try:
+            AIInterpretationMemoryService(self.db).record_agent_typed_split_memory(
+                tx=tx,
+                final_action=final_action,
+                final_group_name=final_group_name,
+                final_participants=final_participants,
+                final_split_mode="equal" if final_action != "personal" else None,
+            )
+        except (SQLAlchemyError, TypeError, ValueError):
+            return
 
     def _record_and_advance(
         self,

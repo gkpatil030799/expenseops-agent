@@ -2236,7 +2236,7 @@ def _validate_splitwise_payload(payload: dict[str, Any], *, expected_total_cents
         raise TransactionError("The split total is invalid.") from exc
     if cost_cents != expected_total_cents:
         raise TransactionError("The split total must match the bank transaction amount.")
-    indexes = _splitwise_payload_indexes(payload)
+    indexes = splitwise_payload_indexes(payload)
     if not indexes:
         raise TransactionError("Choose at least one participant before saving the split.")
     paid_total = 0
@@ -2261,7 +2261,7 @@ def _validate_splitwise_payload(payload: dict[str, Any], *, expected_total_cents
 
 
 def _splitwise_payload_paid_cents(payload: dict[str, Any], user_id: int) -> int | None:
-    for index in _splitwise_payload_indexes(payload):
+    for index in splitwise_payload_indexes(payload):
         try:
             candidate_id = int(payload[f"users__{index}__user_id"])
             paid_cents = decimal_to_cents(Decimal(str(payload[f"users__{index}__paid_share"])))
@@ -2274,7 +2274,7 @@ def _splitwise_payload_paid_cents(payload: dict[str, Any], user_id: int) -> int 
     return None
 
 
-def _splitwise_payload_indexes(payload: dict[str, Any]) -> list[int]:
+def splitwise_payload_indexes(payload: dict[str, Any]) -> list[int]:
     indexes: list[int] = []
     index = 0
     while f"users__{index}__user_id" in payload:
@@ -2284,7 +2284,7 @@ def _splitwise_payload_indexes(payload: dict[str, Any]) -> list[int]:
 
 
 def _rescale_splitwise_payload(payload: dict[str, Any], new_total_cents: int) -> dict[str, Any]:
-    indexes = _splitwise_payload_indexes(payload)
+    indexes = splitwise_payload_indexes(payload)
     if not indexes or new_total_cents <= 0:
         raise TransactionError("The saved split cannot be rescaled safely.")
     paid_weights = [

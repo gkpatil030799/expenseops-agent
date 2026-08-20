@@ -26,6 +26,8 @@ from app.agent.contracts import (
     AgentReviewCandidateSummary,
     AgentReviewReceiptSummary,
     AgentReviewSessionAdvanceRequest,
+    AgentReviewSessionInterpretRequest,
+    AgentReviewSessionInterpretResult,
     AgentReviewSessionOut,
     AgentReviewSessionProgress,
     AgentReviewSessionProposeRequest,
@@ -457,6 +459,47 @@ def propose_review_session_action(
     except AgentActionClarificationRequired as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     return action_confirmation_block(proposal)
+
+
+@router.post(
+    "/review-session/{session_public_id}/interpret",
+    response_model=AgentReviewSessionInterpretResult,
+)
+def interpret_review_session_message(
+    session_public_id: str,
+    payload: AgentReviewSessionInterpretRequest,
+    db: DbSession,
+    user: CurrentUser,
+    workspace: CurrentWorkspace,
+) -> AgentReviewSessionInterpretResult:
+    """Resolve a free-typed chat message against the current candidate.
+
+    Same intent-extraction + entity-resolution pipeline as Telegram's AI
+    chat mode, reusing the existing propose_post_splitwise_expense tool for
+    resolution rather than duplicating it.
+    """
+
+    _check_agent_rate_limit(
+        f"agent-review:{workspace.id}:{user.id}",
+        limit=30,
+        window_seconds=60,
+        operation="review_session_interpret",
+    )
+    service = ReviewSessionService(db, get_settings())
+    registry = build_read_tool_registry(get_settings())
+    register_action_tools(registry)
+    try:
+        session = service.get_session(session_public_id, owner_user_id=user.id)
+        result = service.interpret_typed_message(session, registry=registry, text=payload.text)
+    except AgentFoundationError as exc:
+        _raise_agent_error(exc)
+    except AgentActionClarificationRequired as exc:
+        return AgentReviewSessionInterpretResult(status="clarify", message=str(exc))
+    if result.status == "proposed" and result.proposal is not None:
+        return AgentReviewSessionInterpretResult(
+            status="proposed", confirmation=action_confirmation_block(result.proposal)
+        )
+    return AgentReviewSessionInterpretResult(status="clarify", message=result.message)
 
 
 @router.post("/review-session/{session_public_id}/advance", response_model=AgentReviewSessionOut)

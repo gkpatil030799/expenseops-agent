@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import re
+from collections import Counter
 from dataclasses import dataclass
 from typing import Any
 
@@ -20,11 +22,17 @@ from app.models import (
     ReviewItemKind,
     ReviewItemSourceType,
     ReviewItemState,
+    SplitwiseIntegration,
     TransactionStatus,
     WorkspaceMembership,
     utc_now,
 )
+from app.services.agent_service import friend_display_name
 from app.services.ai_memory_service import AIInterpretationMemoryService
+from app.services.splitwise_service import SplitwiseAPIError, SplitwiseService
+from app.services.transaction_service import splitwise_payload_indexes
+
+_MIN_FREQUENT_PARTNER_OCCURRENCES = 2
 
 _ACTIONABLE_TRANSACTION_STATES = frozenset(
     {TransactionStatus.ASK_USER.value, TransactionStatus.SHARED_DRAFT.value}
@@ -66,6 +74,8 @@ class ReviewInboxService:
 
     def __init__(self, db: Session):
         self.db = db
+        self._frequent_partner_loaded = False
+        self._frequent_partner_cache: dict[str, Any] | None = None
 
     def _scope(self) -> tuple[int, int]:
         workspace_id = self.db.info.get("workspace_id")
@@ -328,6 +338,81 @@ class ReviewInboxService:
         candidate["state"] = item.state
         return candidate
 
+    def _frequent_splitwise_partner(self) -> dict[str, Any] | None:
+        """Fall back to the co-participant most frequently seen across every posted
+        Splitwise expense in this workspace, regardless of which channel posted it
+        (web, Telegram, or Agent) — unlike the per-merchant AIInterpretationMemory
+        preference, this reads the shared domain ledger so it reflects the user's
+        real history, not just interpretation corrections.
+
+        Cached per service instance: this is the same answer for every candidate
+        in a listing that lacks a merchant-specific recommendation, so computing it
+        once avoids repeating the live Splitwise friends lookup per candidate.
+        """
+        if self._frequent_partner_loaded:
+            return self._frequent_partner_cache
+        self._frequent_partner_loaded = True
+        workspace_id, user_id = self._scope()
+        integration = self.db.scalar(
+            select(SplitwiseIntegration).where(
+                SplitwiseIntegration.workspace_id == workspace_id,
+                SplitwiseIntegration.user_id == user_id,
+                SplitwiseIntegration.enabled.is_(True),
+            )
+        )
+        if integration is None or not integration.splitwise_user_id:
+            return None
+        try:
+            payer_id = int(integration.splitwise_user_id)
+        except (TypeError, ValueError):
+            return None
+        counts: Counter[int] = Counter()
+        payloads = self.db.scalars(
+            select(ExpenseTransaction.splitwise_payload_json).where(
+                ExpenseTransaction.workspace_id == workspace_id,
+                ExpenseTransaction.status == TransactionStatus.POSTED.value,
+                ExpenseTransaction.splitwise_payload_json.is_not(None),
+            )
+        )
+        for raw in payloads:
+            try:
+                payload = json.loads(raw)
+            except (TypeError, ValueError):
+                continue
+            for index in splitwise_payload_indexes(payload):
+                try:
+                    participant_id = int(payload[f"users__{index}__user_id"])
+                except (KeyError, TypeError, ValueError):
+                    continue
+                if participant_id != payer_id:
+                    counts[participant_id] += 1
+        if not counts:
+            self._frequent_partner_cache = None
+            return None
+        top_id, occurrences = counts.most_common(1)[0]
+        if occurrences < _MIN_FREQUENT_PARTNER_OCCURRENCES:
+            self._frequent_partner_cache = None
+            return None
+        try:
+            friends = SplitwiseService().get_friends()
+        except SplitwiseAPIError:
+            self._frequent_partner_cache = None
+            return None
+        friend = next(
+            (candidate for candidate in friends if str(candidate.get("id")) == str(top_id)),
+            None,
+        )
+        if friend is None:
+            self._frequent_partner_cache = None
+            return None
+        name = friend_display_name(friend)
+        self._frequent_partner_cache = {
+            "reason": f"You often split with {name}.",
+            "participant_names": [name],
+            "group_name": None,
+        }
+        return self._frequent_partner_cache
+
     def _agent_candidate(self, item: ReviewItem) -> dict[str, Any] | None:
         base = {
             "review_item_public_id": item.public_id,
@@ -355,6 +440,8 @@ class ReviewInboxService:
                 )
             except ValueError:
                 recommendation = None
+            if recommendation is None:
+                recommendation = self._frequent_splitwise_partner()
             base["tier"] = 3 if tx.pending else 1
             base["_sort_key"] = (item.created_at, item.id)
             base["transaction"] = {

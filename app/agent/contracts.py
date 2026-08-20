@@ -1162,3 +1162,13 @@ class AgentReviewSessionProposeRequest(StrictAgentModel):
 
 class AgentReviewSessionAdvanceRequest(StrictAgentModel):
     proposal_public_id: str = Field(min_length=1, max_length=64)
+
+
+class AgentReviewSessionInterpretRequest(StrictAgentModel):
+    text: str = Field(min_length=1, max_length=2000)
+
+
+class AgentReviewSessionInterpretResult(StrictAgentModel):
+    status: Literal["proposed", "clarify"]
+    confirmation: AgentActionConfirmationBlock | None = None
+    message: str | None = Field(default=None, max_length=2000)
