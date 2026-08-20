@@ -5,6 +5,7 @@ import {
   type AgentActionConfirmationBlock,
   type AgentFeedbackOut,
   type AgentMessage,
+  type AgentReviewSessionInterpretResult,
   type AgentReviewSessionOut,
   type AgentRunOut,
   type AgentStreamEvent,
@@ -685,6 +686,19 @@ export function parseAgentReviewSession(value: unknown): AgentReviewSessionOut {
     requireStringArray(current.available_actions, 8, 64);
   }
   return value as AgentReviewSessionOut;
+}
+
+export function parseAgentReviewSessionInterpretResult(
+  value: unknown,
+): AgentReviewSessionInterpretResult {
+  const result = requireRecord(value);
+  requireAllowedKeys(result, ["status", "confirmation", "message"]);
+  requireOneOf(result.status, ["proposed", "clarify"]);
+  if (result.confirmation !== null && result.confirmation !== undefined) {
+    parseAgentActionConfirmation(result.confirmation);
+  }
+  requireNullableString(result.message, 2_000);
+  return value as AgentReviewSessionInterpretResult;
 }
 
 const CLASSIFICATION_VIEWS = [

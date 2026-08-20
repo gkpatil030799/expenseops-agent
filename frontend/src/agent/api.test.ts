@@ -2,6 +2,12 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   AgentSseParser,
+  advanceAgentReviewSession,
+  interpretAgentReviewMessage,
+  proposeAgentReviewAction,
+  skipAgentReviewCandidate,
+  startAgentReviewSession,
+  stopAgentReviewSession,
   submitAgentFeedback,
   streamAgentTurn,
 } from "./api";
@@ -378,6 +384,242 @@ describe("submitAgentFeedback", () => {
 
     await expect(
       submitAgentFeedback("message-assistant-1", { rating: "helpful", reason: null }),
+    ).rejects.toBeInstanceOf(AgentProtocolError);
+  });
+});
+
+describe("Day 19 review-session api", () => {
+  const progress = {
+    status: "active",
+    reviewed: 0,
+    personal: 0,
+    split: 0,
+    skipped: 0,
+    stale: 0,
+    remaining: 7,
+    total_candidates: 7,
+  } as const;
+
+  const session = {
+    public_id: "review-session-public-1",
+    conversation_public_id: "conversation-public-1",
+    progress,
+    current: {
+      review_item_public_id: "review-item-public-1",
+      kind: "transaction_review",
+      transaction: {
+        id: 26,
+        merchant: "Costco Wholesale",
+        amount_cents: 14218,
+        currency: "USD",
+        occurred_on: "2026-08-19",
+        pending: false,
+        institution_name: "ExpenseOps Demo Bank",
+      },
+      receipt: null,
+      recommended_participant_names: [],
+      recommended_group_name: null,
+      recommendation_label: null,
+      available_actions: ["mark_personal", "propose_split", "customize", "skip"],
+    },
+  } as const;
+
+  function jsonResponse(body: unknown) {
+    return new Response(JSON.stringify(body), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    });
+  }
+
+  it("starts a review session for the given conversation", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse(session)));
+
+    await expect(startAgentReviewSession("conversation-public-1")).resolves.toEqual(session);
+
+    expect(vi.mocked(fetch)).toHaveBeenCalledWith(
+      "/api/agent/review-session/start",
+      expect.objectContaining({
+        method: "POST",
+        credentials: "same-origin",
+        body: JSON.stringify({ conversation_public_id: "conversation-public-1" }),
+      }),
+    );
+  });
+
+  it("rejects a malformed session response", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(jsonResponse({ ...session, progress: { ...progress, remaining: -1 } })),
+    );
+
+    await expect(startAgentReviewSession("conversation-public-1")).rejects.toBeInstanceOf(
+      AgentProtocolError,
+    );
+  });
+
+  it("proposes mark_personal with empty participant/group defaults", async () => {
+    const block = {
+      type: "action_confirmation",
+      block_id: null,
+      action: "mark_transaction_personal",
+      title: "Mark transaction personal",
+      summary: "This transaction will be marked personal.",
+      details: [{ label: "Merchant", value: "Costco Wholesale" }],
+      confirm_label: "Mark personal",
+      cancel_label: "Cancel",
+      proposal_id: "proposal-public-1",
+      proposal_version: 1,
+      status: "awaiting_confirmation",
+      expires_at: "2026-08-19T20:00:00Z",
+    } as const;
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse(block)));
+
+    await expect(
+      proposeAgentReviewAction("review-session-public-1", { action: "mark_personal" }),
+    ).resolves.toEqual(block);
+
+    expect(vi.mocked(fetch)).toHaveBeenCalledWith(
+      "/api/agent/review-session/review-session-public-1/propose",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({ action: "mark_personal", participant_names: [], group_name: null }),
+      }),
+    );
+  });
+
+  it("proposes post_splitwise_expense with the clicked participant names", async () => {
+    const block = {
+      type: "action_confirmation",
+      block_id: null,
+      action: "post_splitwise_expense",
+      title: "Split with Manasi Purohit",
+      summary: "This transaction will be split with Manasi Purohit.",
+      details: [{ label: "Merchant", value: "Costco Wholesale" }],
+      confirm_label: "Split",
+      cancel_label: "Cancel",
+      proposal_id: "proposal-public-2",
+      proposal_version: 1,
+      status: "awaiting_confirmation",
+      expires_at: "2026-08-19T20:00:00Z",
+    } as const;
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse(block)));
+
+    await proposeAgentReviewAction("review-session-public-1", {
+      action: "post_splitwise_expense",
+      participantNames: ["Manasi Purohit"],
+      groupName: null,
+    });
+
+    expect(vi.mocked(fetch)).toHaveBeenCalledWith(
+      "/api/agent/review-session/review-session-public-1/propose",
+      expect.objectContaining({
+        body: JSON.stringify({
+          action: "post_splitwise_expense",
+          participant_names: ["Manasi Purohit"],
+          group_name: null,
+        }),
+      }),
+    );
+  });
+
+  it("advances a review session with the resolved proposal id", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse(session)));
+
+    await advanceAgentReviewSession("review-session-public-1", "proposal-public-1");
+
+    expect(vi.mocked(fetch)).toHaveBeenCalledWith(
+      "/api/agent/review-session/review-session-public-1/advance",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({ proposal_public_id: "proposal-public-1" }),
+      }),
+    );
+  });
+
+  it("skips the current candidate with no request body", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse(session)));
+
+    await skipAgentReviewCandidate("review-session-public-1");
+
+    expect(vi.mocked(fetch)).toHaveBeenCalledWith(
+      "/api/agent/review-session/review-session-public-1/skip",
+      expect.objectContaining({ method: "POST" }),
+    );
+    const options = vi.mocked(fetch).mock.calls[0][1] as RequestInit;
+    expect(options.body).toBeUndefined();
+  });
+
+  it("stops a review session with no request body", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse({ ...session, current: null })));
+
+    await stopAgentReviewSession("review-session-public-1");
+
+    expect(vi.mocked(fetch)).toHaveBeenCalledWith(
+      "/api/agent/review-session/review-session-public-1/stop",
+      expect.objectContaining({ method: "POST" }),
+    );
+  });
+
+  it("interprets a typed message and returns a proposed confirmation", async () => {
+    const block = {
+      type: "action_confirmation",
+      block_id: null,
+      action: "post_splitwise_expense",
+      title: "Split with Priya",
+      summary: "This transaction will be split with Priya.",
+      details: [{ label: "Merchant", value: "Costco Wholesale" }],
+      confirm_label: "Split",
+      cancel_label: "Cancel",
+      proposal_id: "proposal-public-3",
+      proposal_version: 1,
+      status: "awaiting_confirmation",
+      expires_at: "2026-08-19T20:00:00Z",
+    } as const;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(jsonResponse({ status: "proposed", confirmation: block, message: null })),
+    );
+
+    await expect(
+      interpretAgentReviewMessage("review-session-public-1", "split this with Priya"),
+    ).resolves.toEqual({ status: "proposed", confirmation: block, message: null });
+
+    expect(vi.mocked(fetch)).toHaveBeenCalledWith(
+      "/api/agent/review-session/review-session-public-1/interpret",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({ text: "split this with Priya" }),
+      }),
+    );
+  });
+
+  it("interprets a typed message that needs clarification", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        jsonResponse({
+          status: "clarify",
+          confirmation: null,
+          message: "I couldn't find Nobody in your Splitwise account.",
+        }),
+      ),
+    );
+
+    await expect(interpretAgentReviewMessage("review-session-public-1", "split with Nobody")).resolves.toEqual({
+      status: "clarify",
+      confirmation: null,
+      message: "I couldn't find Nobody in your Splitwise account.",
+    });
+  });
+
+  it("rejects a malformed interpret response", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(jsonResponse({ status: "not-a-real-status", confirmation: null, message: null })),
+    );
+
+    await expect(
+      interpretAgentReviewMessage("review-session-public-1", "split with Priya"),
     ).rejects.toBeInstanceOf(AgentProtocolError);
   });
 });

@@ -8,6 +8,7 @@ import type {
   AgentFeedbackCreate,
   AgentFeedbackOut,
   AgentPageContext,
+  AgentReviewSessionInterpretResult,
   AgentReviewSessionOut,
   AgentStreamEvent,
   AgentTurnCreate,
@@ -20,6 +21,7 @@ import {
   parseAgentConversationList,
   parseAgentFeedback,
   parseAgentReviewSession,
+  parseAgentReviewSessionInterpretResult,
   parseAgentStreamEvent,
 } from "./validation";
 
@@ -165,6 +167,21 @@ export async function proposeAgentReviewAction(
           participant_names: payload.participantNames ?? [],
           group_name: payload.groupName ?? null,
         }),
+      },
+    ),
+  );
+}
+
+export async function interpretAgentReviewMessage(
+  sessionPublicId: string,
+  text: string,
+): Promise<AgentReviewSessionInterpretResult> {
+  return parseAgentReviewSessionInterpretResult(
+    await api<unknown>(
+      `/api/agent/review-session/${encodeURIComponent(sessionPublicId)}/interpret`,
+      {
+        method: "POST",
+        body: JSON.stringify({ text }),
       },
     ),
   );

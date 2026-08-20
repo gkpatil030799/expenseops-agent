@@ -69,6 +69,7 @@ export default function AgentExperience({
   const [historyOpen, setHistoryOpen] = useState(false);
   const [showJumpToLatest, setShowJumpToLatest] = useState(false);
   const [reviewProposal, setReviewProposal] = useState<AgentActionConfirmationBlock | null>(null);
+  const [reviewClarifyMessage, setReviewClarifyMessage] = useState<string | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const composerRef = useRef<HTMLTextAreaElement>(null);
   const autoScrollRef = useRef(true);
@@ -76,10 +77,12 @@ export default function AgentExperience({
 
   async function beginReviewSession() {
     setReviewProposal(null);
+    setReviewClarifyMessage(null);
     await controller.startReviewSession();
   }
 
   async function proposeMarkPersonal() {
+    setReviewClarifyMessage(null);
     const block = await controller.proposeReviewAction("mark_personal");
     if (block) setReviewProposal(block);
   }
@@ -87,11 +90,25 @@ export default function AgentExperience({
   async function proposeRecommendedSplit() {
     const current = controller.reviewSession?.current;
     if (!current) return;
+    setReviewClarifyMessage(null);
     const block = await controller.proposeReviewAction("post_splitwise_expense", {
       participantNames: current.recommended_participant_names,
       groupName: current.recommended_group_name,
     });
     if (block) setReviewProposal(block);
+  }
+
+  async function interpretTypedReviewMessage(text: string) {
+    setReviewClarifyMessage(null);
+    const result = await controller.interpretReviewMessage(text);
+    if (!result) return;
+    if (result.status === "proposed" && result.confirmation) {
+      setReviewProposal(result.confirmation);
+      return;
+    }
+    setReviewClarifyMessage(
+      result.message || "I couldn't quite tell who to split this with — try again, or use the buttons below.",
+    );
   }
 
   async function confirmReviewProposal(block: AgentActionConfirmationBlock) {
@@ -113,11 +130,13 @@ export default function AgentExperience({
 
   async function skipReviewCandidate() {
     setReviewProposal(null);
+    setReviewClarifyMessage(null);
     await controller.skipReviewCandidate();
   }
 
   async function stopReviewSession() {
     setReviewProposal(null);
+    setReviewClarifyMessage(null);
     await controller.stopReviewSession();
   }
 
@@ -146,18 +165,28 @@ export default function AgentExperience({
     const value = draft.trim();
     if (!value || controller.sending) return;
     setDraft("");
-    await controller.sendMessage(value);
+    const current = controller.reviewSession?.current;
+    const reviewCandidateActionable =
+      !readOnly && current && !reviewProposal && current.available_actions.includes("mark_personal");
+    if (reviewCandidateActionable) {
+      await interpretTypedReviewMessage(value);
+    } else {
+      await controller.sendMessage(value);
+    }
     composerRef.current?.focus();
   }
 
   const hasConversation = Boolean(controller.activeConversation);
+  const hasConversationHistory = Boolean(
+    controller.messages.length || controller.streamingText || controller.streamingResponse,
+  );
   return (
     <Surface
       variant="command"
       padding="none"
       className={
         mode === "panel"
-          ? "relative flex h-full min-h-0 min-w-0 flex-col overflow-hidden rounded-none border-indigo-200 shadow-primary lg:sticky lg:top-3 lg:h-[calc(100dvh-1.5rem)] lg:min-h-[38rem] lg:rounded-card"
+          ? "relative flex h-full min-h-0 min-w-0 flex-col overflow-hidden rounded-none border-indigo-200 shadow-primary lg:sticky lg:top-3 lg:h-[calc(100dvh-6.5rem)] lg:min-h-[38rem] lg:rounded-card"
           : "relative flex h-[calc(100dvh-10.5rem)] min-h-0 min-w-0 flex-col overflow-hidden border-indigo-200 shadow-card md:h-[calc(100dvh-8rem)]"
       }
       data-testid={`agent-${mode}`}
@@ -265,6 +294,7 @@ export default function AgentExperience({
             session={controller.reviewSession}
             busy={controller.reviewSessionBusy}
             errorMessage={controller.reviewSessionError?.message || null}
+            clarifyMessage={reviewClarifyMessage}
             proposal={reviewProposal}
             isActionPending={controller.isActionPending}
             onPersonal={() => void proposeMarkPersonal()}
@@ -287,12 +317,12 @@ export default function AgentExperience({
                 : undefined
             }
           />
-        ) : !readOnly && reviewItems.length ? (
+        ) : !readOnly && reviewItems.length && hasConversationHistory ? (
           <AgentReviewItems items={reviewItems} onReviewInAgent={() => void beginReviewSession()} />
         ) : null}
         {controller.initializing || controller.loadingConversation ? (
           <ConversationSkeleton />
-        ) : controller.messages.length || controller.streamingText || controller.streamingResponse ? (
+        ) : hasConversationHistory ? (
           <ol className="space-y-4" aria-label="Agent conversation messages">
             {controller.messages.map((message) => (
               <li key={message.public_id}>
@@ -317,10 +347,12 @@ export default function AgentExperience({
               </li>
             ) : null}
           </ol>
-        ) : (
+        ) : controller.reviewSession ? null : (
           <AgentWelcome
             disabled={controller.conversationBusy || controller.sending}
             onPrompt={(value) => void controller.sendMessage(value)}
+            reviewItemCount={!readOnly ? reviewItems.length : 0}
+            onStartReview={() => void beginReviewSession()}
           />
         )}
       </div>
@@ -467,6 +499,7 @@ function ReviewSessionCard({
   session,
   busy,
   errorMessage,
+  clarifyMessage,
   proposal,
   isActionPending,
   onPersonal,
@@ -481,6 +514,7 @@ function ReviewSessionCard({
   session: AgentReviewSessionOut;
   busy: boolean;
   errorMessage: string | null;
+  clarifyMessage: string | null;
   proposal: AgentActionConfirmationBlock | null;
   isActionPending: AgentController["isActionPending"];
   onPersonal: () => void;
@@ -581,13 +615,17 @@ function ReviewSessionCard({
         </div>
       ) : receipt ? (
         <div className="mt-3">
-          {onOpenInWebReview ? (
-            <p className="text-xs leading-5 text-slate-600">
-              Itemized receipt splits aren&rsquo;t supported inside the Agent yet — use Household Ops to
-              assign items, or skip for now.
-            </p>
-          ) : null}
+          <p className="text-xs leading-5 text-slate-600">
+            Itemized receipt splits aren&rsquo;t supported inside the Agent yet
+            {onOpenInWebReview ? " — use Household Ops to assign items, or skip for now." : " — skip for now."}
+          </p>
         </div>
+      ) : null}
+
+      {canActOnTransaction ? (
+        <p className="mt-3 text-xs leading-5 text-slate-500">
+          Or type who to split this with, like &ldquo;split with Priya&rdquo;.
+        </p>
       ) : null}
 
       <div className="mt-3 flex flex-wrap gap-2 border-t border-slate-100 pt-3">
@@ -598,6 +636,9 @@ function ReviewSessionCard({
           Stop review
         </Button>
       </div>
+      {clarifyMessage ? (
+        <p className="mt-2 text-sm text-indigo-700" role="status">{clarifyMessage}</p>
+      ) : null}
       {errorMessage ? <p className="mt-2 text-sm text-rose-700" role="alert">{errorMessage}</p> : null}
     </section>
   );
@@ -843,9 +884,13 @@ function StreamingAssistant({
 function AgentWelcome({
   onPrompt,
   disabled,
+  reviewItemCount,
+  onStartReview,
 }: {
   onPrompt: (prompt: string) => void;
   disabled: boolean;
+  reviewItemCount: number;
+  onStartReview: () => void;
 }) {
   const prompts = [
     "How much did I spend last month?",
@@ -864,6 +909,25 @@ function AgentWelcome({
         integrations without changing anything.
       </p>
       <div className="mt-5 grid w-full gap-2">
+        {reviewItemCount > 0 ? (
+          <>
+            <button
+              type="button"
+              className="flex min-h-12 items-center justify-between gap-3 rounded-card border border-slate-200 bg-white px-4 py-3 text-left text-sm font-semibold text-slate-800 shadow-sm hover:border-indigo-300 hover:bg-indigo-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-600"
+              onClick={onStartReview}
+              disabled={disabled}
+            >
+              <span className="flex items-center gap-2">
+                <CheckCircle2 className="size-4 shrink-0 text-indigo-600" aria-hidden="true" />
+                Review my {reviewItemCount} pending purchase{reviewItemCount === 1 ? "" : "s"}
+              </span>
+              <ChevronRight className="size-4 shrink-0 text-indigo-600" aria-hidden="true" />
+            </button>
+            <p className="mt-1 text-sm leading-6 text-slate-600">
+              Or ask something else
+            </p>
+          </>
+        ) : null}
         {prompts.map((prompt) => (
           <button
             key={prompt}

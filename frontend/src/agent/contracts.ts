@@ -548,6 +548,12 @@ export type AgentReviewSessionOut = {
   current: AgentReviewCandidateSummary | null;
 };
 
+export type AgentReviewSessionInterpretResult = {
+  status: "proposed" | "clarify";
+  confirmation: AgentActionConfirmationBlock | null;
+  message: string | null;
+};
+
 export type AgentErrorBlock = AgentResponseBlockBase & {
   type: "error";
   code: string;
