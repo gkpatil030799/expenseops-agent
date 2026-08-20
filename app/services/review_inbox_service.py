@@ -435,9 +435,9 @@ class ReviewInboxService:
             if tx is None:
                 return None
             try:
-                recommendation = AIInterpretationMemoryService(self.db).recommendation_for_transaction(
-                    tx
-                )
+                recommendation = AIInterpretationMemoryService(
+                    self.db
+                ).recommendation_for_transaction(tx)
             except ValueError:
                 recommendation = None
             if recommendation is None:

@@ -423,7 +423,9 @@ class AgentActionExecutor:
                 ExpenseTransaction.id == parameters.transaction_id,
             )
         )
-        existing = self._splitwise_operation(parameters.transaction_id, generation=current_generation)
+        existing = self._splitwise_operation(
+            parameters.transaction_id, generation=current_generation
+        )
         if existing is not None:
             if existing.correlation_id != proposal.public_id:
                 return self._fail_stale(
