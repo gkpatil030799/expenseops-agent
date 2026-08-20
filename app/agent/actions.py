@@ -417,7 +417,15 @@ class AgentActionExecutor:
             ) from exc
 
         workspace_id = self.db.info.get("workspace_id")
-        existing = self._splitwise_operation(parameters.transaction_id)
+        current_generation = self.db.scalar(
+            select(ExpenseTransaction.splitwise_generation).where(
+                ExpenseTransaction.workspace_id == workspace_id,
+                ExpenseTransaction.id == parameters.transaction_id,
+            )
+        )
+        existing = self._splitwise_operation(
+            parameters.transaction_id, generation=current_generation
+        )
         if existing is not None:
             if existing.correlation_id != proposal.public_id:
                 return self._fail_stale(
@@ -487,7 +495,9 @@ class AgentActionExecutor:
         if transaction.status != parameters.expected_status or _aware(
             transaction.updated_at
         ) != _aware(parameters.expected_updated_at):
-            existing = self._splitwise_operation(parameters.transaction_id)
+            existing = self._splitwise_operation(
+                parameters.transaction_id, generation=transaction.splitwise_generation
+            )
             if existing is not None:
                 if existing.correlation_id != proposal.public_id:
                     return self._fail_stale(
@@ -571,7 +581,9 @@ class AgentActionExecutor:
                 "The Splitwise expense can no longer be created safely",
             ) from exc
 
-        operation = self._splitwise_operation(transaction.id)
+        operation = self._splitwise_operation(
+            transaction.id, generation=transaction.splitwise_generation
+        )
         if operation is None:
             self.service.fail_action_proposal(
                 proposal.public_id,
@@ -621,15 +633,25 @@ class AgentActionExecutor:
         if not participant_ids.issubset(current_member_ids):
             raise TransactionError("A confirmed participant is no longer in the Splitwise group.")
 
-    def _splitwise_operation(self, transaction_id: int) -> FinancialOperation | None:
+    def _splitwise_operation(
+        self, transaction_id: int, *, generation: int | None
+    ) -> FinancialOperation | None:
+        # Scoped to the transaction's current split generation so a completed
+        # create from a prior (already-undone) generation is never mistaken
+        # for "this proposal already has an operation." Generation is bumped
+        # only on a completed undo/delete (see TransactionService), matching
+        # the domain journal's own claim scoping in _claim_financial_operation.
+        if generation is None:
+            return None
         return self.db.scalar(
             select(FinancialOperation)
             .where(
                 FinancialOperation.workspace_id == self.db.info.get("workspace_id"),
                 FinancialOperation.transaction_id == transaction_id,
                 FinancialOperation.action == "splitwise_create",
+                FinancialOperation.generation == generation,
             )
-            .order_by(FinancialOperation.generation.desc(), FinancialOperation.id.desc())
+            .order_by(FinancialOperation.id.desc())
         )
 
     def _personal_result_belongs_to_proposal(

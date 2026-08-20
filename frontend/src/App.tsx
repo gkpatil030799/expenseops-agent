@@ -1163,7 +1163,7 @@ function DashboardApp() {
         <div
           className={
             agentPanelOpen
-              ? "min-w-0 lg:grid lg:grid-cols-[minmax(0,1fr)_minmax(22rem,25rem)] lg:items-start lg:gap-5"
+              ? "min-w-0 lg:grid lg:grid-cols-[minmax(0,1fr)_minmax(22rem,25rem)] lg:gap-5"
               : "min-w-0"
           }
         >
@@ -1966,7 +1966,7 @@ function ActivityTimeline({
                       data-testid={`agent-context-activity-transaction-${event.id}`}
                     >
                       <Bot className="size-4" aria-hidden="true" />
-                      {focusedTransactionId === event.transaction_id ? "In Agent context" : "Ask Agent"}
+                      {focusedTransactionId === event.transaction_id ? "In Agent context" : "Ask about this"}
                     </button>
                   ) : null}
                 </span>
@@ -2729,7 +2729,7 @@ function TransactionCard({
               data-testid={`agent-context-transaction-${transaction.id}`}
             >
               <Bot className="size-4" aria-hidden="true" />
-              {agentFocused ? "In Agent context" : "Ask Agent"}
+              {agentFocused ? "In Agent context" : "Ask about this"}
             </Button>
             <Button
               variant="outline"

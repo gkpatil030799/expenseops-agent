@@ -234,3 +234,64 @@ The detailed architecture, failure traceability, metrics boundary, and limitatio
 `UNIFIED_REVIEW_INBOX.md`. Reopen this regression if a source event can create duplicate active
 tasks, the Agent needs a prompt to reveal current tasks, a stale Telegram callback mutates state,
 pending charges can post by default, or Gmail readiness again requires receipt-history discovery.
+
+## Agent transaction review left the Agent panel and could not complete a decision
+
+Status: resolved in Day 19 code; not deployed.
+
+Observed behavior:
+
+- clicking a transaction the Agent surfaced navigated the user away to the web Expense Review UI,
+  closing the Agent's own context;
+- the Agent had no way to walk a user through Personal/Split for more than one transaction without a
+  fresh prompt for each item;
+- `me`/`myself` could, in principle, remain in a split's participant list alongside the payer;
+- a model-supplied Splitwise participant name had no check that it was actually present in the
+  user's current message, unlike the equivalent itemized-receipt tool;
+- a transaction that was split and then undone could be permanently unable to be re-split through
+  the Agent, because the operation lookup used to detect "already handled" ignored the split's
+  generation and matched a stale, already-undone operation row.
+
+Root cause:
+
+- `TransactionListCard`'s only click behavior was `onNavigate`; no in-panel selection/session state
+  existed anywhere in `app/agent/`;
+- `propose_post_splitwise_expense` already stripped the payer from resolved participants, but had no
+  `_validate_itemized_user_provenance`-equivalent check against the user's literal message;
+- `AgentActionExecutor._splitwise_operation` filtered `FinancialOperation` rows by
+  `action == "splitwise_create"` only, taking the highest-generation row as a tie-break rather than
+  filtering by the transaction's current generation.
+
+Day 19 code behavior:
+
+- a new `AgentReviewSession` (one active session per workspace/owner/conversation) tracks an ordered,
+  frozen candidate queue and current position, resumable across refresh/reopen;
+- clicking a transaction in the Agent now starts/resumes that session and stays in the Agent panel —
+  no `onNavigate` call on that path;
+- Personal and recommended-Split are one deterministic click each, routed through the existing
+  action-proposal/confirmation pipeline with no OpenAI call;
+- a candidate resolved elsewhere (web or Telegram) while the session is open is detected via
+  fingerprint/state revalidation and skipped as stale, not acted on twice;
+- `_normalize_post_splitwise` now requires every named participant/group to be grounded in the
+  current message (or, for a click, in the click's own synthetic grounding text) before building a
+  proposal;
+- `_splitwise_operation`'s lookup is now scoped to the transaction's current `splitwise_generation`,
+  so a completed undo can never be mistaken for a live conflicting split.
+
+Permanent acceptance evidence on 2026-08-19:
+
+- `test_day19_split_then_undo_then_split_again_creates_new_generation` (split → undo → split again
+  succeeds and creates a distinct generation-1 operation) in `tests/test_agent_runtime.py`;
+- `test_day19_post_splitwise_rejects_participant_not_in_current_message` (a model-invented
+  participant matching a real friend is rejected with no proposal created);
+- `tests/test_agent_review_session.py` (9 tests): tiered candidate ordering, session resume,
+  empty-queue completion, Personal and Split proposal-to-advance flows, skip, stop, external
+  resolution marking a candidate stale, and cross-workspace session access denial;
+- full backend suite (1853 tests) and frontend build/lint/typecheck pass unchanged, confirming web
+  and Telegram behavior is untouched.
+
+Full design detail, Build-vs-Integrate decisions, and limitations (itemized-in-session assignment,
+arbitrary Customize, structured-memory learning hook) are in
+`AGENT_NATIVE_TRANSACTION_REVIEW.md`. Reopen this regression if a review-session click ever
+navigates away by default, a stale candidate is acted on after external resolution, an ungrounded
+participant reaches a proposal, or a post-undo re-split is blocked again.

@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import re
+from collections import Counter
 from dataclasses import dataclass
 from typing import Any
 
@@ -20,11 +22,17 @@ from app.models import (
     ReviewItemKind,
     ReviewItemSourceType,
     ReviewItemState,
+    SplitwiseIntegration,
     TransactionStatus,
     WorkspaceMembership,
     utc_now,
 )
+from app.services.agent_service import friend_display_name
 from app.services.ai_memory_service import AIInterpretationMemoryService
+from app.services.splitwise_service import SplitwiseAPIError, SplitwiseService
+from app.services.transaction_service import splitwise_payload_indexes
+
+_MIN_FREQUENT_PARTNER_OCCURRENCES = 2
 
 _ACTIONABLE_TRANSACTION_STATES = frozenset(
     {TransactionStatus.ASK_USER.value, TransactionStatus.SHARED_DRAFT.value}
@@ -66,6 +74,8 @@ class ReviewInboxService:
 
     def __init__(self, db: Session):
         self.db = db
+        self._frequent_partner_loaded = False
+        self._frequent_partner_cache: dict[str, Any] | None = None
 
     def _scope(self) -> tuple[int, int]:
         workspace_id = self.db.info.get("workspace_id")
@@ -256,6 +266,224 @@ class ReviewInboxService:
             limit=limit,
             offset=offset,
         )
+
+    # Kinds the Agent's review session knows how to act on today. receipt_match_needed
+    # and financial_reconciliation have no Agent tool yet, so they are left to the
+    # existing web recovery UI and excluded from Agent-native discovery.
+    _AGENT_CANDIDATE_KINDS = frozenset(
+        {ReviewItemKind.TRANSACTION_REVIEW.value, ReviewItemKind.ITEMIZED_SPLIT_READY.value}
+    )
+    _AGENT_CANDIDATE_ACTIONS = {
+        ReviewItemKind.TRANSACTION_REVIEW.value: [
+            "mark_personal",
+            "propose_split",
+            "customize",
+            "skip",
+        ],
+        ReviewItemKind.ITEMIZED_SPLIT_READY.value: ["start_itemized_split", "skip"],
+    }
+    _AGENT_CANDIDATE_FETCH_CAP = 500
+
+    def list_agent_candidates(self, *, limit: int = 25) -> list[dict[str, Any]]:
+        """Ordered, bounded candidates for the Agent's own review session.
+
+        Reuses the same neutral identity/state fields and staleness
+        reconciliation as list_open(), but never reads or writes seen_at /
+        action_codes_json (those are web-Review-page presentation state) and
+        applies its own deterministic tiered ordering instead of the web
+        inbox's newest-first order.
+        """
+        workspace_id, user_id = self._scope()
+        self._reconcile_open_items(workspace_id=workspace_id, user_id=user_id)
+        rows = list(
+            self.db.scalars(
+                select(ReviewItem)
+                .where(
+                    ReviewItem.workspace_id == workspace_id,
+                    ReviewItem.owner_user_id == user_id,
+                    ReviewItem.state == ReviewItemState.OPEN.value,
+                    ReviewItem.kind.in_(self._AGENT_CANDIDATE_KINDS),
+                )
+                .order_by(ReviewItem.created_at, ReviewItem.id)
+                .limit(self._AGENT_CANDIDATE_FETCH_CAP)
+            )
+        )
+        candidates: list[dict[str, Any]] = []
+        for item in rows:
+            candidate = self._agent_candidate(item)
+            if candidate is not None:
+                candidates.append(candidate)
+        candidates.sort(key=lambda entry: (entry["tier"], entry["_sort_key"]))
+        for candidate in candidates:
+            del candidate["_sort_key"]
+        return candidates[:limit]
+
+    def get_agent_candidate(self, review_item_public_id: str) -> dict[str, Any] | None:
+        """Revalidated, live current state for one Agent review candidate."""
+        workspace_id, user_id = self._scope()
+        self._reconcile_open_items(workspace_id=workspace_id, user_id=user_id)
+        item = self.db.scalar(
+            select(ReviewItem).where(
+                ReviewItem.workspace_id == workspace_id,
+                ReviewItem.owner_user_id == user_id,
+                ReviewItem.public_id == review_item_public_id,
+            )
+        )
+        if item is None:
+            return None
+        candidate = self._agent_candidate(item)
+        if candidate is None:
+            return None
+        candidate.pop("_sort_key", None)
+        candidate["state"] = item.state
+        return candidate
+
+    def _frequent_splitwise_partner(self) -> dict[str, Any] | None:
+        """Fall back to the co-participant most frequently seen across every posted
+        Splitwise expense in this workspace, regardless of which channel posted it
+        (web, Telegram, or Agent) — unlike the per-merchant AIInterpretationMemory
+        preference, this reads the shared domain ledger so it reflects the user's
+        real history, not just interpretation corrections.
+
+        Cached per service instance: this is the same answer for every candidate
+        in a listing that lacks a merchant-specific recommendation, so computing it
+        once avoids repeating the live Splitwise friends lookup per candidate.
+        """
+        if self._frequent_partner_loaded:
+            return self._frequent_partner_cache
+        self._frequent_partner_loaded = True
+        workspace_id, user_id = self._scope()
+        integration = self.db.scalar(
+            select(SplitwiseIntegration).where(
+                SplitwiseIntegration.workspace_id == workspace_id,
+                SplitwiseIntegration.user_id == user_id,
+                SplitwiseIntegration.enabled.is_(True),
+            )
+        )
+        if integration is None or not integration.splitwise_user_id:
+            return None
+        try:
+            payer_id = int(integration.splitwise_user_id)
+        except (TypeError, ValueError):
+            return None
+        counts: Counter[int] = Counter()
+        payloads = self.db.scalars(
+            select(ExpenseTransaction.splitwise_payload_json).where(
+                ExpenseTransaction.workspace_id == workspace_id,
+                ExpenseTransaction.status == TransactionStatus.POSTED.value,
+                ExpenseTransaction.splitwise_payload_json.is_not(None),
+            )
+        )
+        for raw in payloads:
+            try:
+                payload = json.loads(raw)
+            except (TypeError, ValueError):
+                continue
+            for index in splitwise_payload_indexes(payload):
+                try:
+                    participant_id = int(payload[f"users__{index}__user_id"])
+                except (KeyError, TypeError, ValueError):
+                    continue
+                if participant_id != payer_id:
+                    counts[participant_id] += 1
+        if not counts:
+            self._frequent_partner_cache = None
+            return None
+        top_id, occurrences = counts.most_common(1)[0]
+        if occurrences < _MIN_FREQUENT_PARTNER_OCCURRENCES:
+            self._frequent_partner_cache = None
+            return None
+        try:
+            friends = SplitwiseService().get_friends()
+        except SplitwiseAPIError:
+            self._frequent_partner_cache = None
+            return None
+        friend = next(
+            (candidate for candidate in friends if str(candidate.get("id")) == str(top_id)),
+            None,
+        )
+        if friend is None:
+            self._frequent_partner_cache = None
+            return None
+        name = friend_display_name(friend)
+        self._frequent_partner_cache = {
+            "reason": f"You often split with {name}.",
+            "participant_names": [name],
+            "group_name": None,
+        }
+        return self._frequent_partner_cache
+
+    def _agent_candidate(self, item: ReviewItem) -> dict[str, Any] | None:
+        base = {
+            "review_item_public_id": item.public_id,
+            "kind": item.kind,
+            "source_type": item.source_type,
+            "source_entity_id": item.source_entity_id,
+            "source_fingerprint": item.source_fingerprint,
+            "available_actions": list(self._AGENT_CANDIDATE_ACTIONS.get(item.kind, [])),
+            "created_at": item.created_at,
+        }
+        if item.source_type == ReviewItemSourceType.TRANSACTION.value:
+            tx = self.db.scalar(
+                select(ExpenseTransaction)
+                .options(selectinload(ExpenseTransaction.plaid_item))
+                .where(
+                    ExpenseTransaction.workspace_id == item.workspace_id,
+                    ExpenseTransaction.id == item.source_entity_id,
+                )
+            )
+            if tx is None:
+                return None
+            try:
+                recommendation = AIInterpretationMemoryService(
+                    self.db
+                ).recommendation_for_transaction(tx)
+            except ValueError:
+                recommendation = None
+            if recommendation is None:
+                recommendation = self._frequent_splitwise_partner()
+            base["tier"] = 3 if tx.pending else 1
+            base["_sort_key"] = (item.created_at, item.id)
+            base["transaction"] = {
+                "id": tx.id,
+                "merchant_name": tx.merchant_name,
+                "name": tx.name,
+                "amount_cents": tx.amount_cents,
+                "currency": tx.iso_currency_code,
+                "date": tx.date,
+                "pending": tx.pending,
+                "status": tx.status,
+                "institution_name": tx.plaid_item.institution_name if tx.plaid_item else None,
+            }
+            base["receipt"] = None
+            base["recommendation"] = recommendation
+            return base
+        if item.source_type == ReviewItemSourceType.RECEIPT.value:
+            receipt = self.db.scalar(
+                select(PurchaseReceipt)
+                .options(selectinload(PurchaseReceipt.items))
+                .where(
+                    PurchaseReceipt.workspace_id == item.workspace_id,
+                    PurchaseReceipt.id == item.source_entity_id,
+                )
+            )
+            if receipt is None:
+                return None
+            base["tier"] = 2
+            base["_sort_key"] = (item.created_at, item.id)
+            base["transaction"] = None
+            base["receipt"] = {
+                "id": receipt.id,
+                "merchant_name": receipt.merchant_normalized or receipt.merchant_raw,
+                "total_cents": receipt.total_cents,
+                "currency": receipt.currency,
+                "purchased_at": receipt.purchased_at,
+                "transaction_id": receipt.transaction_id,
+                "line_count": len(receipt.items),
+            }
+            base["recommendation"] = None
+            return base
+        return None
 
     def _reconcile_open_items(self, *, workspace_id: int, user_id: int) -> None:
         """Fail closed when the source changed without passing through a normal hook."""

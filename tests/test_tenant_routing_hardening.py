@@ -71,6 +71,7 @@ DAY16_TENANT_TABLES = {
     "classification_decisions",
 }
 DAY18_TENANT_TABLES = {"review_items"}
+DAY19_TENANT_TABLES = {"agent_review_sessions"}
 
 EXPECTED_ROUTING_SIGNATURES = {
     "public.expenseops_route_plaid_item(text)",
@@ -112,7 +113,16 @@ def test_tenant_routing_and_policy_hardening_are_linear_head():
         attention_revision = scripts.get_revision("20260817_0032")
         classification_revision = scripts.get_revision("20260817_0033")
         review_revision = scripts.get_revision("20260818_0034")
-        if review_revision is not None:
+        review_session_revision = scripts.get_revision("20260819_0035")
+        if review_session_revision is not None:
+            assert receipt_revision.down_revision == "20260815_0029"
+            assert memory_revision.down_revision == "20260817_0030"
+            assert attention_revision.down_revision == "20260817_0031"
+            assert classification_revision.down_revision == "20260817_0032"
+            assert review_revision.down_revision == "20260817_0033"
+            assert review_session_revision.down_revision == "20260818_0034"
+            assert scripts.get_current_head() == "20260819_0035"
+        elif review_revision is not None:
             assert receipt_revision.down_revision == "20260815_0029"
             assert memory_revision.down_revision == "20260817_0030"
             assert attention_revision.down_revision == "20260817_0031"
@@ -238,6 +248,7 @@ def test_policy_hardening_covers_exact_tenant_model_set_without_escape(monkeypat
         | DAY13_TENANT_TABLES
         | DAY16_TENANT_TABLES
         | DAY18_TENANT_TABLES
+        | DAY19_TENANT_TABLES
     )
     assert len(migration.TENANT_TABLES) == len(set(migration.TENANT_TABLES)) == 34
     protected_tables = {*migration.TENANT_TABLES, *migration.TENANT_CHILD_POLICIES}

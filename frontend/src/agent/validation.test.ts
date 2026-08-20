@@ -6,6 +6,8 @@ import {
   parseClassificationActivityOut,
   parseAgentConversationDetail,
   parseAgentFeedback,
+  parseAgentReviewSession,
+  parseAgentReviewSessionInterpretResult,
   parseAgentStreamEvent,
   parseAgentStructuredResponse,
 } from "./validation";
@@ -1336,6 +1338,173 @@ describe("Agent controlled-action validation", () => {
     ).toThrow(AgentProtocolError);
     expect(() =>
       parseAgentActionConfirmation({ ...block, action: "create_household_item_directly" }),
+    ).toThrow(AgentProtocolError);
+  });
+});
+
+describe("Day 19 review-session validation", () => {
+  const progress = {
+    status: "active",
+    reviewed: 1,
+    personal: 1,
+    split: 0,
+    skipped: 0,
+    stale: 0,
+    remaining: 6,
+    total_candidates: 7,
+  } as const;
+
+  const currentTransaction = {
+    review_item_public_id: "review-item-public-1",
+    kind: "transaction_review",
+    transaction: {
+      id: 26,
+      merchant: "Costco Wholesale",
+      amount_cents: 14218,
+      currency: "USD",
+      occurred_on: "2026-08-19",
+      pending: false,
+      institution_name: "ExpenseOps Demo Bank",
+    },
+    receipt: null,
+    recommended_participant_names: ["Manasi Purohit"],
+    recommended_group_name: null,
+    recommendation_label: "Recommended from your preference: split",
+    available_actions: ["mark_personal", "propose_split", "customize", "skip"],
+  } as const;
+
+  const session = {
+    public_id: "review-session-public-1",
+    conversation_public_id: "conversation-public-1",
+    progress,
+    current: currentTransaction,
+  } as const;
+
+  it("accepts a session with an active transaction candidate", () => {
+    expect(parseAgentReviewSession(session)).toBe(session);
+  });
+
+  it("accepts a session with a receipt candidate", () => {
+    const receiptSession = {
+      ...session,
+      current: {
+        ...currentTransaction,
+        kind: "itemized_split_ready",
+        transaction: null,
+        receipt: { id: 9, merchant: "Trader Joe's", total_cents: 4610, currency: "USD", line_count: 6 },
+        available_actions: ["start_itemized_split", "skip"],
+      },
+    } as const;
+    expect(parseAgentReviewSession(receiptSession)).toBe(receiptSession);
+  });
+
+  it("accepts a completed session with no current candidate", () => {
+    const completed = {
+      ...session,
+      progress: { ...progress, remaining: 0, total_candidates: 7, reviewed: 7 },
+      current: null,
+    } as const;
+    expect(parseAgentReviewSession(completed)).toBe(completed);
+  });
+
+  it("rejects an unknown top-level key", () => {
+    expect(() =>
+      parseAgentReviewSession({ ...session, owner_user_id: 1 }),
+    ).toThrow(AgentProtocolError);
+  });
+
+  it("rejects an invalid progress.status", () => {
+    expect(() =>
+      parseAgentReviewSession({ ...session, progress: { ...progress, status: "paused" } }),
+    ).toThrow(AgentProtocolError);
+  });
+
+  it("rejects a negative progress counter", () => {
+    expect(() =>
+      parseAgentReviewSession({ ...session, progress: { ...progress, remaining: -1 } }),
+    ).toThrow(AgentProtocolError);
+  });
+
+  it("rejects an unknown key inside current", () => {
+    expect(() =>
+      parseAgentReviewSession({
+        ...session,
+        current: { ...currentTransaction, extra_field: "not allowed" },
+      }),
+    ).toThrow(AgentProtocolError);
+  });
+
+  it("rejects a malformed transaction inside current", () => {
+    expect(() =>
+      parseAgentReviewSession({
+        ...session,
+        current: {
+          ...currentTransaction,
+          transaction: { ...currentTransaction.transaction, amount_cents: "14218" },
+        },
+      }),
+    ).toThrow(AgentProtocolError);
+  });
+});
+
+describe("Day 19 review-session typed-interpret validation", () => {
+  const confirmation = {
+    type: "action_confirmation",
+    block_id: null,
+    action: "post_splitwise_expense",
+    title: "Split with Priya",
+    summary: "This transaction will be split with Priya.",
+    details: [{ label: "Merchant", value: "Costco Wholesale" }],
+    confirm_label: "Split",
+    cancel_label: "Cancel",
+    proposal_id: "proposal-public-3",
+    proposal_version: 1,
+    status: "awaiting_confirmation",
+    expires_at: "2026-08-19T20:00:00Z",
+  } as const;
+
+  it("accepts a proposed result with a confirmation block", () => {
+    const result = { status: "proposed", confirmation, message: null } as const;
+    expect(parseAgentReviewSessionInterpretResult(result)).toBe(result);
+  });
+
+  it("accepts a clarify result with a message and no confirmation", () => {
+    const result = {
+      status: "clarify",
+      confirmation: null,
+      message: "I couldn't find Nobody in your Splitwise account.",
+    } as const;
+    expect(parseAgentReviewSessionInterpretResult(result)).toBe(result);
+  });
+
+  it("rejects an unknown status", () => {
+    expect(() =>
+      parseAgentReviewSessionInterpretResult({
+        status: "not-a-real-status",
+        confirmation: null,
+        message: null,
+      }),
+    ).toThrow(AgentProtocolError);
+  });
+
+  it("rejects an unknown top-level key", () => {
+    expect(() =>
+      parseAgentReviewSessionInterpretResult({
+        status: "clarify",
+        confirmation: null,
+        message: null,
+        extra_field: "not allowed",
+      }),
+    ).toThrow(AgentProtocolError);
+  });
+
+  it("rejects a malformed nested confirmation block", () => {
+    expect(() =>
+      parseAgentReviewSessionInterpretResult({
+        status: "proposed",
+        confirmation: { ...confirmation, proposal_version: "1" },
+        message: null,
+      }),
     ).toThrow(AgentProtocolError);
   });
 });

@@ -42,8 +42,12 @@
     @apply border-slate-200;
   }
 
+  html {
+    @apply overflow-x-hidden;
+  }
+
   body {
-    @apply min-w-0 overflow-x-hidden antialiased;
+    @apply min-w-0 antialiased;
     background-color: var(--ui-canvas);
     color: var(--ui-ink);
     font-family:

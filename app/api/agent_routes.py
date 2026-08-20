@@ -23,11 +23,22 @@ from app.agent.contracts import (
     AgentFeedbackRequest,
     AgentMessageCreate,
     AgentMessageOut,
+    AgentReviewCandidateSummary,
+    AgentReviewReceiptSummary,
+    AgentReviewSessionAdvanceRequest,
+    AgentReviewSessionInterpretRequest,
+    AgentReviewSessionInterpretResult,
+    AgentReviewSessionOut,
+    AgentReviewSessionProgress,
+    AgentReviewSessionProposeRequest,
+    AgentReviewSessionStartRequest,
+    AgentReviewTransactionSummary,
     AgentTurnCreate,
     AgentTurnOut,
     hydrate_persisted_agent_response,
 )
 from app.agent.read_tools import build_read_tool_registry
+from app.agent.review_session import ReviewSessionService
 from app.agent.runtime import AgentRuntimeError, ReadOnlyAgentOrchestrator
 from app.agent.service import (
     AgentConflictError,
@@ -37,10 +48,11 @@ from app.agent.service import (
     AgentNotFoundError,
     UnifiedAgentService,
 )
+from app.agent.tooling import AgentActionClarificationRequired
 from app.api.deps import CurrentUser, CurrentWorkspace, DbSession
 from app.config import get_settings
 from app.logging_config import log_event
-from app.models import AgentConversation, AgentMessage
+from app.models import AgentConversation, AgentMessage, AgentReviewSession
 from app.rate_limit import rate_limiter
 
 router = APIRouter(prefix="/api/agent", tags=["agent"])
@@ -367,6 +379,184 @@ async def stream_read_only_turn(
     )
 
 
+@router.post(
+    "/review-session/start",
+    response_model=AgentReviewSessionOut,
+    status_code=status.HTTP_201_CREATED,
+)
+def start_review_session(
+    payload: AgentReviewSessionStartRequest,
+    db: DbSession,
+    user: CurrentUser,
+    workspace: CurrentWorkspace,
+) -> AgentReviewSessionOut:
+    """Start (or resume) the Agent's own one-by-one review queue."""
+
+    _check_agent_rate_limit(
+        f"agent-review:{workspace.id}:{user.id}",
+        limit=30,
+        window_seconds=60,
+        operation="review_session_start",
+    )
+    service = ReviewSessionService(db, get_settings())
+    try:
+        session = service.start_or_resume(payload.conversation_public_id, owner_user_id=user.id)
+        session, live = service.current_candidate(session)
+    except AgentFoundationError as exc:
+        _raise_agent_error(exc)
+    return _review_session_out(session, live)
+
+
+@router.get("/review-session/{session_public_id}", response_model=AgentReviewSessionOut)
+def get_review_session(
+    session_public_id: str,
+    db: DbSession,
+    user: CurrentUser,
+    _workspace: CurrentWorkspace,
+) -> AgentReviewSessionOut:
+    service = ReviewSessionService(db, get_settings())
+    try:
+        session = service.get_session(session_public_id, owner_user_id=user.id)
+        session, live = service.current_candidate(session)
+    except AgentFoundationError as exc:
+        _raise_agent_error(exc)
+    return _review_session_out(session, live)
+
+
+@router.post(
+    "/review-session/{session_public_id}/propose",
+    response_model=AgentActionConfirmationBlock,
+)
+def propose_review_session_action(
+    session_public_id: str,
+    payload: AgentReviewSessionProposeRequest,
+    db: DbSession,
+    user: CurrentUser,
+    workspace: CurrentWorkspace,
+) -> AgentActionConfirmationBlock:
+    """Create a frozen proposal for the current candidate without an OpenAI call."""
+
+    _check_agent_rate_limit(
+        f"agent-review:{workspace.id}:{user.id}",
+        limit=30,
+        window_seconds=60,
+        operation="review_session_propose",
+    )
+    service = ReviewSessionService(db, get_settings())
+    registry = build_read_tool_registry(get_settings())
+    register_action_tools(registry)
+    try:
+        session = service.get_session(session_public_id, owner_user_id=user.id)
+        proposal = service.propose_action(
+            session,
+            registry=registry,
+            action=payload.action,
+            participant_names=payload.participant_names,
+            group_name=payload.group_name,
+        )
+    except AgentFoundationError as exc:
+        _raise_agent_error(exc)
+    except AgentActionClarificationRequired as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return action_confirmation_block(proposal)
+
+
+@router.post(
+    "/review-session/{session_public_id}/interpret",
+    response_model=AgentReviewSessionInterpretResult,
+)
+def interpret_review_session_message(
+    session_public_id: str,
+    payload: AgentReviewSessionInterpretRequest,
+    db: DbSession,
+    user: CurrentUser,
+    workspace: CurrentWorkspace,
+) -> AgentReviewSessionInterpretResult:
+    """Resolve a free-typed chat message against the current candidate.
+
+    Same intent-extraction + entity-resolution pipeline as Telegram's AI
+    chat mode, reusing the existing propose_post_splitwise_expense tool for
+    resolution rather than duplicating it.
+    """
+
+    _check_agent_rate_limit(
+        f"agent-review:{workspace.id}:{user.id}",
+        limit=30,
+        window_seconds=60,
+        operation="review_session_interpret",
+    )
+    service = ReviewSessionService(db, get_settings())
+    registry = build_read_tool_registry(get_settings())
+    register_action_tools(registry)
+    try:
+        session = service.get_session(session_public_id, owner_user_id=user.id)
+        result = service.interpret_typed_message(session, registry=registry, text=payload.text)
+    except AgentFoundationError as exc:
+        _raise_agent_error(exc)
+    except AgentActionClarificationRequired as exc:
+        return AgentReviewSessionInterpretResult(status="clarify", message=str(exc))
+    if result.status == "proposed" and result.proposal is not None:
+        return AgentReviewSessionInterpretResult(
+            status="proposed", confirmation=action_confirmation_block(result.proposal)
+        )
+    return AgentReviewSessionInterpretResult(status="clarify", message=result.message)
+
+
+@router.post("/review-session/{session_public_id}/advance", response_model=AgentReviewSessionOut)
+def advance_review_session(
+    session_public_id: str,
+    payload: AgentReviewSessionAdvanceRequest,
+    db: DbSession,
+    user: CurrentUser,
+    _workspace: CurrentWorkspace,
+) -> AgentReviewSessionOut:
+    """Record the outcome of a completed proposal and move to the next candidate."""
+
+    service = ReviewSessionService(db, get_settings())
+    try:
+        session = service.get_session(session_public_id, owner_user_id=user.id)
+        session = service.advance_after_proposal(
+            session, proposal_public_id=payload.proposal_public_id
+        )
+        session, live = service.current_candidate(session)
+    except AgentFoundationError as exc:
+        _raise_agent_error(exc)
+    return _review_session_out(session, live)
+
+
+@router.post("/review-session/{session_public_id}/skip", response_model=AgentReviewSessionOut)
+def skip_review_session_candidate(
+    session_public_id: str,
+    db: DbSession,
+    user: CurrentUser,
+    _workspace: CurrentWorkspace,
+) -> AgentReviewSessionOut:
+    service = ReviewSessionService(db, get_settings())
+    try:
+        session = service.get_session(session_public_id, owner_user_id=user.id)
+        session = service.skip_current(session)
+        session, live = service.current_candidate(session)
+    except AgentFoundationError as exc:
+        _raise_agent_error(exc)
+    return _review_session_out(session, live)
+
+
+@router.post("/review-session/{session_public_id}/stop", response_model=AgentReviewSessionOut)
+def stop_review_session(
+    session_public_id: str,
+    db: DbSession,
+    user: CurrentUser,
+    _workspace: CurrentWorkspace,
+) -> AgentReviewSessionOut:
+    service = ReviewSessionService(db, get_settings())
+    try:
+        session = service.get_session(session_public_id, owner_user_id=user.id)
+        session = service.stop(session)
+    except AgentFoundationError as exc:
+        _raise_agent_error(exc)
+    return _review_session_out(session, None)
+
+
 @router.delete(
     "/conversations/{conversation_public_id}",
     status_code=status.HTTP_204_NO_CONTENT,
@@ -421,6 +611,52 @@ def _message_out(
         feedback_eligible=feedback_state.eligible if feedback_state else False,
         feedback=feedback_state.feedback if feedback_state else None,
         created_at=value.created_at,
+    )
+
+
+def _review_session_out(
+    session: AgentReviewSession, live: dict | None
+) -> AgentReviewSessionOut:
+    current = None
+    if live is not None:
+        transaction = None
+        if live.get("transaction") is not None:
+            data = live["transaction"]
+            transaction = AgentReviewTransactionSummary(
+                id=data["id"],
+                merchant=data["merchant_name"] or data["name"] or "Purchase",
+                amount_cents=data["amount_cents"],
+                currency=data["currency"],
+                occurred_on=data["date"],
+                pending=bool(data["pending"]),
+                institution_name=data["institution_name"],
+            )
+        receipt = None
+        if live.get("receipt") is not None:
+            data = live["receipt"]
+            receipt = AgentReviewReceiptSummary(
+                id=data["id"],
+                merchant=data["merchant_name"] or "Receipt",
+                total_cents=data["total_cents"],
+                currency=data["currency"],
+                line_count=data["line_count"],
+            )
+        recommendation = live.get("recommendation") or {}
+        current = AgentReviewCandidateSummary(
+            review_item_public_id=live["review_item_public_id"],
+            kind=live["kind"],
+            transaction=transaction,
+            receipt=receipt,
+            recommended_participant_names=recommendation.get("participant_names") or [],
+            recommended_group_name=recommendation.get("group_name"),
+            recommendation_label=recommendation.get("reason"),
+            available_actions=live.get("available_actions") or [],
+        )
+    return AgentReviewSessionOut(
+        public_id=session.public_id,
+        conversation_public_id=session.conversation.public_id,
+        progress=AgentReviewSessionProgress(**ReviewSessionService.summary(session)),
+        current=current,
     )
 
 

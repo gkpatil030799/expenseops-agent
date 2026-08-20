@@ -1101,3 +1101,74 @@ class AgentConversationDetail(StrictAgentModel):
     messages_total: int = Field(ge=0)
     messages_offset: int = Field(ge=0)
     messages_has_more: bool
+
+
+class AgentReviewTransactionSummary(StrictAgentModel):
+    id: int = Field(ge=1)
+    merchant: str = Field(min_length=1, max_length=255)
+    amount_cents: int
+    currency: str | None = Field(default=None, max_length=8)
+    occurred_on: date | None = None
+    pending: bool = False
+    institution_name: str | None = Field(default=None, max_length=255)
+
+
+class AgentReviewReceiptSummary(StrictAgentModel):
+    id: int = Field(ge=1)
+    merchant: str = Field(min_length=1, max_length=255)
+    total_cents: int | None = None
+    currency: str | None = Field(default=None, max_length=8)
+    line_count: int = Field(ge=0)
+
+
+class AgentReviewCandidateSummary(StrictAgentModel):
+    review_item_public_id: str = Field(min_length=1, max_length=64)
+    kind: str = Field(min_length=1, max_length=40)
+    transaction: AgentReviewTransactionSummary | None = None
+    receipt: AgentReviewReceiptSummary | None = None
+    recommended_participant_names: list[str] = Field(default_factory=list, max_length=8)
+    recommended_group_name: str | None = Field(default=None, max_length=255)
+    recommendation_label: str | None = Field(default=None, max_length=255)
+    available_actions: list[str] = Field(default_factory=list, max_length=8)
+
+
+class AgentReviewSessionProgress(StrictAgentModel):
+    status: str = Field(min_length=1, max_length=32)
+    reviewed: int = Field(ge=0)
+    personal: int = Field(ge=0)
+    split: int = Field(ge=0)
+    skipped: int = Field(ge=0)
+    stale: int = Field(ge=0)
+    remaining: int = Field(ge=0)
+    total_candidates: int = Field(ge=0)
+
+
+class AgentReviewSessionOut(StrictAgentModel):
+    public_id: str = Field(min_length=1, max_length=64)
+    conversation_public_id: str = Field(min_length=1, max_length=64)
+    progress: AgentReviewSessionProgress
+    current: AgentReviewCandidateSummary | None = None
+
+
+class AgentReviewSessionStartRequest(StrictAgentModel):
+    conversation_public_id: str = Field(min_length=1, max_length=64)
+
+
+class AgentReviewSessionProposeRequest(StrictAgentModel):
+    action: Literal["mark_personal", "post_splitwise_expense"]
+    participant_names: list[str] = Field(default_factory=list, max_length=8)
+    group_name: str | None = Field(default=None, min_length=1, max_length=255)
+
+
+class AgentReviewSessionAdvanceRequest(StrictAgentModel):
+    proposal_public_id: str = Field(min_length=1, max_length=64)
+
+
+class AgentReviewSessionInterpretRequest(StrictAgentModel):
+    text: str = Field(min_length=1, max_length=2000)
+
+
+class AgentReviewSessionInterpretResult(StrictAgentModel):
+    status: Literal["proposed", "clarify"]
+    confirmation: AgentActionConfirmationBlock | None = None
+    message: str | None = Field(default=None, max_length=2000)

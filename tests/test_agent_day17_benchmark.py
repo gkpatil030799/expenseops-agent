@@ -128,16 +128,16 @@ def test_day17_benchmark_reports_tool_surface_and_local_latency_without_fake_dat
     assert before["input_tokens"] is None
     assert before["output_tokens"] is None
     assert surface["registered_read_tools"] == 9
-    assert surface["registered_schema_bytes"] == 15_022
-    assert surface["registered_schema_estimated_tokens"] == 3_756
+    assert surface["registered_schema_bytes"] == 15_268
+    assert surface["registered_schema_estimated_tokens"] == 3_817
     assert surface["registered_total_tools"] == 13
-    assert surface["total_tool_schema_bytes"] == 20_199
-    assert surface["total_tool_schema_estimated_tokens"] == 5_050
-    assert surface["registered_schema_growth_vs_day16_bytes"] == 2_972
-    assert surface["total_schema_growth_vs_day16_bytes"] == 2_972
+    assert surface["total_tool_schema_bytes"] == 20_445
+    assert surface["total_tool_schema_estimated_tokens"] == 5_112
+    assert surface["registered_schema_growth_vs_day16_bytes"] == 3_218
+    assert surface["total_schema_growth_vs_day16_bytes"] == 3_218
     assert surface["mean_exposed_schema_bytes"] == 2_292.5
     assert surface["mean_exposed_schema_estimated_tokens"] == 574
-    assert surface["mean_exposed_schema_reduction_vs_full_percent"] == 84.7
+    assert surface["mean_exposed_schema_reduction_vs_full_percent"] == 85.0
     assert performance["network_or_provider_included"] is False
     assert performance["database_query_included"] is False
     assert performance["query_objective_and_routing"]["median_ms"] >= 0
@@ -150,8 +150,8 @@ def test_day17_markdown_report_keeps_measurement_boundaries_visible() -> None:
 
     assert "Full exact acceptance: 13/13" in report
     assert "All routing cases: 26/26" in report
-    assert "Registered schema: 15022 bytes; mean exposed: 2292.5 bytes" in report
-    assert "Registered total schema: 20199 bytes" in report
+    assert "Registered schema: 15268 bytes; mean exposed: 2292.5 bytes" in report
+    assert "Registered total schema: 20445 bytes" in report
     assert "Query objective + routing:" in report
     assert "Date resolution:" in report
     assert "Canonical composition:" in report

@@ -501,6 +501,59 @@ export type AgentActionDecision = {
   proposal_version: number;
 };
 
+export type AgentReviewTransactionSummary = {
+  id: number;
+  merchant: string;
+  amount_cents: number;
+  currency: string | null;
+  occurred_on: string | null;
+  pending: boolean;
+  institution_name: string | null;
+};
+
+export type AgentReviewReceiptSummary = {
+  id: number;
+  merchant: string;
+  total_cents: number | null;
+  currency: string | null;
+  line_count: number;
+};
+
+export type AgentReviewCandidateSummary = {
+  review_item_public_id: string;
+  kind: string;
+  transaction: AgentReviewTransactionSummary | null;
+  receipt: AgentReviewReceiptSummary | null;
+  recommended_participant_names: string[];
+  recommended_group_name: string | null;
+  recommendation_label: string | null;
+  available_actions: string[];
+};
+
+export type AgentReviewSessionProgress = {
+  status: "active" | "completed" | "cancelled";
+  reviewed: number;
+  personal: number;
+  split: number;
+  skipped: number;
+  stale: number;
+  remaining: number;
+  total_candidates: number;
+};
+
+export type AgentReviewSessionOut = {
+  public_id: string;
+  conversation_public_id: string;
+  progress: AgentReviewSessionProgress;
+  current: AgentReviewCandidateSummary | null;
+};
+
+export type AgentReviewSessionInterpretResult = {
+  status: "proposed" | "clarify";
+  confirmation: AgentActionConfirmationBlock | null;
+  message: string | null;
+};
+
 export type AgentErrorBlock = AgentResponseBlockBase & {
   type: "error";
   code: string;

@@ -444,6 +444,50 @@ class AIInterpretationMemoryService:
         self.db.refresh(memory)
         return memory
 
+    def record_agent_typed_split_memory(
+        self,
+        *,
+        tx: ExpenseTransaction,
+        final_action: str,
+        final_group_id: int | None = None,
+        final_group_name: str | None = None,
+        final_participants: list[dict[str, Any]] | None = None,
+        final_split_mode: str | None = None,
+        payer_included: bool = True,
+    ) -> AIInterpretationMemory | None:
+        """Channel-agnostic counterpart to record_ai_interpretation_memory.
+
+        The Agent review session has no PendingTelegramSplit state, so this
+        writes the same structured-memory shape directly from an
+        already-resolved Agent action proposal instead of gating on Telegram
+        session fields.
+        """
+        if not self.learning_enabled():
+            return None
+        merchant = transaction_display_name(tx)
+        _, user_id = self._scope()
+        memory = AIInterpretationMemory(
+            original_message=_structured_label(merchant, final_action),
+            failure_reason="none",
+            final_action=final_action,
+            final_group_id=str(final_group_id) if final_group_id else None,
+            final_group_name=final_group_name,
+            final_participants=final_participants or [],
+            final_split_mode=final_split_mode,
+            payer_included=payer_included,
+            custom_values=None,
+            correction_type="agent_review_typed",
+            merchant=merchant,
+            amount_cents=abs(tx.amount_cents),
+            currency=tx.iso_currency_code or "USD",
+            usage_count=0,
+            owner_user_id=user_id,
+        )
+        self.db.add(memory)
+        self.db.commit()
+        self.db.refresh(memory)
+        return memory
+
     def record_ai_interpretation_memory(
         self,
         *,

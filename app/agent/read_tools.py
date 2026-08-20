@@ -494,7 +494,10 @@ def build_read_tool_registry(settings: Settings) -> AgentToolRegistry:
             description=(
                 "Return bounded authenticated ExpenseOps transaction rows when the latest user "
                 "message explicitly asks to list, find, show, or identify transaction/charge "
-                "rows, or use the closed attention scope for review and recovery states."
+                "rows. USE with review_type=unreviewed (or attention) for any request about "
+                "which transactions/purchases/charges need review, a decision, or attention. "
+                "DO NOT USE get_receipts for that wording; get_receipts is itemized receipt "
+                "documents only."
             ),
             effect=ToolEffect.READ,
             input_model=TransactionSearchInput,

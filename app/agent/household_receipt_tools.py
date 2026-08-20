@@ -255,11 +255,12 @@ def register_household_receipt_tools(registry: AgentToolRegistry) -> None:
             name="get_receipts",
             description=(
                 "Read bounded recent receipts, receipts needing review, the latest receipt "
-                "with categorized lines, or one safe receipt "
-                "detail from the authenticated ExpenseOps workspace. Recent and needs-review "
-                "list rows include bounded tenant-verified confirmed household-item links. "
-                "Use recent when one question combines review status with recent confirmed "
-                "acquisitions; pair with replenishment only for exact ID-linked questions."
+                "with categorized lines, or one safe receipt detail from the authenticated "
+                "ExpenseOps workspace. Recent and needs-review rows include bounded confirmed "
+                "household-item links. Use recent when combining review status with recent "
+                "acquisitions. DO NOT USE for transactions/purchases/charges needing review or "
+                "a decision; that is search_transactions with review_type=unreviewed. This "
+                "tool is itemized receipt documents only."
             ),
             effect=ToolEffect.READ,
             input_model=ReceiptsInput,

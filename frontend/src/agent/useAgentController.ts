@@ -6,12 +6,18 @@ import {
 } from "./validation";
 import {
   AgentStreamError,
+  advanceAgentReviewSession,
   archiveAgentConversation,
   cancelAgentAction,
   confirmAgentAction,
   createAgentConversation,
+  interpretAgentReviewMessage,
   listAgentConversations,
   loadAgentConversation,
+  proposeAgentReviewAction,
+  skipAgentReviewCandidate,
+  startAgentReviewSession,
+  stopAgentReviewSession,
   submitAgentFeedback,
   streamAgentTurn,
 } from "./api";
@@ -22,6 +28,8 @@ import type {
   AgentFeedbackOut,
   AgentMessage,
   AgentPageContext,
+  AgentReviewSessionInterpretResult,
+  AgentReviewSessionOut,
   AgentStreamEvent,
   AgentStructuredResponse,
 } from "./contracts";
@@ -65,6 +73,19 @@ export type AgentController = {
   isActionPending: (proposalId: string) => boolean;
   reload: () => Promise<void>;
   clearError: () => void;
+  reviewSession: AgentReviewSessionOut | null;
+  reviewSessionBusy: boolean;
+  reviewSessionError: AgentUiError | null;
+  startReviewSession: () => Promise<void>;
+  proposeReviewAction: (
+    action: "mark_personal" | "post_splitwise_expense",
+    options?: { participantNames?: string[]; groupName?: string | null },
+  ) => Promise<AgentActionConfirmationBlock | null>;
+  interpretReviewMessage: (text: string) => Promise<AgentReviewSessionInterpretResult | null>;
+  advanceReviewSession: (proposalPublicId: string) => Promise<void>;
+  skipReviewCandidate: () => Promise<void>;
+  stopReviewSession: () => Promise<void>;
+  clearReviewSession: () => void;
 };
 
 type RetryAttempt = {
@@ -488,6 +509,125 @@ export function useAgentController(pageContext: AgentPageContext | null): AgentC
     [decideAction],
   );
 
+  const [reviewSession, setReviewSession] = useState<AgentReviewSessionOut | null>(null);
+  const [reviewSessionBusy, setReviewSessionBusy] = useState(false);
+  const [reviewSessionError, setReviewSessionError] = useState<AgentUiError | null>(null);
+  const reviewSessionRef = useRef<AgentReviewSessionOut | null>(null);
+  const reviewSessionBusyRef = useRef(false);
+  reviewSessionRef.current = reviewSession;
+
+  const ensureConversation = useCallback(async (): Promise<AgentConversation> => {
+    if (activeRef.current) return activeRef.current;
+    const conversation = await createAgentConversation();
+    activeRef.current = conversation;
+    setActiveConversation(conversation);
+    setConversations((current) => [conversation, ...current]);
+    return conversation;
+  }, []);
+
+  const startReviewSession = useCallback(async () => {
+    if (reviewSessionBusyRef.current) return;
+    reviewSessionBusyRef.current = true;
+    setReviewSessionBusy(true);
+    setReviewSessionError(null);
+    try {
+      const conversation = await ensureConversation();
+      const session = await startAgentReviewSession(conversation.public_id);
+      setReviewSession(session);
+    } catch (cause) {
+      setReviewSessionError(uiError(cause, "ExpenseOps could not start the review session."));
+    } finally {
+      reviewSessionBusyRef.current = false;
+      setReviewSessionBusy(false);
+    }
+  }, [ensureConversation]);
+
+  const proposeReviewAction = useCallback(
+    async (
+      action: "mark_personal" | "post_splitwise_expense",
+      options?: { participantNames?: string[]; groupName?: string | null },
+    ) => {
+      if (reviewSessionBusyRef.current) return null;
+      const session = reviewSessionRef.current;
+      if (!session) return null;
+      reviewSessionBusyRef.current = true;
+      setReviewSessionBusy(true);
+      setReviewSessionError(null);
+      try {
+        return await proposeAgentReviewAction(session.public_id, { action, ...options });
+      } catch (cause) {
+        setReviewSessionError(uiError(cause, "ExpenseOps could not prepare that action."));
+        return null;
+      } finally {
+        reviewSessionBusyRef.current = false;
+        setReviewSessionBusy(false);
+      }
+    },
+    [],
+  );
+
+  const interpretReviewMessage = useCallback(async (text: string) => {
+    if (reviewSessionBusyRef.current) return null;
+    const session = reviewSessionRef.current;
+    if (!session) return null;
+    reviewSessionBusyRef.current = true;
+    setReviewSessionBusy(true);
+    setReviewSessionError(null);
+    try {
+      return await interpretAgentReviewMessage(session.public_id, text);
+    } catch (cause) {
+      setReviewSessionError(uiError(cause, "ExpenseOps could not read that message."));
+      return null;
+    } finally {
+      reviewSessionBusyRef.current = false;
+      setReviewSessionBusy(false);
+    }
+  }, []);
+
+  const advanceReviewSession = useCallback(async (proposalPublicId: string) => {
+    const session = reviewSessionRef.current;
+    if (!session) return;
+    setReviewSessionBusy(true);
+    try {
+      setReviewSession(await advanceAgentReviewSession(session.public_id, proposalPublicId));
+    } catch (cause) {
+      setReviewSessionError(uiError(cause, "ExpenseOps could not update the review session."));
+    } finally {
+      setReviewSessionBusy(false);
+    }
+  }, []);
+
+  const skipReviewCandidate = useCallback(async () => {
+    const session = reviewSessionRef.current;
+    if (!session) return;
+    setReviewSessionBusy(true);
+    try {
+      setReviewSession(await skipAgentReviewCandidate(session.public_id));
+    } catch (cause) {
+      setReviewSessionError(uiError(cause, "ExpenseOps could not skip this item."));
+    } finally {
+      setReviewSessionBusy(false);
+    }
+  }, []);
+
+  const stopReviewSession = useCallback(async () => {
+    const session = reviewSessionRef.current;
+    if (!session) return;
+    setReviewSessionBusy(true);
+    try {
+      setReviewSession(await stopAgentReviewSession(session.public_id));
+    } catch (cause) {
+      setReviewSessionError(uiError(cause, "ExpenseOps could not stop the review session."));
+    } finally {
+      setReviewSessionBusy(false);
+    }
+  }, []);
+
+  const clearReviewSession = useCallback(() => {
+    setReviewSession(null);
+    setReviewSessionError(null);
+  }, []);
+
   return {
     conversations,
     activeConversation,
@@ -513,6 +653,16 @@ export function useAgentController(pageContext: AgentPageContext | null): AgentC
     isActionPending: (proposalId: string) => pendingActionIds.has(proposalId),
     reload,
     clearError: () => setError(null),
+    reviewSession,
+    reviewSessionBusy,
+    reviewSessionError,
+    startReviewSession,
+    proposeReviewAction,
+    interpretReviewMessage,
+    advanceReviewSession,
+    skipReviewCandidate,
+    stopReviewSession,
+    clearReviewSession,
   };
 }
 

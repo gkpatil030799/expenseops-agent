@@ -146,8 +146,11 @@ test("unified review inbox shows recommendation, receipt readiness, badge, and A
   await expect(page.getByRole("button", { name: "Customize" })).toBeVisible();
 
   await page.getByRole("button", { name: "Agent", exact: true }).click();
-  await expect(page.getByRole("heading", { name: "2 review items" })).toBeVisible();
-  await expect(page.getByRole("button", { name: /Neighborhood Cafe/ }).first()).toBeVisible();
+  // This context-panel Agent embed is read-only, so it does not offer the
+  // write-capable review-session entry point -- just confirm it opened
+  // grounded in this page's context.
+  await expect(page.getByText("Using context: Expense Review")).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Ask ExpenseOps" })).toBeVisible();
 
   const violations = await new AxeBuilder({ page }).analyze();
   expect(violations.violations).toEqual([]);

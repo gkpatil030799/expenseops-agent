@@ -135,15 +135,15 @@ def test_day16_benchmark_reports_cost_safe_fields_and_exact_tool_growth() -> Non
     tools = result["tool_surface"]
     assert tools["registered_read_tools"] == 9
     assert tools["registered_total_tools"] == 13
-    assert tools["read_tool_schema_bytes"] == 15_022
-    assert tools["total_tool_schema_bytes"] == 20_199
+    assert tools["read_tool_schema_bytes"] == 15_268
+    assert tools["total_tool_schema_bytes"] == 20_445
     assert tools["day16_checkpoint_read_tool_schema_bytes"] == 12_050
     assert tools["day16_checkpoint_total_tools"] == 13
     assert tools["day16_checkpoint_total_tool_schema_bytes"] == 17_227
     assert tools["day16_total_tool_growth"] == 1
     assert tools["day16_total_schema_growth_bytes"] == 996
     assert tools["day16_approx_schema_growth_tokens"] == 249
-    assert tools["day17_read_schema_growth_bytes"] == 2_972
-    assert tools["day17_total_schema_growth_bytes"] == 2_972
-    assert tools["day17_approx_total_schema_growth_tokens"] == 743
+    assert tools["day17_read_schema_growth_bytes"] == 3_218
+    assert tools["day17_total_schema_growth_bytes"] == 3_218
+    assert tools["day17_approx_total_schema_growth_tokens"] == 804
     assert tools["classification_activity_tool_present"] is True

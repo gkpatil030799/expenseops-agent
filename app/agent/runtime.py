@@ -2997,6 +2997,11 @@ Rules:
 - For nullable semantic selectors such as review_type and spend_basis, pass null
   unless the latest user message explicitly requests a value. Do not manufacture a
   generic schema default that would replace the current page-context selection.
+- "Review"/"decision"/"attention" wording about transactions, purchases, or charges
+  means search_transactions with review_type=unreviewed (or review_type=attention for
+  the closed attention scope), never get_receipts. get_receipts only answers questions
+  about itemized receipt documents, a distinct concept from a transaction's
+  personal/split review status.
 - For natural references, map the validated current entity only as follows:
   transaction -> search_transactions.transaction_id; deal -> get_relevant_deals.deal_id;
   receipt -> get_receipts.receipt_id with view=detail; household item ->

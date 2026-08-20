@@ -966,6 +966,13 @@ def _normalize_post_splitwise(
     context: AgentToolContext,
     values: PostSplitwiseExpenseInput,
 ) -> dict:
+    user_text = context.latest_user_text or ""
+    if not user_text.strip():
+        raise AgentActionClarificationRequired(
+            "Describe who to split this with in the current message.",
+            code="splitwise_participant_required",
+        )
+    _validate_post_splitwise_user_provenance(values, user_text)
     tx = _resolve_transaction(context, values)
     integration = context.db.scalar(
         select(SplitwiseIntegration).where(
@@ -1214,6 +1221,34 @@ def _validate_itemized_user_provenance(
         raise AgentActionClarificationRequired(
             "Say explicitly if tax or tip should be split equally.",
             code="itemized_overhead_method_not_explicit",
+        )
+
+
+def _validate_post_splitwise_user_provenance(
+    values: PostSplitwiseExpenseInput,
+    user_text: str,
+) -> None:
+    # Mirrors _validate_itemized_user_provenance: a model-supplied participant
+    # or group name must be grounded in the exact current message (or, for
+    # deterministic click-originated proposals, in the synthetic text built
+    # from the user's own explicit selection) so the model can never post a
+    # split naming someone the user did not actually name or select.
+    for name in values.participant_names:
+        if _is_payer_mention(name):
+            if not re.search(r"\b(?:i|me|my|mine|myself)\b", user_text, re.IGNORECASE):
+                raise AgentActionClarificationRequired(
+                    "State your own participation explicitly.",
+                    code="splitwise_participant_not_explicit",
+                )
+        elif not _phrase_in_text(name, user_text):
+            raise AgentActionClarificationRequired(
+                "Use only participant names stated in the current message.",
+                code="splitwise_participant_not_explicit",
+            )
+    if values.group_name is not None and not _phrase_in_text(values.group_name, user_text):
+        raise AgentActionClarificationRequired(
+            "Use only a Splitwise group stated in the current message.",
+            code="splitwise_group_not_explicit",
         )
 
 
