@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from typing import Literal
 
 from sqlalchemy import and_, or_, select
 from sqlalchemy.orm import Session, selectinload
@@ -24,6 +25,7 @@ from app.models import (
 )
 from app.services.autonomous_classification_service import (
     AutonomousClassificationService,
+    ClassificationRunSummary,
 )
 from app.services.classification_model_service import (
     ClassificationBatchCandidate,
@@ -109,6 +111,51 @@ class ClassificationFinalizerService:
         self.workspace_id = int(workspace_id)
         self.autonomous = AutonomousClassificationService(db, self.settings)
         self.model_service = model_service or ClassificationModelService(self.settings)
+
+    def _run_recovery_branch(
+        self,
+        target: PurchaseReceiptItem | ExpenseTransaction,
+        *,
+        kind: Literal["retry", "deferred"],
+        commit: bool,
+    ) -> tuple[ClassificationRunSummary, bool]:
+        """Reclassify one due row inside a savepoint, then commit or roll back.
+
+        Shared by the retry and deferred-first-classification branches, which
+        differ only in what counts as "repaired" (retry additionally requires
+        receipt learning to be complete) and whether ``classification_retry_at``
+        needs clearing on success -- both are dispatched on ``kind`` so the
+        surrounding per-row loop no longer hand-copies the same
+        classify/check/commit-or-rollback scaffolding three times.
+        """
+
+        is_receipt_line = isinstance(target, PurchaseReceiptItem)
+        savepoint = self.db.begin_nested()
+        if is_receipt_line:
+            summary = self.autonomous.classify_receipt(
+                target.receipt,
+                only_line_ids=frozenset({target.id}),
+                commit=False,
+            )
+        else:
+            summary = self.autonomous.classify_transaction(target, commit=False)
+        if summary.failures or target.classification_applied_at is None:
+            repaired = False
+        elif kind == "retry" and is_receipt_line:
+            repaired = self.autonomous._receipt_learning_is_complete(target.receipt, target)
+        else:
+            repaired = True
+        if not repaired:
+            savepoint.rollback()
+            if commit:
+                self.db.rollback()
+            return summary, False
+        if kind == "retry":
+            target.classification_retry_at = None
+        savepoint.commit()
+        if commit:
+            self.db.commit()
+        return summary, True
 
     def run(
         self,
@@ -224,84 +271,38 @@ class ClassificationFinalizerService:
                 and _is_due(target.classification_retry_at, due_at)
             )
             if is_retry_target:
-                target_savepoint = self.db.begin_nested()
-                if isinstance(target, PurchaseReceiptItem):
-                    summary = self.autonomous.classify_receipt(
-                        target.receipt,
-                        only_line_ids=frozenset({target.id}),
-                        commit=False,
-                    )
-                    repaired = bool(
-                        summary.failures == 0
-                        and target.classification_applied_at is not None
-                        and self.autonomous._receipt_learning_is_complete(
-                            target.receipt,
-                            target,
-                        )
-                    )
-                else:
-                    summary = self.autonomous.classify_transaction(target, commit=False)
-                    repaired = bool(
-                        summary.failures == 0
-                        and target.classification_applied_at is not None
-                    )
+                summary, repaired = self._run_recovery_branch(
+                    target, kind="retry", commit=commit
+                )
                 failures += summary.failures
                 if not repaired:
-                    target_savepoint.rollback()
                     skipped += int(summary.failures == 0)
-                    if commit:
-                        self.db.rollback()
                     continue
-                target.classification_retry_at = None
-                target_savepoint.commit()
                 if isinstance(target, PurchaseReceiptItem):
                     receipt_recovered += 1
                 else:
                     transaction_recovered += 1
-                if commit:
-                    self.db.commit()
                 continue
             is_deferred_receipt_line = bool(
                 isinstance(target, PurchaseReceiptItem)
                 and target.classification_applied_at is None
             )
-            if is_deferred_receipt_line:
-                target_savepoint = self.db.begin_nested()
-                summary = self.autonomous.classify_receipt(
-                    target.receipt,
-                    only_line_ids=frozenset({target.id}),
-                    commit=False,
-                )
-                failures += summary.failures
-                if target.classification_applied_at is None or summary.failures:
-                    target_savepoint.rollback()
-                    skipped += int(summary.failures == 0)
-                    if commit:
-                        self.db.rollback()
-                    continue
-                target_savepoint.commit()
-                receipt_recovered += 1
-                if commit:
-                    self.db.commit()
-                continue
             is_deferred_transaction = bool(
                 isinstance(target, ExpenseTransaction)
                 and target.classification_applied_at is None
             )
-            if is_deferred_transaction:
-                target_savepoint = self.db.begin_nested()
-                summary = self.autonomous.classify_transaction(target, commit=False)
+            if is_deferred_receipt_line or is_deferred_transaction:
+                summary, repaired = self._run_recovery_branch(
+                    target, kind="deferred", commit=commit
+                )
                 failures += summary.failures
-                if target.classification_applied_at is None or summary.failures:
-                    target_savepoint.rollback()
+                if not repaired:
                     skipped += int(summary.failures == 0)
-                    if commit:
-                        self.db.rollback()
                     continue
-                target_savepoint.commit()
-                transaction_recovered += 1
-                if commit:
-                    self.db.commit()
+                if is_deferred_receipt_line:
+                    receipt_recovered += 1
+                else:
+                    transaction_recovered += 1
                 continue
             if (
                 target.classification_decision_state
@@ -593,7 +594,7 @@ class ClassificationFinalizerService:
                 .limit(limit)
             )
         )
-        refs = sorted(
+        candidate_refs = sorted(
             [
                 (value[1], ClassificationSourceType.RECEIPT_LINE, value[0])
                 for value in deferred_line_refs
@@ -616,7 +617,22 @@ class ClassificationFinalizerService:
                 for value in retry_transaction_refs
             ],
             key=lambda value: (_sort_timestamp(value[0]), value[1].value, value[2]),
-        )[:limit]
+        )
+        # A single row can be due for more than one reason at once (e.g. both
+        # its auto_finalize_at and a stale classification_retry_at are <=
+        # due_at), so it can appear in more than one of the six queries above.
+        # Keep only its earliest-sorted occurrence before truncating to limit,
+        # or a duplicate would consume two slots of the batch and could crowd
+        # out a genuinely different due row.
+        seen_refs: set[tuple[ClassificationSourceType, int]] = set()
+        refs: list[tuple[datetime, ClassificationSourceType, int]] = []
+        for value in candidate_refs:
+            key = (value[1], value[2])
+            if key in seen_refs:
+                continue
+            seen_refs.add(key)
+            refs.append(value)
+        refs = refs[:limit]
         line_ids = [value[2] for value in refs if value[1] is ClassificationSourceType.RECEIPT_LINE]
         transaction_ids = [
             value[2] for value in refs if value[1] is ClassificationSourceType.TRANSACTION
@@ -995,12 +1011,14 @@ def _skip_locked(db: Session, statement):
     return statement
 
 
+def _as_utc(value: datetime) -> datetime:
+    normalized = value if value.tzinfo is not None else value.replace(tzinfo=UTC)
+    return normalized.astimezone(UTC)
+
+
 def _is_due(value: datetime, now: datetime) -> bool:
-    normalized_value = value if value.tzinfo is not None else value.replace(tzinfo=UTC)
-    normalized_now = now if now.tzinfo is not None else now.replace(tzinfo=UTC)
-    return normalized_value.astimezone(UTC) <= normalized_now.astimezone(UTC)
+    return _as_utc(value) <= _as_utc(now)
 
 
 def _sort_timestamp(value: datetime) -> float:
-    normalized = value if value.tzinfo is not None else value.replace(tzinfo=UTC)
-    return normalized.astimezone(UTC).timestamp()
+    return _as_utc(value).timestamp()
