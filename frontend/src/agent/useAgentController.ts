@@ -98,12 +98,16 @@ type RetryAttempt = {
   reuseClientMessageId: boolean;
 };
 
-// The outbox worker polls every 2s and then makes a live provider call, so a
-// confirmed Splitwise post routinely settles several seconds after the request
-// returns. Budget well past that rather than abandoning a proposal mid-flight.
-const ACTION_STATUS_POLL_DELAYS_MS = [
-  400, 800, 1_200, 1_600, 2_000, 2_400, 2_800, 3_200, 3_600, 4_000, 4_000, 4_000,
-] as const;
+// Splitwise posts are handed to the durable outbox worker and can genuinely
+// take longer than any UI should block on -- the manual (non-Agent) split
+// flow does not wait for them at all; it reports "queued" immediately and
+// lets the post settle in the background. This short poll exists only to
+// catch the common fast case so a quick confirmation feels instant; it is
+// deliberately not sized to cover the slow tail. Ending on "confirmed" or
+// "executing" is an expected resting state, not a failure to reach one --
+// see reviewAdvanceDecision and the "queued" statusCopy for how each surface
+// presents that state honestly instead of appearing stuck.
+const ACTION_STATUS_POLL_DELAYS_MS = [300, 600, 900, 1_200] as const;
 
 function findActionBlock(
   messages: AgentMessage[],

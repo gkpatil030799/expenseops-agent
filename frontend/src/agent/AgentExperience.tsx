@@ -124,7 +124,7 @@ export default function AgentExperience({
     setReviewProposal(updated);
     if (decision === "pending") {
       setReviewClarifyMessage(
-        "That is still posting and will finish on its own. Skip to keep reviewing -- nothing is lost.",
+        "Queued securely -- ExpenseOps will confirm it with Splitwise in the background. Skip to keep reviewing.",
       );
     }
     return updated;

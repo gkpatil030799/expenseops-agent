@@ -176,8 +176,8 @@ export function ActionConfirmationCard({
   const awaiting = block.status === "awaiting_confirmation";
   const statusCopy: Record<AgentActionConfirmationBlock["status"], string> = {
     awaiting_confirmation: "Review the exact effect below. Nothing changes until you confirm.",
-    confirmed: "Confirmed. ExpenseOps is preparing the action.",
-    executing: "ExpenseOps is applying the confirmed action.",
+    confirmed: "Confirmed. This is queued securely -- ExpenseOps will finish it in the background.",
+    executing: "Queued securely. ExpenseOps will confirm it with Splitwise in the background -- no need to wait here.",
     completed: "Completed. The confirmed action was applied.",
     cancelled: "Cancelled. Nothing was changed.",
     expired: "This confirmation expired. Ask the Agent to prepare a new one.",
