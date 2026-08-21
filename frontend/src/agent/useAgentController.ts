@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
+import { isActionPending } from "./reviewSessionFlow";
 import {
   AGENT_RESPONSE_UNAVAILABLE_MESSAGE,
   AgentProtocolError,
@@ -96,7 +97,12 @@ type RetryAttempt = {
   reuseClientMessageId: boolean;
 };
 
-const ACTION_STATUS_POLL_DELAYS_MS = [400, 800, 1_200, 1_600] as const;
+// The outbox worker polls every 2s and then makes a live provider call, so a
+// confirmed Splitwise post routinely settles several seconds after the request
+// returns. Budget well past that rather than abandoning a proposal mid-flight.
+const ACTION_STATUS_POLL_DELAYS_MS = [
+  400, 800, 1_200, 1_600, 2_000, 2_400, 2_800, 3_200, 3_600, 4_000, 4_000, 4_000,
+] as const;
 
 function findActionBlock(
   messages: AgentMessage[],
@@ -481,13 +487,13 @@ export function useAgentController(pageContext: AgentPageContext | null): AgentC
           let detail = await loadAgentConversation(conversation.public_id);
           setMessages(detail.messages);
           latest = findActionBlock(detail.messages, block.proposal_id) || latest;
-          if (decision === "confirm" && latest.status === "executing") {
+          if (decision === "confirm" && isActionPending(latest.status)) {
             for (const delay of ACTION_STATUS_POLL_DELAYS_MS) {
               await waitFor(delay);
               detail = await loadAgentConversation(conversation.public_id);
               setMessages(detail.messages);
               latest = findActionBlock(detail.messages, block.proposal_id) || latest;
-              if (latest.status !== "executing" && latest.status !== "confirmed") break;
+              if (!isActionPending(latest.status)) break;
             }
           }
         }
