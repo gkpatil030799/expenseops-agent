@@ -88,9 +88,13 @@ def _posted_split(
     )
 
 
-def test_start_review_session_orders_non_pending_before_pending(
+def test_start_review_session_excludes_pending_transactions(
     agent_runtime_db: RuntimeFixture,
 ):
+    """A pending amount can still be revised, so the Agent never offers a
+    decision on one -- the same rule the Telegram notification path applies.
+    """
+
     with _scoped(agent_runtime_db) as db:
         tenant = agent_runtime_db.contexts["owner"]
         settings = _settings(writes=True)
@@ -113,11 +117,16 @@ def test_start_review_session_orders_non_pending_before_pending(
         session, live = service.current_candidate(session)
 
         assert session.status == "active"
-        assert len(session.candidates_json) == 2
-        # Non-pending ("unreviewed") must be tier 1, ordered before the pending one.
+        # Only the settled transaction is a candidate; the pending one is absent
+        # entirely rather than merely ranked lower.
+        assert len(session.candidates_json) == 1
         assert live is not None
         assert live["transaction"]["id"] == unreviewed_tx.id
         assert live["transaction"]["pending"] is False
+        assert all(
+            candidate["source_entity_id"] != pending_tx.id
+            for candidate in session.candidates_json
+        )
 
 
 def test_start_review_session_resumes_existing_active_session(
@@ -486,8 +495,12 @@ def test_frequent_partner_lookup_is_cached_and_fails_closed_on_splitwise_error(
     with _scoped(agent_runtime_db) as db:
         tenant = agent_runtime_db.contexts["owner"]
         unreviewed = db.get(ExpenseTransaction, agent_runtime_db.transaction_ids["unreviewed"])
-        pending = db.get(ExpenseTransaction, agent_runtime_db.transaction_ids["pending"])
-        pending.status = TransactionStatus.ASK_USER.value
+        # Settled, so it qualifies as a second candidate. This test is about
+        # caching the frequent-partner lookup across candidates; pending
+        # transactions are excluded from review entirely.
+        second = db.get(ExpenseTransaction, agent_runtime_db.transaction_ids["pending"])
+        second.status = TransactionStatus.ASK_USER.value
+        second.pending = False
         db.add_all(
             [
                 _posted_split(
@@ -510,7 +523,7 @@ def test_frequent_partner_lookup_is_cached_and_fails_closed_on_splitwise_error(
         )
         db.commit()
         _sync(db, unreviewed, owner_user_id=tenant.user_id)
-        _sync(db, pending, owner_user_id=tenant.user_id)
+        _sync(db, second, owner_user_id=tenant.user_id)
 
         inbox = ReviewInboxService(db)
         candidates = inbox.list_agent_candidates()

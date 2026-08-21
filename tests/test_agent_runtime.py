@@ -6016,6 +6016,9 @@ def test_day18_multiple_review_items_ask_which_purchase_without_model_or_proposa
         second = db.get(ExpenseTransaction, agent_runtime_db.transaction_ids["pending"])
         assert first is not None and second is not None
         second.status = TransactionStatus.ASK_USER.value
+        # Settled, so both transactions are genuinely reviewable and the target
+        # is ambiguous. Pending transactions never enter review at all.
+        second.pending = False
         ReviewInboxService(db).sync_transaction(first, owner_user_id=tenant.user_id)
         ReviewInboxService(db).sync_transaction(second, owner_user_id=tenant.user_id)
         db.commit()

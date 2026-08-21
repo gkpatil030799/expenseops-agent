@@ -51,6 +51,23 @@ _ITEMIZED_ACTIVITY_TYPES = frozenset(
 logger = logging.getLogger(__name__)
 
 
+def _transaction_is_reviewable(tx: ExpenseTransaction) -> bool:
+    """Single source of truth for "this transaction needs a decision".
+
+    Pending transactions are excluded on every surface. Plaid may still revise
+    the amount, so posting a split or marking it personal would commit a figure
+    that can change underneath the user. TransactionService.should_notify_for_review
+    already withholds the Telegram review notification for exactly this reason;
+    the web inbox and the Agent review session now match it rather than each
+    re-deriving actionability.
+    """
+    return (
+        not tx.pending
+        and tx.status in _ACTIONABLE_TRANSACTION_STATES
+        and tx.splitwise_expense_id is None
+    )
+
+
 class ReviewInboxError(ValueError):
     pass
 
@@ -118,7 +135,7 @@ class ReviewInboxService:
                 lock=True,
             )
         previous_state = item.state if item is not None else None
-        actionable = tx.status in _ACTIONABLE_TRANSACTION_STATES and tx.splitwise_expense_id is None
+        actionable = _transaction_is_reviewable(tx)
         now = utc_now()
         created = False
         if item is None and actionable:
@@ -511,11 +528,7 @@ class ReviewInboxService:
                         ExpenseTransaction.id == item.source_entity_id,
                     )
                 )
-                current = bool(
-                    tx
-                    and tx.status in _ACTIONABLE_TRANSACTION_STATES
-                    and tx.splitwise_expense_id is None
-                )
+                current = bool(tx and _transaction_is_reviewable(tx))
             elif item.source_type == ReviewItemSourceType.RECEIPT.value:
                 receipt = self.db.scalar(
                     select(PurchaseReceipt)
@@ -790,9 +803,8 @@ class ReviewInboxService:
         )
         if (
             tx is None
+            or not _transaction_is_reviewable(tx)
             or tx.amount_cents <= 0
-            or tx.status not in _ACTIONABLE_TRANSACTION_STATES
-            or tx.splitwise_expense_id is not None
             or abs(tx.amount_cents) != total
             or (tx.iso_currency_code or "USD").upper() != (receipt.currency or "USD").upper()
         ):

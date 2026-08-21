@@ -119,13 +119,16 @@ def test_one_transaction_identity_is_seen_and_resolved_from_domain_state(db) -> 
     assert persisted.state == ReviewItemState.RESOLVED.value
 
 
-def test_pending_replacement_migrates_public_identity_without_duplicate(db) -> None:
+def test_pending_replacement_yields_exactly_one_item_once_settled(db) -> None:
+    """A pending transaction contributes no review item at all, so its settled
+    replacement is the only row the user ever sees. The anti-duplicate
+    guarantee now holds by construction rather than by identity migration.
+    """
+
     session, owner, workspace, *_ = db
     pending = _transaction(session, workspace, owner, "pending")
     pending.pending = True
-    original = ReviewInboxService(session).sync_transaction(pending)
-    assert original is not None
-    public_id = original.public_id
+    assert ReviewInboxService(session).sync_transaction(pending) is None
 
     posted = _transaction(session, workspace, owner, "posted")
     posted.replaces_transaction_id = pending.id
@@ -137,8 +140,34 @@ def test_pending_replacement_migrates_public_identity_without_duplicate(db) -> N
     )
     session.commit()
 
-    assert migrated is not None and migrated.public_id == public_id
+    assert migrated is not None
     assert migrated.source_entity_id == posted.id
+    assert ReviewInboxService(session).list_open().total_open == 1
+
+
+def test_settled_replacement_migrates_public_identity_without_duplicate(db) -> None:
+    """When the replaced transaction did own an item -- a correction between two
+    settled rows -- the public identity migrates instead of opening a second one.
+    """
+
+    session, owner, workspace, *_ = db
+    original_tx = _transaction(session, workspace, owner, "original")
+    original = ReviewInboxService(session).sync_transaction(original_tx)
+    assert original is not None
+    public_id = original.public_id
+
+    corrected = _transaction(session, workspace, owner, "corrected")
+    corrected.replaces_transaction_id = original_tx.id
+    original_tx.replaced_by_transaction_id = corrected.id
+    original_tx.status = "removed"
+    migrated = ReviewInboxService(session).sync_transaction(
+        corrected,
+        replacement_for_transaction_id=original_tx.id,
+    )
+    session.commit()
+
+    assert migrated is not None and migrated.public_id == public_id
+    assert migrated.source_entity_id == corrected.id
     assert session.scalar(select(ReviewItem).where(ReviewItem.public_id == public_id)) is migrated
     assert ReviewInboxService(session).list_open().total_open == 1
 
@@ -448,3 +477,50 @@ def test_closed_split_phrases_select_only_the_proposal_tool(text: str) -> None:
 def test_closed_personal_phrases_select_only_the_proposal_tool(text: str) -> None:
     assert _supported_action_tool(text) == MARK_PERSONAL_TOOL_NAME
     assert _action_uses_implicit_review_target(text)
+
+
+def test_pending_transactions_never_enter_review_and_return_once_settled(db) -> None:
+    """Pending amounts can still be revised by Plaid, so no surface offers a
+    decision on them -- matching the Telegram notification path, which has
+    always skipped them with reason "transaction_pending".
+    """
+
+    session, owner, workspace, *_ = db
+    tx = _transaction(session, workspace, owner, "pending-review")
+    tx.pending = True
+    session.flush()
+
+    assert ReviewInboxService(session).sync_transaction(tx) is None
+    session.commit()
+
+    # Neither the web inbox nor the Agent review session sees it.
+    assert ReviewInboxService(session).list_open().total_open == 0
+    assert ReviewInboxService(session).list_agent_candidates() == []
+
+    # Settling the transaction restores it to both surfaces.
+    tx.pending = False
+    session.flush()
+    item = ReviewInboxService(session).sync_transaction(tx)
+    session.commit()
+    assert item is not None
+    assert ReviewInboxService(session).list_open().total_open == 1
+    assert len(ReviewInboxService(session).list_agent_candidates()) == 1
+
+
+def test_open_item_is_retired_when_its_transaction_reverts_to_pending(db) -> None:
+    """An item already in the queue is reconciled out if the source goes back to
+    pending, so a stale row cannot keep offering an unsafe decision.
+    """
+
+    session, owner, workspace, *_ = db
+    tx = _transaction(session, workspace, owner, "reverts-pending")
+    item = ReviewInboxService(session).sync_transaction(tx)
+    session.commit()
+    assert item is not None
+    assert ReviewInboxService(session).list_open().total_open == 1
+
+    tx.pending = True
+    session.commit()
+
+    assert ReviewInboxService(session).list_open().total_open == 0
+    assert ReviewInboxService(session).list_agent_candidates() == []
