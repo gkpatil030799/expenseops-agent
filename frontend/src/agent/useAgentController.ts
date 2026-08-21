@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
+import { ApiError } from "@/lib/api";
 import { isActionPending } from "./reviewSessionFlow";
 import {
   AGENT_RESPONSE_UNAVAILABLE_MESSAGE,
@@ -732,6 +733,17 @@ function uiError(cause: unknown, fallback: string): AgentUiError {
       code: "invalid_agent_response",
       message: AGENT_RESPONSE_UNAVAILABLE_MESSAGE,
       retryable: true,
+    };
+  }
+  if (cause instanceof ApiError && typeof cause.detail === "string" && cause.detail.trim()) {
+    // Action tools reject with a specific, user-facing reason (an unresolved
+    // friend, an ambiguous group, a changed target). Replacing it with the
+    // caller's generic fallback tells the user only that something failed.
+    return {
+      code: "agent_request_failed",
+      message: cause.detail,
+      retryable: cause.retryable,
+      correlationId: cause.correlationId,
     };
   }
   return { code: "agent_request_failed", message: fallback, retryable: true };
