@@ -32,6 +32,7 @@ import {
   type AgentNavigationRequest,
 } from "./AgentResponseRenderer";
 import { formatDate, formatMinor } from "./format";
+import { reviewAdvanceDecision } from "./reviewSessionFlow";
 import type {
   AgentActionConfirmationBlock,
   AgentFeedbackCreate,
@@ -113,11 +114,18 @@ export default function AgentExperience({
 
   async function confirmReviewProposal(block: AgentActionConfirmationBlock) {
     const updated = await controller.confirmAction(block);
-    if (updated.status === "completed") {
+    const decision = reviewAdvanceDecision(updated.status);
+    if (decision === "advance") {
       setReviewProposal(null);
+      setReviewClarifyMessage(null);
       await controller.advanceReviewSession(updated.proposal_id);
-    } else {
-      setReviewProposal(updated);
+      return updated;
+    }
+    setReviewProposal(updated);
+    if (decision === "pending") {
+      setReviewClarifyMessage(
+        "That is still posting and will finish on its own. Skip to keep reviewing -- nothing is lost.",
+      );
     }
     return updated;
   }
