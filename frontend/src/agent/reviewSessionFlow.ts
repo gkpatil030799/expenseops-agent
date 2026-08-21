@@ -9,15 +9,25 @@ export function isActionPending(status: AgentProposalState): boolean {
   return status === "confirmed" || status === "executing";
 }
 
-export type ReviewAdvanceDecision = "advance" | "pending" | "hold";
+export type ReviewAdvanceDecision = "advance" | "hold";
 
 /**
- * The review queue may only advance once the server marks the proposal
- * completed -- advance_after_proposal ignores any other status -- so a proposal
- * still owned by the executor is reported separately from a terminal failure.
+ * The user's decision is made at confirmation time; execution continuing in
+ * the background (confirmed/executing) is not a reason to hold the queue --
+ * advance_after_proposal on the server accepts the same states. A provider
+ * failure does not silently reopen the transaction as an actionable review
+ * candidate, so advancing early here cannot mask one; it surfaces separately
+ * through the recovery flow instead.
  */
 export function reviewAdvanceDecision(status: AgentProposalState): ReviewAdvanceDecision {
-  if (status === "completed") return "advance";
-  if (isActionPending(status)) return "pending";
-  return "hold";
+  if (status === "awaiting_confirmation") return "hold";
+  if (
+    status === "cancelled" ||
+    status === "expired" ||
+    status === "failed" ||
+    status === "ambiguous"
+  ) {
+    return "hold";
+  }
+  return "advance";
 }

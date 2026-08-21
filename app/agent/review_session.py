@@ -327,6 +327,18 @@ class ReviewSessionService:
         )
         return TypedInterpretationResult(status="clarify", message=message)
 
+    # Splitwise posts are handed to the durable outbox worker, so a confirmed
+    # proposal routinely reaches here still "confirmed" or "executing" rather
+    # than "completed" -- the frontend no longer blocks on completion (see
+    # ACTION_STATUS_POLL_DELAYS_MS). The user's decision is already made at
+    # confirmation time; execution continuing in the background is not a
+    # reason to make them wait through the whole queue. A provider failure
+    # does not silently reopen this transaction as an actionable review
+    # candidate -- _fail_financial_operation moves it to a distinct
+    # error/post_ambiguous/reconciliation_required status, surfaced through
+    # the separate recovery flow -- so advancing early here cannot mask one.
+    _ADVANCEABLE_PROPOSAL_STATES = frozenset({"confirmed", "executing", "completed"})
+
     def advance_after_proposal(
         self, session: AgentReviewSession, *, proposal_public_id: str
     ) -> AgentReviewSession:
@@ -345,7 +357,7 @@ class ReviewSessionService:
         proposal = self.agent_service.get_action_proposal(
             proposal_public_id, owner_user_id=session.owner_user_id
         )
-        if proposal.status != "completed":
+        if proposal.status not in self._ADVANCEABLE_PROPOSAL_STATES:
             return session
         params = proposal.normalized_parameters_json or {}
         matches = snapshot["source_type"] == "transaction" and params.get(
