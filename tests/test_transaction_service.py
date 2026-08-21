@@ -20,6 +20,17 @@ from app.services.transaction_service import (
 )
 
 
+def test_validate_mark_personal_blocks_a_failed_financial_operation():
+    """A failed splitwise_create leaves a recoverable FinancialOperation behind
+    (POST /recovery/retry can still re-attempt it) -- marking personal must
+    not let that later retry silently resurrect and overwrite the decision.
+    """
+
+    tx = ExpenseTransaction(status=TransactionStatus.ERROR.value, splitwise_expense_id=None)
+    with pytest.raises(TransactionError, match="financial operation in progress or recovery"):
+        TransactionService.validate_mark_personal(tx)
+
+
 def test_plaid_token_environment_is_inferred_from_token_prefix():
     assert _plaid_token_environment("access-sandbox-token") == "sandbox"
     assert _plaid_token_environment("access-production-token") == "production"
