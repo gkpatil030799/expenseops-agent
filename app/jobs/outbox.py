@@ -231,6 +231,39 @@ def _handle_telegram_splitwise_posted(db, event: OutboxEvent) -> None:
         raise RuntimeError("telegram_delivery_failed")
 
 
+def _run_create_or_delete(action, operation: FinancialOperation) -> None:
+    """splitwise_create/splitwise_delete re-raise on a rejected provider call so
+    the synchronous POST /recovery/retry path can surface a real error to the
+    user -- but that same re-raise, left uncaught here, would also let this
+    generic outbox worker automatically retry a DEFINITE rejection
+    _fail_financial_operation has already recorded (operation.state
+    "failed"), against a payload that will not succeed differently on a blind
+    retry. Swallow exactly that case so the outbox event completes without
+    further automatic attempts; recovering from a definite failure is the
+    user's explicit retry, not an unattended background one.
+
+    An AMBIGUOUS outcome (operation.state "needs_reconciliation") is
+    deliberately NOT swallowed here: the automatic retry is what drives the
+    attempt_count > 0 branch in _execute_splitwise_create/_delete to check
+    find_expense_by_idempotency_key / expense_exists before creating or
+    deleting anything again, which is how a worker crash after the provider
+    already accepted the call gets reconciled without waiting on the user to
+    notice and hit recovery themselves.
+
+    Any other exception was not classified by _fail_financial_operation
+    (e.g. a bug, a DB error), so it still propagates to run_once's normal
+    retry/dead-letter handling.
+    """
+    from app.services.splitwise_service import SplitwiseAPIError
+    from app.services.transaction_service import TransactionError
+
+    try:
+        action()
+    except (TransactionError, SplitwiseAPIError):
+        if operation.state != "failed":
+            raise
+
+
 def _handle_splitwise_operation(db, event: OutboxEvent) -> None:
     from app.services.transaction_service import TransactionService
 
@@ -256,7 +289,12 @@ def _handle_splitwise_operation(db, event: OutboxEvent) -> None:
         service = TransactionService(db)
         request = dict(operation.request_json or {})
         if operation.action == "splitwise_create":
-            service._execute_splitwise_create(tx, request, operation=operation)  # noqa: SLF001
+            _run_create_or_delete(
+                lambda: service._execute_splitwise_create(  # noqa: SLF001
+                    tx, request, operation=operation
+                ),
+                operation,
+            )
             return
         if operation.action == "splitwise_update":
             payload = dict(request.get("payload") or {})
@@ -265,11 +303,16 @@ def _handle_splitwise_operation(db, event: OutboxEvent) -> None:
             service._execute_splitwise_update(tx, payload, operation=operation)  # noqa: SLF001
             return
         if operation.action in {"splitwise_delete", "splitwise_delete_removed"}:
-            service._execute_splitwise_delete(  # noqa: SLF001
-                tx,
-                operation=operation,
-                action=operation.action,
-                result_status=str(request.get("result_status") or TransactionStatus.ASK_USER.value),
+            _run_create_or_delete(
+                lambda: service._execute_splitwise_delete(  # noqa: SLF001
+                    tx,
+                    operation=operation,
+                    action=operation.action,
+                    result_status=str(
+                        request.get("result_status") or TransactionStatus.ASK_USER.value
+                    ),
+                ),
+                operation,
             )
             return
         raise RuntimeError(f"unsupported_financial_operation:{operation.action}")

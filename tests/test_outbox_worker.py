@@ -371,6 +371,79 @@ def test_production_splitwise_create_is_queued_and_crash_reconciled(
     engine.dispose()
 
 
+def test_definitive_splitwise_rejection_is_not_auto_retried(tmp_path, monkeypatch):
+    """A non-ambiguous provider rejection (bad group, invalid payload) will
+    never succeed on a blind retry of the same payload -- unlike the
+    ambiguous crash case above, where the automatic retry's
+    attempt_count > 0 branch is what drives reconciliation. Retrying here
+    only wastes a live API call and, before this fix, left a window where an
+    unattended retry could complete after the user had already moved on.
+    """
+
+    from app.services import transaction_service as transaction_module
+
+    monkeypatch.setenv("APP_ENV", "production")
+    engine, factory, context, tx_id = _database(tmp_path)
+
+    class Splitwise:
+        create_calls = 0
+
+        def create_expense(self, payload):
+            self.create_calls += 1
+            raise SplitwiseAPIError("This group does not exist.", ambiguous=False)
+
+        def find_expense_by_idempotency_key(self, key):
+            return None
+
+    splitwise = Splitwise()
+    production = Settings(
+        environment="local",
+        app_secret_key="configured-fernet-key",
+        database_url="postgresql://expenseops@db.example/expenseops",
+        enable_postgres_rls=True,
+        rate_limit_backend="postgres",
+        _env_file=None,
+    )
+    monkeypatch.setattr(transaction_module, "get_settings", lambda: production)
+    monkeypatch.setattr(transaction_module, "SplitwiseService", lambda _settings: splitwise)
+    monkeypatch.setattr(outbox_job, "SessionLocal", factory)
+    monkeypatch.setattr(outbox_job, "get_settings", lambda: production)
+
+    with factory() as db:
+        set_session_tenant(db, context)
+        service = TransactionService(db, settings=production)
+        service.create_equal_split_expense(
+            tx_id=tx_id,
+            friend_user_ids=[222],
+            group_id=None,
+            description=None,
+            details=None,
+            currency_code=None,
+            confirm=True,
+            post_pending=False,
+        )
+
+    result = outbox_job.run_once()
+    assert result["succeeded"] == 1
+    assert result["retried"] == 0
+    assert splitwise.create_calls == 1
+
+    with factory() as db:
+        set_session_tenant(db, context)
+        tx = db.get(ExpenseTransaction, tx_id)
+        operation = db.scalar(select(FinancialOperation))
+        event = db.scalar(
+            select(OutboxEvent).where(OutboxEvent.event_type == "splitwise.execute_operation")
+        )
+        assert tx.status == TransactionStatus.ERROR.value
+        assert operation.state == "failed"
+        # The outbox job itself is done -- no further automatic attempt will
+        # fire -- while the financial operation stays failed for explicit
+        # POST /recovery/retry, not an unattended background one.
+        assert event.state == "succeeded"
+    engine.dispose()
+
+
 def test_worker_scopes_splitwise_credentials_and_restores_context(tmp_path, monkeypatch):
     from app.services import transaction_service as transaction_module
 

@@ -1029,6 +1029,11 @@ class TransactionService:
             TransactionStatus.UNDOING.value,
             TransactionStatus.UNDO_AMBIGUOUS.value,
             TransactionStatus.RECONCILIATION_REQUIRED.value,
+            # A failed splitwise_create leaves a recoverable FinancialOperation
+            # behind (POST /recovery/retry can still re-attempt it); marking
+            # personal must not let that later retry silently resurrect and
+            # overwrite the decision once it succeeds.
+            TransactionStatus.ERROR.value,
         }:
             raise TransactionError(
                 "This transaction has a financial operation in progress or recovery."
