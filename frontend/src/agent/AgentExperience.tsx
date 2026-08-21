@@ -114,19 +114,17 @@ export default function AgentExperience({
 
   async function confirmReviewProposal(block: AgentActionConfirmationBlock) {
     const updated = await controller.confirmAction(block);
-    const decision = reviewAdvanceDecision(updated.status);
-    if (decision === "advance") {
+    if (reviewAdvanceDecision(updated.status) === "advance") {
+      // Confirmed (queued) or completed both advance -- the decision is made
+      // and execution continues in the background regardless of whether this
+      // session is still watching. The confirmation card stays visible in the
+      // conversation transcript either way.
       setReviewProposal(null);
       setReviewClarifyMessage(null);
       await controller.advanceReviewSession(updated.proposal_id);
       return updated;
     }
     setReviewProposal(updated);
-    if (decision === "pending") {
-      setReviewClarifyMessage(
-        "Queued securely -- ExpenseOps will confirm it with Splitwise in the background. Skip to keep reviewing.",
-      );
-    }
     return updated;
   }
 

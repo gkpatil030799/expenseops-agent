@@ -15,6 +15,7 @@ from app.agent.review_session import ReviewSessionService
 from app.agent.service import AgentNotFoundError
 from app.agent.tooling import AgentActionClarificationRequired
 from app.models import (
+    AgentActionProposal,
     AgentReviewSession,
     AIInterpretationMemory,
     ExpenseTransaction,
@@ -207,6 +208,82 @@ def test_propose_mark_personal_then_advance_moves_to_next_candidate(
         session, live = service.current_candidate(session)
         assert live is not None
         assert live["transaction"]["id"] != first_transaction_id
+
+
+def test_advance_moves_forward_on_a_still_queued_split_not_yet_completed(
+    agent_runtime_db: RuntimeFixture,
+):
+    """Splitwise posts are handed to the durable outbox worker in production,
+    so advance_after_proposal routinely runs while the proposal is still
+    "confirmed" or "executing" rather than "completed" -- the frontend no
+    longer blocks the review queue on completion. The queue must still move
+    forward: the user's decision is made at confirmation time, and a provider
+    failure surfaces through the separate recovery flow rather than by
+    reopening this transaction as an actionable review candidate.
+    """
+
+    with _scoped(agent_runtime_db) as db:
+        tenant = agent_runtime_db.contexts["owner"]
+        settings = _settings(writes=True)
+        unreviewed = db.get(ExpenseTransaction, agent_runtime_db.transaction_ids["unreviewed"])
+        adversarial = db.get(ExpenseTransaction, agent_runtime_db.transaction_ids["adversarial"])
+        adversarial.status = TransactionStatus.ASK_USER.value
+        db.commit()
+        _sync(db, unreviewed, owner_user_id=tenant.user_id)
+        _sync(db, adversarial, owner_user_id=tenant.user_id)
+
+        conversation = _conversation(db, tenant, settings)
+        service = ReviewSessionService(db, settings)
+        registry = build_read_tool_registry(settings)
+        register_action_tools(registry)
+        session = service.start_or_resume(conversation.public_id, owner_user_id=tenant.user_id)
+        session, live = service.current_candidate(session)
+        first_transaction_id = live["transaction"]["id"]
+
+        proposal = service.propose_action(session, registry=registry, action="mark_personal")
+
+        # Simulates the outbox worker not having claimed the job yet, exactly
+        # as happens in production -- deliberately not driven through the
+        # executor, which would complete it inline in this test environment.
+        stored = db.get(AgentActionProposal, proposal.id)
+        stored.status = "executing"
+        db.commit()
+
+        session = service.advance_after_proposal(session, proposal_public_id=proposal.public_id)
+        summary = ReviewSessionService.summary(session)
+        assert summary["personal"] == 1
+        assert summary["remaining"] == 1
+
+        session, live = service.current_candidate(session)
+        assert live is not None
+        assert live["transaction"]["id"] != first_transaction_id
+
+
+def test_advance_still_holds_on_a_terminal_failure(agent_runtime_db: RuntimeFixture):
+    """A proposal that failed outright (as opposed to one still in flight) must
+    not advance the queue -- there is no successful decision to record.
+    """
+
+    with _scoped(agent_runtime_db) as db:
+        tenant = agent_runtime_db.contexts["owner"]
+        settings = _settings(writes=True)
+        unreviewed = db.get(ExpenseTransaction, agent_runtime_db.transaction_ids["unreviewed"])
+        _sync(db, unreviewed, owner_user_id=tenant.user_id)
+
+        conversation = _conversation(db, tenant, settings)
+        service = ReviewSessionService(db, settings)
+        registry = build_read_tool_registry(settings)
+        register_action_tools(registry)
+        session = service.start_or_resume(conversation.public_id, owner_user_id=tenant.user_id)
+
+        proposal = service.propose_action(session, registry=registry, action="mark_personal")
+        stored = db.get(AgentActionProposal, proposal.id)
+        stored.status = "failed"
+        db.commit()
+
+        session = service.advance_after_proposal(session, proposal_public_id=proposal.public_id)
+        assert ReviewSessionService.summary(session)["remaining"] == 1
+        assert ReviewSessionService.summary(session)["reviewed"] == 0
 
 
 def test_propose_split_grounds_participants_from_the_click_not_free_text(

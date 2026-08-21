@@ -23,19 +23,27 @@ describe("isActionPending", () => {
 });
 
 describe("reviewAdvanceDecision", () => {
-  it("advances only on completed, matching advance_after_proposal", () => {
+  it("advances on completed", () => {
     expect(reviewAdvanceDecision("completed")).toBe("advance");
   });
 
-  it("reports a still-executing split as pending rather than advancing", () => {
-    // Advancing here would silently no-op server-side and strand the queue.
-    expect(reviewAdvanceDecision("executing")).toBe("pending");
-    expect(reviewAdvanceDecision("confirmed")).toBe("pending");
+  it("advances on a still-executing or still-queued split, matching advance_after_proposal", () => {
+    // The user's decision is made at confirmation time; execution continuing
+    // in the background is not a reason to hold the queue. A provider
+    // failure surfaces through the separate recovery flow, not by reopening
+    // this transaction as an actionable review candidate, so advancing here
+    // cannot mask one.
+    expect(reviewAdvanceDecision("executing")).toBe("advance");
+    expect(reviewAdvanceDecision("confirmed")).toBe("advance");
   });
 
   it("holds the card on terminal failure so the outcome stays visible", () => {
     for (const status of ["failed", "expired", "ambiguous", "cancelled"] as const) {
       expect(reviewAdvanceDecision(status)).toBe("hold");
     }
+  });
+
+  it("holds on an unconfirmed proposal", () => {
+    expect(reviewAdvanceDecision("awaiting_confirmation")).toBe("hold");
   });
 });
