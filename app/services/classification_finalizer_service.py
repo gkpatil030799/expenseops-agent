@@ -593,7 +593,7 @@ class ClassificationFinalizerService:
                 .limit(limit)
             )
         )
-        refs = sorted(
+        candidate_refs = sorted(
             [
                 (value[1], ClassificationSourceType.RECEIPT_LINE, value[0])
                 for value in deferred_line_refs
@@ -616,7 +616,22 @@ class ClassificationFinalizerService:
                 for value in retry_transaction_refs
             ],
             key=lambda value: (_sort_timestamp(value[0]), value[1].value, value[2]),
-        )[:limit]
+        )
+        # A single row can be due for more than one reason at once (e.g. both
+        # its auto_finalize_at and a stale classification_retry_at are <=
+        # due_at), so it can appear in more than one of the six queries above.
+        # Keep only its earliest-sorted occurrence before truncating to limit,
+        # or a duplicate would consume two slots of the batch and could crowd
+        # out a genuinely different due row.
+        seen_refs: set[tuple[ClassificationSourceType, int]] = set()
+        refs: list[tuple[datetime, ClassificationSourceType, int]] = []
+        for value in candidate_refs:
+            key = (value[1], value[2])
+            if key in seen_refs:
+                continue
+            seen_refs.add(key)
+            refs.append(value)
+        refs = refs[:limit]
         line_ids = [value[2] for value in refs if value[1] is ClassificationSourceType.RECEIPT_LINE]
         transaction_ids = [
             value[2] for value in refs if value[1] is ClassificationSourceType.TRANSACTION

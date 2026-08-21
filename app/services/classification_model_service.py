@@ -5,7 +5,6 @@ import re
 import time
 from dataclasses import dataclass
 from decimal import ROUND_HALF_UP, Decimal
-from difflib import SequenceMatcher
 
 import httpx
 
@@ -372,11 +371,7 @@ def _looks_entity_specific(
             continue
         proposed_tokens = set(proposed.split())
         signature_tokens = set(signature.split())
-        if (
-            proposed == signature
-            or SequenceMatcher(None, proposed, signature).ratio() >= 0.92
-            or signature_tokens.issubset(proposed_tokens)
-        ):
+        if proposed == signature or signature_tokens.issubset(proposed_tokens):
             return True
     return False
 

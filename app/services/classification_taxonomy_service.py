@@ -7,7 +7,6 @@ import unicodedata
 from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from difflib import SequenceMatcher
 from enum import StrEnum
 
 from sqlalchemy import func, select
@@ -1416,11 +1415,6 @@ class ClassificationTaxonomyService:
         existing = self._subcategory(parent, normalized)
         if existing is not None:
             return existing
-        similar = self._similar_subcategories(parent, normalized)
-        if len(similar) == 1:
-            return similar[0]
-        if len(similar) > 1:
-            raise ClassificationCollisionError("subcategory similarity is ambiguous")
         if (
             not allow_create
             or confidence < HIGH_CONFIDENCE_THRESHOLD
@@ -1468,18 +1462,6 @@ class ClassificationTaxonomyService:
                 subcategory=subcategory,
                 allow_create=allow_create,
             )
-        similar = self._similar_concepts(normalized, decision)
-        if len(similar) == 1:
-            return self._resolve_existing_concept_for_decision(
-                existing=similar[0],
-                clean=clean,
-                normalized=normalized,
-                decision=decision,
-                subcategory=subcategory,
-                allow_create=allow_create,
-            )
-        if len(similar) > 1:
-            raise ClassificationCollisionError("concept similarity is ambiguous")
         if (
             not allow_create
             or decision.confidence_band is not ClassificationConfidenceBand.HIGH
@@ -2848,24 +2830,6 @@ class ClassificationTaxonomyService:
         )
         return self._resolved_subcategory(value)
 
-    def _similar_subcategories(
-        self, parent: SpendingParentCategory, normalized: str
-    ) -> list[ClassificationSubcategory]:
-        values = list(
-            self.db.scalars(
-                select(ClassificationSubcategory).where(
-                    ClassificationSubcategory.workspace_id == self.workspace_id,
-                    ClassificationSubcategory.parent_category == parent.value,
-                    ClassificationSubcategory.merged_into_id.is_(None),
-                )
-            )
-        )
-        return [
-            value
-            for value in values
-            if SequenceMatcher(None, value.normalized_name, normalized).ratio() >= 0.94
-        ]
-
     def _concept(self, normalized: str) -> ClassificationConcept | None:
         value = self.db.scalar(
             select(ClassificationConcept).where(
@@ -2910,25 +2874,6 @@ class ClassificationTaxonomyService:
             if value is None:
                 raise ClassificationCollisionError("concept merge target is unavailable")
         return value
-
-    def _similar_concepts(
-        self, normalized: str, decision: ClassificationDecision
-    ) -> list[ClassificationConcept]:
-        values = list(
-            self.db.scalars(
-                select(ClassificationConcept).where(
-                    ClassificationConcept.workspace_id == self.workspace_id,
-                    ClassificationConcept.parent_category
-                    == decision.spending_parent_category.value,
-                    ClassificationConcept.merged_into_id.is_(None),
-                )
-            )
-        )
-        return [
-            value
-            for value in values
-            if SequenceMatcher(None, value.normalized_name, normalized).ratio() >= 0.96
-        ]
 
     @staticmethod
     def _validate_concept_dimensions(

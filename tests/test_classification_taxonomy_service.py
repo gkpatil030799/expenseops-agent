@@ -570,6 +570,57 @@ def test_alias_and_concept_collisions_never_choose_arbitrarily(taxonomy_db) -> N
         service.apply_decision(conflicting)
 
 
+def test_near_typo_concept_and_subcategory_names_do_not_fuzzy_collide(taxonomy_db) -> None:
+    """Only an exact normalized-name match reuses a concept/subcategory -- a
+    near-typo/plural variant creates its own row instead of silently merging
+    into (or being blocked as ambiguous with) an unrelated existing one.
+    """
+
+    db, values = taxonomy_db
+    service = ClassificationTaxonomyService(db)
+    first = build_classification_decision(
+        source_type=ClassificationSourceType.TRANSACTION,
+        source_entity_id=values["transaction"].id,
+        spending_parent_category=SpendingParentCategory.HOUSEHOLD_HOME,
+        subcategory_name="Paper goods",
+        canonical_concept="Toilet paper",
+        item_activity_type=ClassificationActivityType.HOUSEHOLD_CONSUMABLE,
+        replenishment_eligibility=ReplenishmentEligibility.REPLENISHABLE,
+        confidence=0.98,
+        authority=ClassificationAuthority.DETERMINISTIC_EXACT,
+        provenance_codes=("deterministic_taxonomy_rule",),
+    )
+    service.apply_decision(first)
+
+    second = build_classification_decision(
+        source_type=ClassificationSourceType.RECEIPT_LINE,
+        source_entity_id=values["line"].id,
+        spending_parent_category=SpendingParentCategory.HOUSEHOLD_HOME,
+        subcategory_name="Paper good",
+        canonical_concept="Toilet papers",
+        item_activity_type=ClassificationActivityType.HOUSEHOLD_CONSUMABLE,
+        replenishment_eligibility=ReplenishmentEligibility.REPLENISHABLE,
+        confidence=0.98,
+        authority=ClassificationAuthority.DETERMINISTIC_EXACT,
+        provenance_codes=("deterministic_taxonomy_rule",),
+    )
+    applied = service.apply_decision(second)
+
+    assert applied.applied is True
+    concepts = db.scalars(
+        select(ClassificationConcept).where(
+            ClassificationConcept.workspace_id == values["workspace"].id
+        )
+    ).all()
+    subcategories = db.scalars(
+        select(ClassificationSubcategory).where(
+            ClassificationSubcategory.workspace_id == values["workspace"].id
+        )
+    ).all()
+    assert {concept.name for concept in concepts} == {"Toilet paper", "Toilet papers"}
+    assert {subcategory.name for subcategory in subcategories} == {"Paper goods", "Paper good"}
+
+
 def test_user_correction_is_versioned_and_lower_authority_cannot_overwrite(taxonomy_db) -> None:
     db, values = taxonomy_db
     service = ClassificationTaxonomyService(db)
