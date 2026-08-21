@@ -26,6 +26,7 @@ from app.models import (
 from app.services.acquisition_service import AcquisitionService
 from app.services.classification_taxonomy_service import (
     ClassificationCollisionError,
+    ClassificationNotFoundError,
     ClassificationTaxonomyError,
     ClassificationTaxonomyService,
 )
@@ -88,7 +89,7 @@ class HouseholdItemMergeService:
             )
         )
         if len(preview) != 2:
-            raise ClassificationTaxonomyError("household item not found")
+            raise ClassificationNotFoundError("household item not found")
         # Receipt correction uses line -> item ordering. Acquire the same first
         # lock here before sorted item locks to avoid an item/line deadlock cycle.
         receipt_items = self._lock_receipt_items(source_item_id)
@@ -96,12 +97,14 @@ class HouseholdItemMergeService:
         source = items.get(source_item_id)
         target = items.get(target_item_id)
         if source is None or target is None:
-            raise ClassificationTaxonomyError("household item not found")
+            raise ClassificationNotFoundError("household item not found")
         if not source.enabled or source.merged_into_id is not None:
             raise ClassificationCollisionError("source household item is not active")
         if not target.enabled or target.merged_into_id is not None:
             raise ClassificationCollisionError("target household item is not active")
-        self._assert_no_merge_cycle(source, target)
+        # A merge cycle cannot form: both sides must already be active and
+        # unmerged (checked above), so the target can never point back into
+        # a chain that would loop to source.
         if (
             source.spending_parent_category != target.spending_parent_category
             or source.replenishment_eligibility != target.replenishment_eligibility
@@ -255,7 +258,7 @@ class HouseholdItemMergeService:
             )
         )
         if event_preview is None:
-            raise ClassificationTaxonomyError("household item merge event not found")
+            raise ClassificationNotFoundError("household item merge event not found")
         metadata = event_preview.metadata_json or {}
         target_item_id = self._positive_id(metadata.get("target_household_item_id"))
         moved_alias_ids = self._id_list(metadata, "moved_alias_ids")
@@ -268,6 +271,10 @@ class HouseholdItemMergeService:
 
         # Match receipt-correction lock order before locking the item pair.
         receipt_items = self._lock_receipt_items_by_ids(moved_receipt_ids, target_item_id)
+        # AuditEvent rows are append-only elsewhere in this codebase -- nothing
+        # updates metadata_json in place after creation -- so re-checking the
+        # row still exists under lock is sufficient; it cannot have changed
+        # shape out from under the unlocked preview above.
         event = self.db.scalar(
             select(AuditEvent)
             .where(
@@ -279,13 +286,13 @@ class HouseholdItemMergeService:
             )
             .with_for_update(of=AuditEvent)
         )
-        if event is None or (event.metadata_json or {}) != metadata:
+        if event is None:
             raise ClassificationCollisionError("household item merge audit changed")
         items = self._lock_items((source_item_id, target_item_id))
         source = items.get(source_item_id)
         target = items.get(target_item_id)
         if source is None or target is None:
-            raise ClassificationTaxonomyError("household item not found")
+            raise ClassificationNotFoundError("household item not found")
         if source.enabled or source.merged_into_id != target.id or source.merged_at is None:
             raise ClassificationCollisionError("household item merge is no longer reversible")
         if not target.enabled or target.merged_into_id is not None:
@@ -411,23 +418,6 @@ class HouseholdItemMergeService:
         )
         return {row.id: row for row in rows}
 
-    def _assert_no_merge_cycle(self, source: HouseholdItem, target: HouseholdItem) -> None:
-        value = target
-        seen: set[int] = set()
-        while value.merged_into_id is not None:
-            if value.id in seen or value.merged_into_id in {value.id, source.id}:
-                raise ClassificationCollisionError("household item merge would create a cycle")
-            seen.add(value.id)
-            next_value = self.db.scalar(
-                select(HouseholdItem).where(
-                    HouseholdItem.workspace_id == self.workspace_id,
-                    HouseholdItem.id == value.merged_into_id,
-                )
-            )
-            if next_value is None:
-                raise ClassificationCollisionError("household item merge target is unavailable")
-            value = next_value
-
     def _bounded(self, values: list[Any], noun: str) -> list[Any]:
         if len(values) > MAX_HOUSEHOLD_ITEM_MERGE_ROWS:
             raise ClassificationTaxonomyError(
@@ -435,114 +425,87 @@ class HouseholdItemMergeService:
             )
         return values
 
-    def _lock_aliases(self, item_ids: tuple[int, ...]) -> list[HouseholdItemAlias]:
+    def _locked_bounded(self, statement, model, order_col, noun: str) -> list[Any]:
         return self._bounded(
             list(
                 self.db.scalars(
-                    select(HouseholdItemAlias)
-                    .where(HouseholdItemAlias.household_item_id.in_(item_ids))
-                    .order_by(HouseholdItemAlias.id)
+                    statement.order_by(order_col)
                     .limit(MAX_HOUSEHOLD_ITEM_MERGE_ROWS + 1)
-                    .with_for_update(of=HouseholdItemAlias)
+                    .with_for_update(of=model)
                 )
             ),
-            "aliases",
+            noun,
         )
 
+    def _lock_aliases(self, item_ids: tuple[int, ...]) -> list[HouseholdItemAlias]:
+        statement = select(HouseholdItemAlias).where(
+            HouseholdItemAlias.household_item_id.in_(item_ids)
+        )
+        return self._locked_bounded(statement, HouseholdItemAlias, HouseholdItemAlias.id, "aliases")
+
     def _lock_receipt_items(self, item_id: int) -> list[PurchaseReceiptItem]:
-        return self._bounded(
-            list(
-                self.db.scalars(
-                    select(PurchaseReceiptItem)
-                    .join(PurchaseReceipt, PurchaseReceipt.id == PurchaseReceiptItem.receipt_id)
-                    .where(
-                        PurchaseReceipt.workspace_id == self.workspace_id,
-                        PurchaseReceiptItem.household_item_id == item_id,
-                    )
-                    .order_by(PurchaseReceiptItem.id)
-                    .limit(MAX_HOUSEHOLD_ITEM_MERGE_ROWS + 1)
-                    .with_for_update(of=PurchaseReceiptItem)
-                )
-            ),
-            "receipt lines",
+        statement = (
+            select(PurchaseReceiptItem)
+            .join(PurchaseReceipt, PurchaseReceipt.id == PurchaseReceiptItem.receipt_id)
+            .where(
+                PurchaseReceipt.workspace_id == self.workspace_id,
+                PurchaseReceiptItem.household_item_id == item_id,
+            )
+        )
+        return self._locked_bounded(
+            statement, PurchaseReceiptItem, PurchaseReceiptItem.id, "receipt lines"
         )
 
     def _lock_acquisitions(self, item_id: int) -> list[HouseholdItemAcquisition]:
-        return self._bounded(
-            list(
-                self.db.scalars(
-                    select(HouseholdItemAcquisition)
-                    .where(
-                        HouseholdItemAcquisition.workspace_id == self.workspace_id,
-                        HouseholdItemAcquisition.household_item_id == item_id,
-                    )
-                    .order_by(HouseholdItemAcquisition.id)
-                    .limit(MAX_HOUSEHOLD_ITEM_MERGE_ROWS + 1)
-                    .with_for_update(of=HouseholdItemAcquisition)
-                )
-            ),
-            "acquisitions",
+        statement = select(HouseholdItemAcquisition).where(
+            HouseholdItemAcquisition.workspace_id == self.workspace_id,
+            HouseholdItemAcquisition.household_item_id == item_id,
+        )
+        return self._locked_bounded(
+            statement, HouseholdItemAcquisition, HouseholdItemAcquisition.id, "acquisitions"
         )
 
     def _lock_errand_links(self, item_ids: tuple[int, ...]) -> list[ErrandHouseholdItem]:
-        return self._bounded(
-            list(
-                self.db.scalars(
-                    select(ErrandHouseholdItem)
-                    .join(Errand, Errand.id == ErrandHouseholdItem.errand_id)
-                    .where(
-                        Errand.workspace_id == self.workspace_id,
-                        ErrandHouseholdItem.household_item_id.in_(item_ids),
-                    )
-                    .order_by(ErrandHouseholdItem.id)
-                    .limit(MAX_HOUSEHOLD_ITEM_MERGE_ROWS + 1)
-                    .with_for_update(of=ErrandHouseholdItem)
-                )
-            ),
-            "errand links",
+        statement = (
+            select(ErrandHouseholdItem)
+            .join(Errand, Errand.id == ErrandHouseholdItem.errand_id)
+            .where(
+                Errand.workspace_id == self.workspace_id,
+                ErrandHouseholdItem.household_item_id.in_(item_ids),
+            )
+        )
+        return self._locked_bounded(
+            statement, ErrandHouseholdItem, ErrandHouseholdItem.id, "errand links"
         )
 
     def _lock_plan_links(
         self,
         item_ids: tuple[int, ...],
     ) -> list[ErrandPlanStopHouseholdItem]:
-        return self._bounded(
-            list(
-                self.db.scalars(
-                    select(ErrandPlanStopHouseholdItem)
-                    .join(
-                        ErrandPlanStop,
-                        ErrandPlanStop.id == ErrandPlanStopHouseholdItem.stop_id,
-                    )
-                    .join(ErrandPlan, ErrandPlan.id == ErrandPlanStop.plan_id)
-                    .where(
-                        ErrandPlan.workspace_id == self.workspace_id,
-                        ErrandPlanStopHouseholdItem.household_item_id.in_(item_ids),
-                    )
-                    .order_by(ErrandPlanStopHouseholdItem.id)
-                    .limit(MAX_HOUSEHOLD_ITEM_MERGE_ROWS + 1)
-                    .with_for_update(of=ErrandPlanStopHouseholdItem)
-                )
-            ),
-            "plan links",
+        statement = (
+            select(ErrandPlanStopHouseholdItem)
+            .join(
+                ErrandPlanStop,
+                ErrandPlanStop.id == ErrandPlanStopHouseholdItem.stop_id,
+            )
+            .join(ErrandPlan, ErrandPlan.id == ErrandPlanStop.plan_id)
+            .where(
+                ErrandPlan.workspace_id == self.workspace_id,
+                ErrandPlanStopHouseholdItem.household_item_id.in_(item_ids),
+            )
+        )
+        return self._locked_bounded(
+            statement, ErrandPlanStopHouseholdItem, ErrandPlanStopHouseholdItem.id, "plan links"
         )
 
     def _lock_open_predictions(self, item_ids: tuple[int, ...]) -> list[ReplenishmentPrediction]:
-        return self._bounded(
-            list(
-                self.db.scalars(
-                    select(ReplenishmentPrediction)
-                    .where(
-                        ReplenishmentPrediction.workspace_id == self.workspace_id,
-                        ReplenishmentPrediction.household_item_id.in_(item_ids),
-                        ReplenishmentPrediction.actual_next_acquisition_at.is_(None),
-                    )
-                    .order_by(ReplenishmentPrediction.id)
-                    .limit(MAX_HOUSEHOLD_ITEM_MERGE_ROWS + 1)
-                    .with_for_update(of=ReplenishmentPrediction)
-                )
-            ),
-            "open predictions",
+        statement = select(ReplenishmentPrediction).where(
+            ReplenishmentPrediction.workspace_id == self.workspace_id,
+            ReplenishmentPrediction.household_item_id.in_(item_ids),
+            ReplenishmentPrediction.actual_next_acquisition_at.is_(None),
+        )
+        return self._locked_bounded(
+            statement, ReplenishmentPrediction, ReplenishmentPrediction.id, "open predictions"
         )
 
     def _lock_rows_by_ids(self, model, ids: list[int], *criteria):

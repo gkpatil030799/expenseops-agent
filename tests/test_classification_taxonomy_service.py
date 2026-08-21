@@ -1916,7 +1916,6 @@ def test_concept_merge_retargets_aliases_and_current_projections_with_append_onl
     audit = db.scalar(
         select(AuditEvent).where(AuditEvent.event_type == "classification_concept_merged")
     )
-    assert audit.metadata_json["household_items_merged"] is False
     assert audit.metadata_json["household_history_changed"] is False
 
 

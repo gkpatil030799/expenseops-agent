@@ -164,8 +164,8 @@ class ClassificationModelService:
                 }
             },
         }
-        if self.settings.classification_model.startswith("gpt-5.6"):
-            payload["reasoning"] = {"effort": "none"}
+        if self.settings.classification_model_reasoning_effort is not None:
+            payload["reasoning"] = {"effort": self.settings.classification_model_reasoning_effort}
         started = time.monotonic()
         try:
             if self.client is not None:

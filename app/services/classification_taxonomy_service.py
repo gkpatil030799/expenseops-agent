@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-import hashlib
 import math
 import re
 import unicodedata
+import zlib
 from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -47,6 +47,11 @@ MAX_CONCEPT_LIST_RESULTS = 200
 MAX_SUBCATEGORY_LIST_RESULTS = 200
 MAX_SUBCATEGORY_MUTATION_CONCEPTS = 250
 
+# Explicit opt-in marker required (alongside allow_receipt_evidence_cleanup=True)
+# before apply_decision() will let a transaction's recomputed evidence override
+# an existing RECEIPT_EVIDENCE-authority projection. See apply_decision().
+RECEIPT_EVIDENCE_RECOMPUTED_PROVENANCE = "receipt_evidence_recomputed"
+
 PARENT_CATEGORY_LABELS: dict[SpendingParentCategory, str] = {
     SpendingParentCategory.FOOD_DINING: "Food & Dining",
     SpendingParentCategory.HOUSEHOLD_HOME: "Household & Home",
@@ -75,6 +80,10 @@ class ClassificationTaxonomyError(ValueError):
 
 
 class ClassificationCollisionError(ClassificationTaxonomyError):
+    pass
+
+
+class ClassificationNotFoundError(ClassificationTaxonomyError):
     pass
 
 
@@ -172,10 +181,18 @@ class ClassificationDecision:
         return confidence_band(self.confidence)
 
 
+class ClassificationApplicationReason(StrEnum):
+    AUTONOMY_DISABLED = "autonomy_disabled"
+    HIGHER_AUTHORITY_DECISION_PRESERVED = "higher_authority_decision_preserved"
+    ALREADY_APPLIED = "already_applied"
+    APPLIED = "applied"
+    REPAIR_RECEIPT_LEARNING = "repair_receipt_learning"
+
+
 @dataclass(frozen=True)
 class ClassificationApplication:
     applied: bool
-    reason: str
+    reason: ClassificationApplicationReason
     decision: ClassificationDecision
     subcategory_id: int | None = None
     concept_id: int | None = None
@@ -285,6 +302,21 @@ def _rule(
     )
 
 
+# Single source of truth for grocery keyword -> concept name, shared by the
+# _RULES grocery rule below and _canonical_grocery_concept()'s per-concept
+# lookup so the two lists cannot silently drift out of sync.
+_GROCERY_CONCEPTS: tuple[tuple[str, str], ...] = (
+    (r"eggs?", "Eggs"),
+    (r"milk", "Milk"),
+    (r"bread", "Bread"),
+    (r"rice", "Rice"),
+    (r"vegetables?|produce", "Vegetables"),
+    (r"chicken", "Chicken"),
+    (r"beef", "Beef"),
+    (r"meat", "Meat"),
+)
+_GROCERY_RULE_PATTERN = r"\b(" + "|".join(pattern for pattern, _ in _GROCERY_CONCEPTS) + r")\b"
+
 _RULES: tuple[_TaxonomyRule, ...] = (
     _rule(
         r"\b(sales tax|tax)\b",
@@ -383,7 +415,7 @@ _RULES: tuple[_TaxonomyRule, ...] = (
         None,
     ),
     _rule(
-        r"\b(eggs?|milk|bread|rice|vegetables?|produce|chicken|beef|meat)\b",
+        _GROCERY_RULE_PATTERN,
         SpendingParentCategory.FOOD_DINING,
         "Groceries",
         ClassificationActivityType.GROCERY,
@@ -627,6 +659,14 @@ _PROVENANCE_RANK = {
     ClassificationAuthority.CONFIRMED_ALIAS: 50,
     ClassificationAuthority.USER_CORRECTION: 100,
 }
+# Autonomous cleanup (void_alias's default allowlist) may only void an alias
+# trusted less than a human-confirmed one -- derived from the same rank table
+# so the two representations of "which authorities are trustworthy" can't drift.
+_VOIDABLE_BY_AUTONOMOUS_CLEANUP: tuple[ClassificationAuthority, ...] = tuple(
+    authority
+    for authority, rank in _PROVENANCE_RANK.items()
+    if rank < _PROVENANCE_RANK[ClassificationAuthority.CONFIRMED_ALIAS]
+)
 
 
 def confidence_band(value: float) -> ClassificationConfidenceBand:
@@ -977,13 +1017,13 @@ class ClassificationTaxonomyService:
             )
             is None
         ):
-            raise ClassificationTaxonomyError("classification subcategory not found")
+            raise ClassificationNotFoundError("classification subcategory not found")
         self._locked_subcategory_projections(subcategory_id)
         self._lock_taxonomy_namespace()
         receipt_items, transactions = self._locked_subcategory_projections(subcategory_id)
         subcategories = self._locked_subcategories((subcategory_id,))
         if len(subcategories) != 1:
-            raise ClassificationTaxonomyError("classification subcategory not found")
+            raise ClassificationNotFoundError("classification subcategory not found")
         source = subcategories[0]
         if source.merged_into_id is not None:
             raise ClassificationCollisionError("an already-merged subcategory cannot be renamed")
@@ -1087,7 +1127,7 @@ class ClassificationTaxonomyService:
             )
         )
         if len(preview) != 2:
-            raise ClassificationTaxonomyError("classification subcategory not found")
+            raise ClassificationNotFoundError("classification subcategory not found")
         self._locked_subcategory_projections(source_subcategory_id)
         self._lock_taxonomy_namespace()
         receipt_items, transactions = self._locked_subcategory_projections(source_subcategory_id)
@@ -1096,7 +1136,7 @@ class ClassificationTaxonomyService:
         source = by_id.get(source_subcategory_id)
         target = by_id.get(target_subcategory_id)
         if source is None or target is None:
-            raise ClassificationTaxonomyError("classification subcategory not found")
+            raise ClassificationNotFoundError("classification subcategory not found")
         self._assert_subcategory_merge_chain_is_safe(source, target)
         if source.merged_into_id is not None or target.merged_into_id is not None:
             raise ClassificationCollisionError(
@@ -1175,7 +1215,7 @@ class ClassificationTaxonomyService:
             )
         )
         if preview is None:
-            raise ClassificationTaxonomyError("classification concept not found")
+            raise ClassificationNotFoundError("classification concept not found")
         self._locked_concept_projections(concept_id)
         # Classification writes lock their source projection before the workspace
         # taxonomy namespace. Match that order, then rescan while holding the
@@ -1184,7 +1224,7 @@ class ClassificationTaxonomyService:
         receipt_items, transactions = self._locked_concept_projections(concept_id)
         concepts = self._locked_concepts((concept_id,))
         if len(concepts) != 1:
-            raise ClassificationTaxonomyError("classification concept not found")
+            raise ClassificationNotFoundError("classification concept not found")
         concept = concepts[0]
         if concept.merged_into_id is not None:
             raise ClassificationCollisionError("an already-merged concept cannot be renamed")
@@ -1297,7 +1337,7 @@ class ClassificationTaxonomyService:
             )
         )
         if len(preview) != 2:
-            raise ClassificationTaxonomyError("classification concept not found")
+            raise ClassificationNotFoundError("classification concept not found")
         self._locked_concept_projections(source_concept_id)
         self._lock_taxonomy_namespace()
         receipt_items, transactions = self._locked_concept_projections(source_concept_id)
@@ -1306,7 +1346,7 @@ class ClassificationTaxonomyService:
         source = by_id.get(source_concept_id)
         target = by_id.get(target_concept_id)
         if source is None or target is None:
-            raise ClassificationTaxonomyError("classification concept not found")
+            raise ClassificationNotFoundError("classification concept not found")
         self._assert_concept_merge_chain_is_safe(source, target)
         if source.merged_into_id is not None or target.merged_into_id is not None:
             raise ClassificationCollisionError("already-merged concepts cannot be merged again")
@@ -1377,7 +1417,6 @@ class ClassificationTaxonomyService:
                             "receipt_items_updated": len(receipt_items),
                             "transactions_updated": len(transactions),
                             "household_items_retargeted": len(linked_household_items),
-                            "household_items_merged": False,
                             "household_history_changed": False,
                         },
                     )
@@ -1594,7 +1633,11 @@ class ClassificationTaxonomyService:
                 str(subcategory.id if subcategory is not None else 0),
             )
         )
-        suffix = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:16]
+        # Non-cryptographic: this only disambiguates a display name, it is not
+        # a security boundary. A collision degrades to a dimension-mismatch
+        # error on the (astronomically rare) case of two different dimension
+        # sets sharing a checksum, never to silently wrong data.
+        suffix = format(zlib.crc32(identity.encode("utf-8")), "08x")
         dimensioned_name = f"{normalized[:237]}--{suffix}"
         existing = self._concept(dimensioned_name)
         if existing is not None:
@@ -1741,11 +1784,7 @@ class ClassificationTaxonomyService:
         )
         if existing is not None:
             if existing.concept_id == concept.id:
-                source = ClassificationAuthority(source)
-                existing.confidence = max(existing.confidence, confidence)
-                existing_authority = ClassificationAuthority(existing.source)
-                if _PROVENANCE_RANK[source] > _PROVENANCE_RANK[existing_authority]:
-                    existing.source = source.value
+                self._upgrade_alias(existing, confidence=confidence, source=source)
                 return existing
             if not replace_collision:
                 raise ClassificationCollisionError(
@@ -1778,12 +1817,23 @@ class ClassificationTaxonomyService:
             )
             if existing is None or existing.concept_id != concept.id:
                 raise ClassificationCollisionError("concept alias creation conflicted") from None
-            incoming_authority = ClassificationAuthority(source)
-            existing_authority = ClassificationAuthority(existing.source)
-            existing.confidence = max(existing.confidence, confidence)
-            if _PROVENANCE_RANK[incoming_authority] > _PROVENANCE_RANK[existing_authority]:
-                existing.source = incoming_authority.value
+            self._upgrade_alias(existing, confidence=confidence, source=source)
             return existing
+
+    @staticmethod
+    def _upgrade_alias(
+        existing: ClassificationConceptAlias,
+        *,
+        confidence: float,
+        source: ClassificationAuthority,
+    ) -> None:
+        """Progressive trust: raise confidence/authority, never lower them."""
+
+        existing.confidence = max(existing.confidence, confidence)
+        incoming_authority = ClassificationAuthority(source)
+        existing_authority = ClassificationAuthority(existing.source)
+        if _PROVENANCE_RANK[incoming_authority] > _PROVENANCE_RANK[existing_authority]:
+            existing.source = incoming_authority.value
 
     def void_alias(
         self,
@@ -1792,13 +1842,7 @@ class ClassificationTaxonomyService:
         *,
         merchant: str | None,
         alias_id: int | None = None,
-        allowed_sources: Iterable[ClassificationAuthority] = (
-            ClassificationAuthority.FALLBACK,
-            ClassificationAuthority.MODEL_EVIDENCE,
-            ClassificationAuthority.PROVIDER_EVIDENCE,
-            ClassificationAuthority.RECEIPT_EVIDENCE,
-            ClassificationAuthority.DETERMINISTIC_EXACT,
-        ),
+        allowed_sources: Iterable[ClassificationAuthority] = _VOIDABLE_BY_AUTONOMOUS_CLEANUP,
         commit: bool = False,
     ) -> bool:
         """Void only an exact tenant/concept alias with an explicitly safe authority."""
@@ -1978,19 +2022,25 @@ class ClassificationTaxonomyService:
                 ClassificationAuthority.PROVIDER_EVIDENCE,
                 ClassificationAuthority.FALLBACK,
             }
-            and "receipt_evidence_recomputed" in decision.provenance_codes
+            and RECEIPT_EVIDENCE_RECOMPUTED_PROVENANCE in decision.provenance_codes
         )
         if (
             not settings.autonomous_enabled
             and decision.authority is not ClassificationAuthority.USER_CORRECTION
             and not receipt_evidence_cleanup
         ):
-            return ClassificationApplication(False, "autonomy_disabled", decision)
+            return ClassificationApplication(
+                False, ClassificationApplicationReason.AUTONOMY_DISABLED, decision
+            )
         if (
             _PROVENANCE_RANK[current_authority] > _PROVENANCE_RANK[decision.authority]
             and not receipt_evidence_cleanup
         ):
-            return ClassificationApplication(False, "higher_authority_decision_preserved", decision)
+            return ClassificationApplication(
+                False,
+                ClassificationApplicationReason.HIGHER_AUTHORITY_DECISION_PRESERVED,
+                decision,
+            )
         latest_record = self.db.scalar(
             select(ClassificationDecisionRecord)
             .where(
@@ -2052,7 +2102,7 @@ class ClassificationTaxonomyService:
         ):
             return ClassificationApplication(
                 False,
-                "already_applied",
+                ClassificationApplicationReason.ALREADY_APPLIED,
                 decision,
                 subcategory_id=latest_record.subcategory_id,
                 concept_id=latest_record.concept_id,
@@ -2265,7 +2315,7 @@ class ClassificationTaxonomyService:
             self.db.flush()
         return ClassificationApplication(
             True,
-            "applied",
+            ClassificationApplicationReason.APPLIED,
             decision,
             subcategory_id=subcategory.id if subcategory else None,
             concept_id=concept.id if concept else None,
@@ -2336,39 +2386,35 @@ class ClassificationTaxonomyService:
                 .execution_options(populate_existing=True)
             )
         if target is None:
-            raise ClassificationTaxonomyError("classification target not found")
+            raise ClassificationNotFoundError("classification target not found")
         return target
 
-    def _locked_concepts(self, concept_ids: Iterable[int]) -> list[ClassificationConcept]:
-        ordered_ids = sorted(set(concept_ids))
+    def _locked_by_ids(
+        self,
+        model: type[ClassificationConcept] | type[ClassificationSubcategory],
+        ids: Iterable[int],
+    ) -> list[ClassificationConcept] | list[ClassificationSubcategory]:
+        ordered_ids = sorted(set(ids))
         return list(
             self.db.scalars(
-                select(ClassificationConcept)
+                select(model)
                 .where(
-                    ClassificationConcept.workspace_id == self.workspace_id,
-                    ClassificationConcept.id.in_(ordered_ids),
+                    model.workspace_id == self.workspace_id,
+                    model.id.in_(ordered_ids),
                 )
-                .order_by(ClassificationConcept.id)
-                .with_for_update(of=ClassificationConcept)
+                .order_by(model.id)
+                .with_for_update(of=model)
             )
         )
+
+    def _locked_concepts(self, concept_ids: Iterable[int]) -> list[ClassificationConcept]:
+        return self._locked_by_ids(ClassificationConcept, concept_ids)
 
     def _locked_subcategories(
         self,
         subcategory_ids: Iterable[int],
     ) -> list[ClassificationSubcategory]:
-        ordered_ids = sorted(set(subcategory_ids))
-        return list(
-            self.db.scalars(
-                select(ClassificationSubcategory)
-                .where(
-                    ClassificationSubcategory.workspace_id == self.workspace_id,
-                    ClassificationSubcategory.id.in_(ordered_ids),
-                )
-                .order_by(ClassificationSubcategory.id)
-                .with_for_update(of=ClassificationSubcategory)
-            )
-        )
+        return self._locked_by_ids(ClassificationSubcategory, subcategory_ids)
 
     def _locked_subcategory_concepts(
         self,
@@ -2412,9 +2458,13 @@ class ClassificationTaxonomyService:
             )
         )
 
-    def _locked_concept_projections(
+    def _locked_projections(
         self,
-        concept_id: int,
+        *,
+        transaction_column,
+        receipt_item_column,
+        value: int,
+        noun: str,
     ) -> tuple[list[PurchaseReceiptItem], list[ExpenseTransaction]]:
         # Receipt correction acquires a linked transaction before its receipt line.
         # Taxonomy-wide mutations must use the same transaction -> line order.
@@ -2423,7 +2473,7 @@ class ClassificationTaxonomyService:
                 select(ExpenseTransaction)
                 .where(
                     ExpenseTransaction.workspace_id == self.workspace_id,
-                    ExpenseTransaction.classification_concept_id == concept_id,
+                    transaction_column == value,
                 )
                 .order_by(ExpenseTransaction.id)
                 .limit(MAX_CONCEPT_MUTATION_PROJECTIONS + 1)
@@ -2437,7 +2487,7 @@ class ClassificationTaxonomyService:
                 .join(PurchaseReceipt, PurchaseReceipt.id == PurchaseReceiptItem.receipt_id)
                 .where(
                     PurchaseReceipt.workspace_id == self.workspace_id,
-                    PurchaseReceiptItem.classification_concept_id == concept_id,
+                    receipt_item_column == value,
                 )
                 .order_by(PurchaseReceiptItem.id)
                 .limit(max(0, remaining) + 1)
@@ -2446,45 +2496,31 @@ class ClassificationTaxonomyService:
         )
         if len(receipt_items) + len(transactions) > MAX_CONCEPT_MUTATION_PROJECTIONS:
             raise ClassificationTaxonomyError(
-                "concept has too many current classifications for an online mutation"
+                f"{noun} has too many current classifications for an online mutation"
             )
         return receipt_items, transactions
+
+    def _locked_concept_projections(
+        self,
+        concept_id: int,
+    ) -> tuple[list[PurchaseReceiptItem], list[ExpenseTransaction]]:
+        return self._locked_projections(
+            transaction_column=ExpenseTransaction.classification_concept_id,
+            receipt_item_column=PurchaseReceiptItem.classification_concept_id,
+            value=concept_id,
+            noun="concept",
+        )
 
     def _locked_subcategory_projections(
         self,
         subcategory_id: int,
     ) -> tuple[list[PurchaseReceiptItem], list[ExpenseTransaction]]:
-        transactions = list(
-            self.db.scalars(
-                select(ExpenseTransaction)
-                .where(
-                    ExpenseTransaction.workspace_id == self.workspace_id,
-                    ExpenseTransaction.classification_subcategory_id == subcategory_id,
-                )
-                .order_by(ExpenseTransaction.id)
-                .limit(MAX_CONCEPT_MUTATION_PROJECTIONS + 1)
-                .with_for_update(of=ExpenseTransaction)
-            )
+        return self._locked_projections(
+            transaction_column=ExpenseTransaction.classification_subcategory_id,
+            receipt_item_column=PurchaseReceiptItem.classification_subcategory_id,
+            value=subcategory_id,
+            noun="subcategory",
         )
-        remaining = MAX_CONCEPT_MUTATION_PROJECTIONS - len(transactions)
-        receipt_items = list(
-            self.db.scalars(
-                select(PurchaseReceiptItem)
-                .join(PurchaseReceipt, PurchaseReceipt.id == PurchaseReceiptItem.receipt_id)
-                .where(
-                    PurchaseReceipt.workspace_id == self.workspace_id,
-                    PurchaseReceiptItem.classification_subcategory_id == subcategory_id,
-                )
-                .order_by(PurchaseReceiptItem.id)
-                .limit(max(0, remaining) + 1)
-                .with_for_update(of=PurchaseReceiptItem)
-            )
-        )
-        if len(receipt_items) + len(transactions) > MAX_CONCEPT_MUTATION_PROJECTIONS:
-            raise ClassificationTaxonomyError(
-                "subcategory has too many current classifications for an online mutation"
-            )
-        return receipt_items, transactions
 
     def _append_subcategory_projection_corrections(
         self,
@@ -2763,51 +2799,47 @@ class ClassificationTaxonomyService:
         )
         return True
 
-    def _assert_concept_merge_chain_is_safe(
+    def _assert_merge_chain_is_safe(
         self,
-        source: ClassificationConcept,
-        target: ClassificationConcept,
+        model: type[ClassificationConcept] | type[ClassificationSubcategory],
+        source: ClassificationConcept | ClassificationSubcategory,
+        target: ClassificationConcept | ClassificationSubcategory,
+        *,
+        noun: str,
     ) -> None:
         for start in (source, target):
             value = start
             seen: set[int] = set()
             while value.merged_into_id is not None:
                 if value.id in seen or value.merged_into_id == value.id:
-                    raise ClassificationCollisionError("concept merge cycle detected")
+                    raise ClassificationCollisionError(f"{noun} merge cycle detected")
                 seen.add(value.id)
                 if start.id == target.id and value.merged_into_id == source.id:
-                    raise ClassificationCollisionError("concept merge would create a cycle")
+                    raise ClassificationCollisionError(f"{noun} merge would create a cycle")
                 value = self.db.scalar(
-                    select(ClassificationConcept).where(
-                        ClassificationConcept.workspace_id == self.workspace_id,
-                        ClassificationConcept.id == value.merged_into_id,
+                    select(model).where(
+                        model.workspace_id == self.workspace_id,
+                        model.id == value.merged_into_id,
                     )
                 )
                 if value is None:
-                    raise ClassificationCollisionError("concept merge target is unavailable")
+                    raise ClassificationCollisionError(f"{noun} merge target is unavailable")
+
+    def _assert_concept_merge_chain_is_safe(
+        self,
+        source: ClassificationConcept,
+        target: ClassificationConcept,
+    ) -> None:
+        self._assert_merge_chain_is_safe(ClassificationConcept, source, target, noun="concept")
 
     def _assert_subcategory_merge_chain_is_safe(
         self,
         source: ClassificationSubcategory,
         target: ClassificationSubcategory,
     ) -> None:
-        for start in (source, target):
-            value = start
-            seen: set[int] = set()
-            while value.merged_into_id is not None:
-                if value.id in seen or value.merged_into_id == value.id:
-                    raise ClassificationCollisionError("subcategory merge cycle detected")
-                seen.add(value.id)
-                if start.id == target.id and value.merged_into_id == source.id:
-                    raise ClassificationCollisionError("subcategory merge would create a cycle")
-                value = self.db.scalar(
-                    select(ClassificationSubcategory).where(
-                        ClassificationSubcategory.workspace_id == self.workspace_id,
-                        ClassificationSubcategory.id == value.merged_into_id,
-                    )
-                )
-                if value is None:
-                    raise ClassificationCollisionError("subcategory merge target is unavailable")
+        self._assert_merge_chain_is_safe(
+            ClassificationSubcategory, source, target, noun="subcategory"
+        )
 
     @staticmethod
     def _concept_dimension_key(concept: ClassificationConcept) -> tuple[str, int | None, str, str]:
@@ -2839,41 +2871,37 @@ class ClassificationTaxonomyService:
         )
         return self._resolved_concept(value)
 
-    def _resolved_subcategory(
-        self, value: ClassificationSubcategory | None
-    ) -> ClassificationSubcategory | None:
+    def _resolve_merge_chain(
+        self,
+        model: type[ClassificationConcept] | type[ClassificationSubcategory],
+        value: ClassificationConcept | ClassificationSubcategory | None,
+        *,
+        noun: str,
+    ) -> ClassificationConcept | ClassificationSubcategory | None:
         seen: set[int] = set()
         while value is not None and value.merged_into_id is not None:
             if value.id in seen or value.merged_into_id == value.id:
-                raise ClassificationCollisionError("subcategory merge cycle detected")
+                raise ClassificationCollisionError(f"{noun} merge cycle detected")
             seen.add(value.id)
             value = self.db.scalar(
-                select(ClassificationSubcategory).where(
-                    ClassificationSubcategory.workspace_id == self.workspace_id,
-                    ClassificationSubcategory.id == value.merged_into_id,
+                select(model).where(
+                    model.workspace_id == self.workspace_id,
+                    model.id == value.merged_into_id,
                 )
             )
             if value is None:
-                raise ClassificationCollisionError("subcategory merge target is unavailable")
+                raise ClassificationCollisionError(f"{noun} merge target is unavailable")
         return value
+
+    def _resolved_subcategory(
+        self, value: ClassificationSubcategory | None
+    ) -> ClassificationSubcategory | None:
+        return self._resolve_merge_chain(ClassificationSubcategory, value, noun="subcategory")
 
     def _resolved_concept(
         self, value: ClassificationConcept | None
     ) -> ClassificationConcept | None:
-        seen: set[int] = set()
-        while value is not None and value.merged_into_id is not None:
-            if value.id in seen or value.merged_into_id == value.id:
-                raise ClassificationCollisionError("concept merge cycle detected")
-            seen.add(value.id)
-            value = self.db.scalar(
-                select(ClassificationConcept).where(
-                    ClassificationConcept.workspace_id == self.workspace_id,
-                    ClassificationConcept.id == value.merged_into_id,
-                )
-            )
-            if value is None:
-                raise ClassificationCollisionError("concept merge target is unavailable")
-        return value
+        return self._resolve_merge_chain(ClassificationConcept, value, noun="concept")
 
     @staticmethod
     def _validate_concept_dimensions(
@@ -2936,16 +2964,7 @@ def _canonical_grocery_concept(value: str) -> str | None:
         return None
     if _AMBIGUOUS_GROCERY_CONCEPT_CONTEXT.search(normalized):
         return None
-    for pattern, concept in (
-        (r"\beggs?\b", "Eggs"),
-        (r"\bmilk\b", "Milk"),
-        (r"\bbread\b", "Bread"),
-        (r"\brice\b", "Rice"),
-        (r"\bvegetables?\b|\bproduce\b", "Vegetables"),
-        (r"\bchicken\b", "Chicken"),
-        (r"\bbeef\b", "Beef"),
-        (r"\bmeat\b", "Meat"),
-    ):
-        if re.search(pattern, normalized):
+    for pattern, concept in _GROCERY_CONCEPTS:
+        if re.search(rf"\b({pattern})\b", normalized):
             return concept
     return "Grocery item"

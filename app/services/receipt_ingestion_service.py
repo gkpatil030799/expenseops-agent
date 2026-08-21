@@ -30,7 +30,7 @@ from app.models import (
     WorkspaceMembership,
     utc_now,
 )
-from app.services.acquisition_service import AcquisitionService
+from app.services.acquisition_service import AcquisitionService, logical_purchase_key
 from app.services.autonomous_classification_service import AutonomousClassificationService
 from app.services.classification_taxonomy_service import (
     ClassificationTaxonomyError,
@@ -387,7 +387,7 @@ class ReceiptIngestionService:
                     package_size=line.package_size,
                     quantity_confidence=line.quantity_confidence,
                     merchant=receipt.merchant_normalized,
-                    logical_purchase_key=_logical_purchase_key(
+                    logical_purchase_key=logical_purchase_key(
                         receipt.workspace_id,
                         line.id,
                     ),
@@ -641,7 +641,7 @@ class ReceiptIngestionService:
                     package_size=line.package_size,
                     quantity_confidence=1.0,
                     merchant=receipt.merchant_normalized,
-                    logical_purchase_key=_logical_purchase_key(
+                    logical_purchase_key=logical_purchase_key(
                         receipt.workspace_id,
                         line.id,
                     ),
@@ -1120,12 +1120,6 @@ class ReceiptIngestionService:
             )
 
 
-def _logical_purchase_key(
-    workspace_id: int,
-    receipt_item_id: int,
-) -> str:
-    identity = f"receipt-item|{workspace_id}|{receipt_item_id}"
-    return hashlib.sha256(identity.encode("utf-8")).hexdigest()
 
 
 def _automatic_acquisition_safe(

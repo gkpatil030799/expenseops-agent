@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from collections.abc import Iterator
+from contextlib import contextmanager
 from typing import Annotated, NoReturn
 
 from fastapi import APIRouter, HTTPException, Path, Query
@@ -22,6 +24,7 @@ from app.services.classification_taxonomy_service import (
     MAX_CONCEPT_LIST_RESULTS,
     MAX_SUBCATEGORY_LIST_RESULTS,
     ClassificationCollisionError,
+    ClassificationNotFoundError,
     ClassificationTaxonomyError,
     ClassificationTaxonomyService,
 )
@@ -31,22 +34,24 @@ from app.services.managed_auth_service import record_audit
 router = APIRouter(prefix="/api/classification", tags=["classification"])
 
 
-class ClassificationSettingsUpdate(BaseModel):
+class _StrictModel(BaseModel):
+    """Shared strictness policy: every route payload/response rejects unknown fields."""
+
     model_config = ConfigDict(extra="forbid")
 
+
+class ClassificationSettingsUpdate(_StrictModel):
     autonomous_enabled: bool
 
 
-class ClassificationSettingsOut(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
+class ClassificationSettingsOut(_StrictModel):
     autonomous_enabled: bool
     global_rollout_enabled: bool
     effective_autonomous_enabled: bool
 
 
-class ClassificationCorrection(BaseModel):
-    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+class ClassificationCorrection(_StrictModel):
+    model_config = ConfigDict(str_strip_whitespace=True)
 
     spending_parent_category: SpendingParentCategory
     item_activity_type: ClassificationActivityType
@@ -55,52 +60,41 @@ class ClassificationCorrection(BaseModel):
     canonical_concept: str | None = Field(default=None, min_length=1, max_length=255)
 
 
-class ClassificationCorrectionOut(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
+class ClassificationCorrectionOut(_StrictModel):
     applied: bool
     reason: str
-    version: int | None
 
 
-class ClassificationConceptRename(BaseModel):
-    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+class ClassificationConceptRename(_StrictModel):
+    model_config = ConfigDict(str_strip_whitespace=True)
 
     name: str = Field(min_length=1, max_length=255)
 
 
-class ClassificationConceptMerge(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
+class ClassificationConceptMerge(_StrictModel):
     target_concept_id: int = Field(strict=True, ge=1)
 
 
-class ClassificationSubcategoryRename(BaseModel):
-    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+class ClassificationSubcategoryRename(_StrictModel):
+    model_config = ConfigDict(str_strip_whitespace=True)
 
     name: str = Field(min_length=1, max_length=128)
 
 
-class ClassificationSubcategoryMerge(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
+class ClassificationSubcategoryMerge(_StrictModel):
     target_subcategory_id: int = Field(strict=True, ge=1)
 
 
-class HouseholdItemMerge(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
+class HouseholdItemMerge(_StrictModel):
     target_household_item_id: int = Field(strict=True, ge=1)
 
 
-class HouseholdItemMergeUndo(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
+class HouseholdItemMergeUndo(_StrictModel):
     merge_event_id: int = Field(strict=True, ge=1)
 
 
-class ClassificationConceptOut(BaseModel):
-    model_config = ConfigDict(extra="forbid", use_enum_values=True)
+class ClassificationConceptOut(_StrictModel):
+    model_config = ConfigDict(use_enum_values=True)
 
     id: int = Field(ge=1)
     name: str = Field(min_length=1, max_length=255)
@@ -110,19 +104,14 @@ class ClassificationConceptOut(BaseModel):
     item_activity_type: ClassificationActivityType
     replenishment_eligibility: ReplenishmentEligibility
     linked_household_item_count: int = Field(ge=0)
-    can_merge_as_source: bool
 
 
-class ClassificationConceptListOut(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
+class ClassificationConceptListOut(_StrictModel):
     concepts: list[ClassificationConceptOut]
     has_more: bool
 
 
-class ClassificationConceptMutationOut(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
+class ClassificationConceptMutationOut(_StrictModel):
     applied: bool
     source_concept_id: int = Field(ge=1)
     target_concept_id: int = Field(ge=1)
@@ -130,11 +119,10 @@ class ClassificationConceptMutationOut(BaseModel):
     aliases_moved: int = Field(ge=0)
     receipt_items_updated: int = Field(ge=0)
     transactions_updated: int = Field(ge=0)
-    household_items_merged: bool = False
 
 
-class ClassificationSubcategoryOut(BaseModel):
-    model_config = ConfigDict(extra="forbid", use_enum_values=True)
+class ClassificationSubcategoryOut(_StrictModel):
+    model_config = ConfigDict(use_enum_values=True)
 
     id: int = Field(ge=1)
     name: str = Field(min_length=1, max_length=128)
@@ -142,16 +130,12 @@ class ClassificationSubcategoryOut(BaseModel):
     concept_count: int = Field(ge=0)
 
 
-class ClassificationSubcategoryListOut(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
+class ClassificationSubcategoryListOut(_StrictModel):
     subcategories: list[ClassificationSubcategoryOut]
     has_more: bool
 
 
-class ClassificationSubcategoryMutationOut(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
+class ClassificationSubcategoryMutationOut(_StrictModel):
     applied: bool
     source_subcategory_id: int = Field(ge=1)
     target_subcategory_id: int = Field(ge=1)
@@ -161,9 +145,7 @@ class ClassificationSubcategoryMutationOut(BaseModel):
     transactions_updated: int = Field(ge=0)
 
 
-class HouseholdItemMergeOut(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
+class HouseholdItemMergeOut(_StrictModel):
     applied: bool
     source_household_item_id: int = Field(ge=1)
     target_household_item_id: int = Field(ge=1)
@@ -188,16 +170,7 @@ def _settings_out(*, autonomous_enabled: bool) -> ClassificationSettingsOut:
 
 
 def _concept_mutation_out(value) -> ClassificationConceptMutationOut:
-    return ClassificationConceptMutationOut(
-        applied=value.applied,
-        source_concept_id=value.source_concept_id,
-        target_concept_id=value.target_concept_id,
-        target_name=value.target_name,
-        aliases_moved=value.aliases_moved,
-        receipt_items_updated=value.receipt_items_updated,
-        transactions_updated=value.transactions_updated,
-        household_items_merged=False,
-    )
+    return ClassificationConceptMutationOut.model_validate(value, from_attributes=True)
 
 
 def _subcategory_mutation_out(value) -> ClassificationSubcategoryMutationOut:
@@ -209,13 +182,21 @@ def _household_item_mutation_out(value) -> HouseholdItemMergeOut:
 
 
 def _raise_taxonomy_http_error(exc: ClassificationTaxonomyError) -> NoReturn:
-    if "not found" in str(exc).casefold():
+    if isinstance(exc, ClassificationNotFoundError):
         status_code = 404
     elif isinstance(exc, ClassificationCollisionError):
         status_code = 409
     else:
         status_code = 400
     raise HTTPException(status_code=status_code, detail=str(exc)) from exc
+
+
+@contextmanager
+def _taxonomy_errors_as_http() -> Iterator[None]:
+    try:
+        yield
+    except ClassificationTaxonomyError as exc:
+        _raise_taxonomy_http_error(exc)
 
 
 @router.get("/settings", response_model=ClassificationSettingsOut)
@@ -275,7 +256,6 @@ def list_classification_concepts(
                 item_activity_type=value.item_activity_type,
                 replenishment_eligibility=value.replenishment_eligibility,
                 linked_household_item_count=value.linked_household_item_count,
-                can_merge_as_source=True,
             )
             for value in concepts
         ],
@@ -293,13 +273,11 @@ def rename_classification_concept(
     db: DbSession,
     _owner: CurrentWorkspaceOwner,
 ) -> ClassificationConceptMutationOut:
-    try:
+    with _taxonomy_errors_as_http():
         result = ClassificationTaxonomyService(db).rename_concept(
             concept_id,
             name=payload.name,
         )
-    except ClassificationTaxonomyError as exc:
-        _raise_taxonomy_http_error(exc)
     return _concept_mutation_out(result)
 
 
@@ -313,13 +291,11 @@ def merge_classification_concepts(
     db: DbSession,
     _owner: CurrentWorkspaceOwner,
 ) -> ClassificationConceptMutationOut:
-    try:
+    with _taxonomy_errors_as_http():
         result = ClassificationTaxonomyService(db).merge_concepts(
             source_concept_id,
             target_concept_id=payload.target_concept_id,
         )
-    except ClassificationTaxonomyError as exc:
-        _raise_taxonomy_http_error(exc)
     return _concept_mutation_out(result)
 
 
@@ -349,13 +325,11 @@ def rename_classification_subcategory(
     db: DbSession,
     _owner: CurrentWorkspaceOwner,
 ) -> ClassificationSubcategoryMutationOut:
-    try:
+    with _taxonomy_errors_as_http():
         result = ClassificationTaxonomyService(db).rename_subcategory(
             subcategory_id,
             name=payload.name,
         )
-    except ClassificationTaxonomyError as exc:
-        _raise_taxonomy_http_error(exc)
     return _subcategory_mutation_out(result)
 
 
@@ -369,13 +343,11 @@ def merge_classification_subcategories(
     db: DbSession,
     _owner: CurrentWorkspaceOwner,
 ) -> ClassificationSubcategoryMutationOut:
-    try:
+    with _taxonomy_errors_as_http():
         result = ClassificationTaxonomyService(db).merge_subcategories(
             source_subcategory_id,
             target_subcategory_id=payload.target_subcategory_id,
         )
-    except ClassificationTaxonomyError as exc:
-        _raise_taxonomy_http_error(exc)
     return _subcategory_mutation_out(result)
 
 
@@ -389,13 +361,11 @@ def merge_household_items(
     db: DbSession,
     _owner: CurrentWorkspaceOwner,
 ) -> HouseholdItemMergeOut:
-    try:
+    with _taxonomy_errors_as_http():
         result = HouseholdItemMergeService(db).merge(
             source_item_id,
             target_item_id=payload.target_household_item_id,
         )
-    except ClassificationTaxonomyError as exc:
-        _raise_taxonomy_http_error(exc)
     return _household_item_mutation_out(result)
 
 
@@ -409,13 +379,11 @@ def undo_household_item_merge(
     db: DbSession,
     _owner: CurrentWorkspaceOwner,
 ) -> HouseholdItemMergeOut:
-    try:
+    with _taxonomy_errors_as_http():
         result = HouseholdItemMergeService(db).undo(
             source_item_id,
             merge_event_id=payload.merge_event_id,
         )
-    except ClassificationTaxonomyError as exc:
-        _raise_taxonomy_http_error(exc)
     return _household_item_mutation_out(result)
 
 
@@ -430,17 +398,14 @@ def correct_receipt_line_classification(
     _user: CurrentUser,
     _workspace: CurrentWorkspace,
 ) -> ClassificationCorrectionOut:
-    try:
+    with _taxonomy_errors_as_http():
         application = AutonomousClassificationService(db).correct_receipt_line(
             line_id,
             **payload.model_dump(),
         )
-    except ClassificationTaxonomyError as exc:
-        _raise_taxonomy_http_error(exc)
     return ClassificationCorrectionOut(
         applied=application.applied,
         reason=application.reason,
-        version=application.version,
     )
 
 
@@ -455,15 +420,12 @@ def correct_transaction_classification(
     _user: CurrentUser,
     _workspace: CurrentWorkspace,
 ) -> ClassificationCorrectionOut:
-    try:
+    with _taxonomy_errors_as_http():
         application = AutonomousClassificationService(db).correct_transaction(
             transaction_id,
             **payload.model_dump(),
         )
-    except ClassificationTaxonomyError as exc:
-        _raise_taxonomy_http_error(exc)
     return ClassificationCorrectionOut(
         applied=application.applied,
         reason=application.reason,
-        version=application.version,
     )
