@@ -56,6 +56,8 @@ import { HouseholdOpsPage } from "@/components/HouseholdOpsPage";
 import { PromotionsPage } from "@/components/PromotionsPage";
 import { AccountSettingsPage } from "@/components/AccountSettingsPage";
 import { InsightsDashboard } from "@/components/InsightsDashboard";
+import { SplitQuickPicks } from "@/components/SplitQuickPicks";
+import { useSplitSuggestions, type SplitSuggestions } from "@/useSplitSuggestions";
 import {
   analyticsForTransactions,
   filterTransactions,
@@ -206,6 +208,11 @@ function DashboardApp() {
   const [onboardingNotice, setOnboardingNotice] = useState<{ tone: "success" | "error"; text: string; action?: "switch-account" } | null>(null);
   const [accountContext, setAccountContext] = useState<AccountContext | null>(null);
   const [authResolved, setAuthResolved] = useState(false);
+  const splitSuggestions = useSplitSuggestions(
+    accountContext !== null,
+    allTransactions,
+    currentSplitwiseUser?.id ?? null,
+  );
   const [activeWorkspace, setActiveWorkspace] = useState<WorkspaceView>(() => {
     const value = new URLSearchParams(window.location.search).get("workspace");
     return value === "household" || value === "promotions" || value === "settings" || value === "agent" ? value : "expenses";
@@ -1238,6 +1245,7 @@ function DashboardApp() {
                   <TransactionCard
                     key={transaction.id}
                     transaction={transaction}
+                    splitSuggestions={splitSuggestions}
                     recommendation={reviewRecommendations.get(transaction.id) || null}
                     busy={transactionActionById[transaction.id] || null}
                     actionNotice={transactionNoticeById[transaction.id] || null}
@@ -2559,6 +2567,7 @@ function StatusPill({
 
 function TransactionCard({
   transaction,
+  splitSuggestions,
   recommendation,
   busy,
   actionNotice,
@@ -2600,6 +2609,7 @@ function TransactionCard({
   onPreviewCustom,
 }: {
   transaction: Transaction;
+  splitSuggestions: SplitSuggestions;
   recommendation: ReviewRecommendation | null;
   busy: string | null;
   actionNotice: ActionNotice | null;
@@ -2814,6 +2824,7 @@ function TransactionCard({
             {splitMode === "people" ? (
               <FriendPicker
                 query={query}
+                suggestions={splitSuggestions}
                 results={friendResults}
                 selectedFriends={selectedFriends}
                 disabled={disabled}
@@ -2825,6 +2836,7 @@ function TransactionCard({
             ) : (
               <GroupPicker
                 query={groupQuery}
+                suggestions={splitSuggestions}
                 groups={groupResults}
                 selectedGroup={selectedGroup}
                 members={groupMembers}
@@ -3094,6 +3106,7 @@ function buildCustomSplitPreview(
 
 function FriendPicker({
   query,
+  suggestions,
   results,
   selectedFriends,
   disabled,
@@ -3103,6 +3116,7 @@ function FriendPicker({
   onRemoveFriend,
 }: {
   query: string;
+  suggestions: SplitSuggestions;
   results: Friend[];
   selectedFriends: Friend[];
   disabled: boolean;
@@ -3113,6 +3127,17 @@ function FriendPicker({
 }) {
   return (
     <div className="space-y-2.5">
+      <SplitQuickPicks
+        kind="friends"
+        suggestions={suggestions.friends}
+        loading={suggestions.loading}
+        error={suggestions.error}
+        disabled={disabled}
+        selectedIds={selectedFriends.map((friend) => friend.id)}
+        name={(friend) => friend.display_name}
+        onSelect={onSelectFriend}
+        onRetry={suggestions.retry}
+      />
       <div className="flex flex-col gap-2 sm:flex-row">
         <Input
           className="h-11 sm:h-9"
@@ -3150,6 +3175,7 @@ function FriendPicker({
             <button
               key={friend.id}
               type="button"
+              disabled={disabled || selectedFriends.some((selected) => selected.id === friend.id)}
               className="rounded-md border border-slate-200/80 bg-white px-3 py-2 text-left text-sm shadow-sm shadow-slate-950/[0.02] transition hover:border-indigo-200 hover:bg-indigo-50/60 hover:shadow"
               onClick={() => onSelectFriend(friend)}
             >
@@ -3182,6 +3208,7 @@ function ParticipantChip({ label, onRemove }: { label: string; onRemove: () => v
 
 function GroupPicker({
   query,
+  suggestions,
   groups,
   selectedGroup,
   members,
@@ -3196,6 +3223,7 @@ function GroupPicker({
   onRemoveMember,
 }: {
   query: string;
+  suggestions: SplitSuggestions;
   groups: Group[];
   selectedGroup: Group | null;
   members: Friend[];
@@ -3213,6 +3241,19 @@ function GroupPicker({
 
   return (
     <div className="space-y-2.5">
+      {!selectedGroup ? (
+        <SplitQuickPicks
+          kind="groups"
+          suggestions={suggestions.groups}
+          loading={suggestions.loading}
+          error={suggestions.error}
+          disabled={disabled}
+          selectedIds={[]}
+          name={(group) => group.name}
+          onSelect={onSelectGroup}
+          onRetry={suggestions.retry}
+        />
+      ) : null}
       <div className="flex flex-col gap-2 sm:flex-row">
         <Input
           className="h-11 sm:h-9"
@@ -3249,6 +3290,7 @@ function GroupPicker({
             <button
               key={group.id}
               type="button"
+              disabled={disabled}
               className="rounded-md border border-slate-200/80 bg-white px-3 py-2 text-left text-sm shadow-sm shadow-slate-950/[0.02] transition hover:border-indigo-200 hover:bg-indigo-50/60 hover:shadow"
               onClick={() => onSelectGroup(group)}
             >
