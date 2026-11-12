@@ -3385,6 +3385,7 @@ def test_day6_tool_timeout_is_one_partial_outcome_and_later_domain_can_complete(
     monkeypatch,
 ):
     original_search = read_tools_module._search_transactions
+    normal_tool_seconds = runtime_module.MAX_TOOL_SECONDS
     captured: dict[str, ReadToolExecutor] = {}
 
     def slow_search(context, values):
@@ -3403,6 +3404,9 @@ def test_day6_tool_timeout_is_one_partial_outcome_and_later_domain_can_complete(
             await executor.invoke("search_transactions", {"merchant": "Aldi", "limit": 5})
         assert raised.value.code == "tool_timeout"
         assert raised.value.partial_recoverable is True
+        # Only the deliberately slow search should time out. Give the healthy
+        # follow-up its normal budget even on a busy CI runner.
+        monkeypatch.setattr(runtime_module, "MAX_TOOL_SECONDS", normal_tool_seconds)
         await executor.invoke(
             "get_spending_insights",
             {
