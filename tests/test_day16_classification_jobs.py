@@ -299,6 +299,41 @@ def test_finalizer_is_bounded_finalizes_due_and_preserves_user_correction(
     assert corrected.classification_authority == ClassificationAuthority.USER_CORRECTION.value
 
 
+def test_finalizer_does_not_double_count_a_row_due_for_two_reasons_at_once(
+    classification_db,
+) -> None:
+    """A row that is simultaneously grace-period-due (auto_finalize_at) and
+    retry-due (classification_retry_at) must only consume one slot of the
+    batch -- otherwise it silently crowds out a different, genuinely due row
+    from the same bounded run.
+    """
+
+    db, _factory, values = classification_db
+    both_reasons = _transaction(db, values, "both-reasons")
+    single_reason = _transaction(db, values, "single-reason")
+    _make_due_provisional(db, both_reasons)
+    _make_due_provisional(db, single_reason)
+    both_reasons.classification_retry_at = utc_now() - timedelta(minutes=5)
+    single_reason.classification_auto_finalize_at = utc_now() - timedelta(seconds=30)
+    db.commit()
+
+    result = ClassificationFinalizerService(db, _settings()).run(
+        batch_size=2,
+        use_model=False,
+    )
+
+    db.refresh(both_reasons)
+    db.refresh(single_reason)
+    # Before the fix, both_reasons's auto_finalize-due and retry-due entries
+    # each consumed a slot of the batch_size=2 limit before de-duplication,
+    # so single_reason was silently crowded out of this run even though
+    # there was room for two genuinely distinct due rows.
+    assert result.due == 2
+    assert result.transactions_finalized + result.transactions_recovered == 2
+    assert both_reasons.classification_retry_at is None
+    assert single_reason.classification_decision_state == ClassificationDecisionState.FINAL.value
+
+
 def test_finalizer_claims_and_finalizes_due_receipt_lines(classification_db) -> None:
     db, _factory, values = classification_db
     receipt = PurchaseReceipt(

@@ -198,6 +198,37 @@ def test_model_cannot_create_merchant_named_taxonomy_but_generic_concept_is_allo
     assert values[0].decision.canonical_concept == "Shallots"
 
 
+def test_near_typo_merchant_name_is_no_longer_rejected_as_entity_specific():
+    """A subcategory name that only differs from the merchant name by a
+    trailing typo (previously caught by a fuzzy-match ratio threshold) is no
+    longer treated as entity-specific -- only an exact or token-subset match
+    against the merchant/candidate name is rejected now.
+    """
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return _response(
+            [
+                _row(
+                    spending_parent_category="lifestyle_shopping",
+                    subcategory_name="Whole Foods Markets",
+                    item_activity_type="one_time_purchase",
+                    replenishment_eligibility="not_replenishable",
+                    canonical_concept=None,
+                    cadence_min_days=None,
+                    cadence_max_days=None,
+                )
+            ],
+            request,
+        )
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        values = ClassificationModelService(_settings(), client).classify(
+            [_candidate(name="Groceries", merchant="Whole Foods Market")]
+        )
+
+    assert values[0].decision.subcategory_name == "Whole Foods Markets"
+
+
 @pytest.mark.parametrize(
     "row",
     [

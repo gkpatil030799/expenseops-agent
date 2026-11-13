@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import logging
 from dataclasses import dataclass, replace
 from datetime import UTC, timedelta
@@ -31,12 +30,15 @@ from app.models import (
     TransactionStatus,
     utc_now,
 )
-from app.services.acquisition_service import AcquisitionService
+from app.services.acquisition_service import AcquisitionService, logical_purchase_key
 from app.services.classification_model_service import ClassificationModelSuggestion
 from app.services.classification_taxonomy_service import (
     HIGH_CONFIDENCE_THRESHOLD,
+    RECEIPT_EVIDENCE_RECOMPUTED_PROVENANCE,
     ClassificationApplication,
+    ClassificationApplicationReason,
     ClassificationDecision,
+    ClassificationNotFoundError,
     ClassificationSourceType,
     ClassificationTaxonomyError,
     ClassificationTaxonomyService,
@@ -326,7 +328,10 @@ class AutonomousClassificationService:
         if workspace_settings is None:
             summary.skipped = 1
             return summary
-        if getattr(target, "classification_decision_state", None) != "provisional":
+        if (
+            getattr(target, "classification_decision_state", None)
+            != ClassificationDecisionState.PROVISIONAL.value
+        ):
             summary.skipped = 1
             return summary
         if getattr(target, "classification_auto_finalize_at", None) is None:
@@ -409,7 +414,7 @@ class AutonomousClassificationService:
             )
         ).one_or_none()
         if preview is None:
-            raise ClassificationTaxonomyError("classification target not found")
+            raise ClassificationNotFoundError("classification target not found")
         linked_transaction_id = preview[1]
         if linked_transaction_id is not None:
             linked_transaction = self.db.scalar(
@@ -437,7 +442,7 @@ class AutonomousClassificationService:
             .with_for_update()
         )
         if line is None:
-            raise ClassificationTaxonomyError("classification target not found")
+            raise ClassificationNotFoundError("classification target not found")
         receipt = line.receipt
         if receipt.transaction_id != linked_transaction_id:
             raise ClassificationTaxonomyError(
@@ -573,7 +578,7 @@ class AutonomousClassificationService:
             .with_for_update()
         )
         if transaction is None:
-            raise ClassificationTaxonomyError("classification target not found")
+            raise ClassificationNotFoundError("classification target not found")
         merchant = transaction.merchant_name or transaction.name
         decision = ClassificationDecision(
             source_type=ClassificationSourceType.TRANSACTION,
@@ -623,7 +628,7 @@ class AutonomousClassificationService:
             decision = replace(
                 decision,
                 provenance_codes=decision.provenance_codes
-                + ("receipt_evidence_recomputed",),
+                + (RECEIPT_EVIDENCE_RECOMPUTED_PROVENANCE,),
             )
         application = self.taxonomy.apply_decision(
             decision,
@@ -1063,7 +1068,7 @@ class AutonomousClassificationService:
             ),
             canonical_concept=concept.name,
             confidence=max(
-                0.85,
+                HIGH_CONFIDENCE_THRESHOLD,
                 min(
                     float(concept.confidence),
                     float(alias_confidence)
@@ -1194,7 +1199,7 @@ class AutonomousClassificationService:
             package_size=line.package_size,
             quantity_confidence=line.quantity_confidence,
             merchant=receipt.merchant_normalized,
-            logical_purchase_key=_logical_purchase_key(
+            logical_purchase_key=logical_purchase_key(
                 receipt.workspace_id,
                 line.id,
             ),
@@ -1281,7 +1286,7 @@ class AutonomousClassificationService:
             package_size=line.package_size,
             quantity_confidence=1.0,
             merchant=receipt.merchant_normalized,
-            logical_purchase_key=_logical_purchase_key(
+            logical_purchase_key=logical_purchase_key(
                 receipt.workspace_id,
                 line.id,
             ),
@@ -1350,7 +1355,7 @@ class AutonomousClassificationService:
             return None
         return ClassificationApplication(
             False,
-            "repair_receipt_learning",
+            ClassificationApplicationReason.REPAIR_RECEIPT_LEARNING,
             self._projection_decision(line),
             subcategory_id=record.subcategory_id,
             concept_id=record.concept_id,
@@ -1625,14 +1630,6 @@ def _receipt_line_is_acquisition_safe(
         and line.line_total_cents is not None
         and line.line_total_cents > 0
     )
-
-
-def _logical_purchase_key(
-    workspace_id: int,
-    receipt_item_id: int,
-) -> str:
-    identity = f"receipt-item|{workspace_id}|{receipt_item_id}"
-    return hashlib.sha256(identity.encode("utf-8")).hexdigest()
 
 
 def _category_prior(item: HouseholdItem) -> _CadencePrior | None:

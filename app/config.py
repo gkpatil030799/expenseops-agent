@@ -136,6 +136,10 @@ class Settings(BaseSettings):
     autonomous_category_creation_enabled: bool = True
     autonomous_cadence_estimation_enabled: bool = True
     classification_model: str = "gpt-5.6-luna"
+    # None disables the reasoning-effort override entirely (use the provider's
+    # own default). Set alongside classification_model when tuning a specific
+    # model rather than pattern-matching its name in service code.
+    classification_model_reasoning_effort: str | None = "none"
     classification_batch_size: int = Field(default=25, ge=1, le=50)
     classification_finalizer_batch_size: int = Field(default=100, ge=1, le=500)
     classification_finalizer_poll_seconds: int = Field(default=300, ge=30, le=3600)

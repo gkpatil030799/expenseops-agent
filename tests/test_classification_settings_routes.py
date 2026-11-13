@@ -379,8 +379,6 @@ def test_owner_can_list_rename_and_merge_compatible_concepts_with_strict_contrac
             "Cafe beverage",
             "Coffee beverage",
         ]
-        assert all(concept.can_merge_as_source for concept in listed.concepts)
-
         renamed = rename_classification_concept(
             source.id,
             ClassificationConceptRename(name="Cafe drink"),
@@ -388,7 +386,6 @@ def test_owner_can_list_rename_and_merge_compatible_concepts_with_strict_contrac
             membership,
         )
         assert renamed.applied is True
-        assert renamed.household_items_merged is False
 
         merged = merge_classification_concepts(
             source.id,
@@ -400,7 +397,6 @@ def test_owner_can_list_rename_and_merge_compatible_concepts_with_strict_contrac
         assert merged.source_concept_id == source.id
         assert merged.target_concept_id == target.id
         assert merged.target_name == "Coffee beverage"
-        assert merged.household_items_merged is False
 
         with pytest.raises(HTTPException) as conflict:
             merge_classification_concepts(

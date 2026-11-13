@@ -203,7 +203,6 @@ async function installHouseholdActivity(
       item_activity_type: "coffee_beverage",
       replenishment_eligibility: "not_replenishable",
       linked_household_item_count: 0,
-      can_merge_as_source: true,
     },
     {
       id: 2,
@@ -214,7 +213,6 @@ async function installHouseholdActivity(
       item_activity_type: "coffee_beverage",
       replenishment_eligibility: "not_replenishable",
       linked_household_item_count: 0,
-      can_merge_as_source: true,
     },
     {
       id: 3,
@@ -225,7 +223,6 @@ async function installHouseholdActivity(
       item_activity_type: "household_consumable",
       replenishment_eligibility: "replenishable",
       linked_household_item_count: 1,
-      can_merge_as_source: false,
     },
   ];
   let subcategories = [
@@ -379,7 +376,6 @@ async function installHouseholdActivity(
         aliases_moved: 1,
         receipt_items_updated: 1,
         transactions_updated: 1,
-        household_items_merged: false,
       } });
     }
     const conceptMerge = url.pathname.match(/^\/api\/classification\/concepts\/(\d+)\/merge$/);
@@ -397,7 +393,6 @@ async function installHouseholdActivity(
         aliases_moved: 1,
         receipt_items_updated: 1,
         transactions_updated: 1,
-        household_items_merged: false,
       } });
     }
     if (
@@ -408,7 +403,7 @@ async function installHouseholdActivity(
       if (correctionError) {
         return route.fulfill({ status: 400, json: { detail: correctionError } });
       }
-      return route.fulfill({ json: { applied: true, reason: "applied", version: 2 } });
+      return route.fulfill({ json: { applied: true, reason: "applied" } });
     }
     const responses: Record<string, unknown> = {
       "/api/household/errands": [],

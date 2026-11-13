@@ -320,7 +320,6 @@ export type ClassificationConceptSummary = {
   item_activity_type: ClassificationActivityType;
   replenishment_eligibility: ReplenishmentEligibility;
   linked_household_item_count: number;
-  can_merge_as_source: boolean;
 };
 
 export type ClassificationConceptList = {
@@ -336,7 +335,6 @@ export type ClassificationConceptMutation = {
   aliases_moved: number;
   receipt_items_updated: number;
   transactions_updated: number;
-  household_items_merged: false;
 };
 
 export type ClassificationSubcategorySummary = {

@@ -5,7 +5,6 @@ import re
 import time
 from dataclasses import dataclass
 from decimal import ROUND_HALF_UP, Decimal
-from difflib import SequenceMatcher
 
 import httpx
 
@@ -165,8 +164,8 @@ class ClassificationModelService:
                 }
             },
         }
-        if self.settings.classification_model.startswith("gpt-5.6"):
-            payload["reasoning"] = {"effort": "none"}
+        if self.settings.classification_model_reasoning_effort is not None:
+            payload["reasoning"] = {"effort": self.settings.classification_model_reasoning_effort}
         started = time.monotonic()
         try:
             if self.client is not None:
@@ -372,11 +371,7 @@ def _looks_entity_specific(
             continue
         proposed_tokens = set(proposed.split())
         signature_tokens = set(signature.split())
-        if (
-            proposed == signature
-            or SequenceMatcher(None, proposed, signature).ratio() >= 0.92
-            or signature_tokens.issubset(proposed_tokens)
-        ):
+        if proposed == signature or signature_tokens.issubset(proposed_tokens):
             return True
     return False
 

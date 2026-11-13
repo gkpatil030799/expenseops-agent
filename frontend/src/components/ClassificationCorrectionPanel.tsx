@@ -336,7 +336,7 @@ export function ClassificationCorrectionPanel({
     setSuccess(null);
     try {
       const target = value.kind === "receipt-line" ? "receipt-lines" : "transactions";
-      await api<{ applied: boolean; reason: string; version: number | null }>(
+      await api<{ applied: boolean; reason: string }>(
         `/api/classification/${target}/${value.row.public_id}`,
         {
           method: "PATCH",
@@ -527,18 +527,14 @@ export function ClassificationCorrectionPanel({
                     </form>
                     <form className="space-y-3 rounded-lg border border-slate-200 bg-slate-50/70 p-3" onSubmit={(event) => { event.preventDefault(); void mergeConcept(); }}>
                       <div><h5 className="text-sm font-semibold text-slate-900">Merge into another concept</h5><p className="mt-1 text-xs leading-5 text-slate-600">Only semantically compatible concepts are offered. The source name remains resolvable through the taxonomy.</p></div>
-                      {selectedConcept(concepts, sourceConceptId)?.can_merge_as_source ? (
-                        <>
-                          <label className="grid gap-1 text-xs font-medium text-slate-700">
-                            Keep this target concept
-                            <select className={controlClass} value={targetConceptId} onChange={(event) => setTargetConceptId(event.target.value)}>
-                              <option value="">Choose a compatible target…</option>
-                              {compatibleMergeTargets(concepts, sourceConceptId).map((concept) => <option key={concept.id} value={concept.id}>{conceptOptionLabel(concept)}</option>)}
-                            </select>
-                          </label>
-                          <Button type="submit" size="sm" variant="outline" disabled={!targetConceptId || conceptSaving !== null}>{conceptSaving === "merge" ? "Merging…" : "Merge concepts"}</Button>
-                        </>
-                      ) : <p className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-950">This concept cannot be merged safely until its current classifications are corrected.</p>}
+                      <label className="grid gap-1 text-xs font-medium text-slate-700">
+                        Keep this target concept
+                        <select className={controlClass} value={targetConceptId} onChange={(event) => setTargetConceptId(event.target.value)}>
+                          <option value="">Choose a compatible target…</option>
+                          {compatibleMergeTargets(concepts, sourceConceptId).map((concept) => <option key={concept.id} value={concept.id}>{conceptOptionLabel(concept)}</option>)}
+                        </select>
+                      </label>
+                      <Button type="submit" size="sm" variant="outline" disabled={!targetConceptId || conceptSaving !== null}>{conceptSaving === "merge" ? "Merging…" : "Merge concepts"}</Button>
                     </form>
                   </div>
                 ) : null}

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import math
 import re
 import statistics
@@ -22,6 +23,18 @@ from app.models import (
     ReplenishmentPrediction,
     utc_now,
 )
+
+
+def logical_purchase_key(workspace_id: int, receipt_item_id: int) -> str:
+    """Deterministic idempotency key for one receipt item's acquisition.
+
+    Hashed (not the plain formatted string) so the result is always exactly
+    64 characters -- the fixed length the `String(64)` column and
+    ``_release_logical_key``'s truncate-and-suffix void-rename both rely on.
+    """
+
+    identity = f"receipt-item|{workspace_id}|{receipt_item_id}"
+    return hashlib.sha256(identity.encode("utf-8")).hexdigest()
 
 
 def _aware(value: datetime) -> datetime:
